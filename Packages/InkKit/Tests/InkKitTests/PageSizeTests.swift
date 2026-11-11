@@ -155,3 +155,45 @@ struct ViewTransformFittingTests {
         #expect(abs(back.x - p.x) < 1e-9 && abs(back.y - p.y) < 1e-9)
     }
 }
+
+@Suite("Zoom limits")
+struct ZoomLimitTests {
+    @Test func zoomOutStopsAtWholePage() {
+        #expect(ViewTransform.zoomRange(fitScale: 1.4).lowerBound == 1.4)
+        #expect(ViewTransform.zoomRange(fitScale: 0.05).lowerBound == 0.05)
+    }
+
+    @Test func zoomInStopsAtSixTimesFit() {
+        #expect(ViewTransform.zoomRange(fitScale: 1.5).upperBound == 9)
+        #expect(ViewTransform.zoomRange(fitScale: 20).upperBound == 120)
+    }
+
+    @Test func largePagesCanStillZoomToSixTimesActualSize() {
+        // A 200 in page fits at a tiny scale; six times that would still be unreadable.
+        #expect(ViewTransform.zoomRange(fitScale: 0.07).upperBound == 6)
+    }
+
+    @Test func badFitScaleFallsBack() {
+        #expect(ViewTransform.zoomRange(fitScale: 0) == 1...6)
+        #expect(ViewTransform.zoomRange(fitScale: .infinity) == 1...6)
+    }
+
+    @Test func fittingNoLongerClampsVeryLargeOrSmallPages() {
+        let view = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let huge = CGRect(x: 0, y: 0, width: 14_400, height: 14_400)   // 200 in square
+        let scale = ViewTransform.fitting(page: huge, in: view,
+                                          scaleRange: .leastNonzeroMagnitude...(.greatestFiniteMagnitude)).scale
+        #expect(abs(scale - 1000 / 14_400) < 1e-9)
+    }
+
+    @Test func recentringOnlyNearTheZoomOutLimit() {
+        let fit: CGFloat = 2
+        // Zooming in, or zooming out well above the band, leaves the page where the pinch put it.
+        #expect(ViewTransform.recentringAmount(from: 2.2, to: 2.4, fitScale: fit) == 0)
+        #expect(ViewTransform.recentringAmount(from: 6, to: 4, fitScale: fit) == 0)
+        // Halfway down the band closes half the gap; reaching the limit closes all of it.
+        #expect(ViewTransform.recentringAmount(from: 2.5, to: 2.25, fitScale: fit) == 0.5)
+        #expect(ViewTransform.recentringAmount(from: 2.25, to: 2, fitScale: fit) == 1)
+        #expect(ViewTransform.recentringAmount(from: 2, to: 2, fitScale: fit) == 1)
+    }
+}
