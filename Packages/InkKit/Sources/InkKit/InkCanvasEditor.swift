@@ -16,6 +16,11 @@ public struct InkCanvasEditor: View {
 
     @StateObject private var controller = CanvasController()
     @StateObject private var telemetry = PencilTelemetry()
+    /// The side the next page slides in from when the canvas is swiped.
+    @State private var pageTransitionEdge: Edge = .trailing
+    /// True while a swiped page is sliding in. Further swipes wait: starting a second slide mid-way can
+    /// leave the page stuck part-way across the screen.
+    @State private var isTurningPage = false
 
     /// A multi-page editor.
     public init(notebook: InkNotebook, showsDebugHUD: Bool = false) {
@@ -36,6 +41,7 @@ public struct InkCanvasEditor: View {
             // A fresh canvas view per page: each CanvasView is bound to one document.
             CanvasRepresentable(controller: controller, telemetry: telemetry, document: notebook.currentPage)
                 .id(notebook.currentPage.id)
+                .transition(.push(from: pageTransitionEdge))
                 .ignoresSafeArea()
 
             VStack {
@@ -58,7 +64,29 @@ public struct InkCanvasEditor: View {
                     .ignoresSafeArea()
             }
         }
-        .onAppear { controller.hudVisible = showsDebugHUD }
+        .onAppear {
+            controller.hudVisible = showsDebugHUD
+            controller.onSwipeToPage = { [notebook] swipe in turnPage(swipe, in: notebook) }
+            controller.canSwipeToPage = { [notebook] swipe in canTurnPage(swipe, in: notebook) }
+        }
+    }
+
+    /// Swiping left shows the next page and swiping right the previous one, sliding the new page in
+    /// from the side the finger came from. Swiping past the first or last page does nothing.
+    private func canTurnPage(_ swipe: PageSwipe, in notebook: InkNotebook) -> Bool {
+        !isTurningPage && (swipe == .next ? notebook.canGoToNextPage : notebook.canGoToPreviousPage)
+    }
+
+    private func turnPage(_ swipe: PageSwipe, in notebook: InkNotebook) {
+        guard canTurnPage(swipe, in: notebook) else { return }
+        let next = swipe == .next
+        pageTransitionEdge = next ? .trailing : .leading
+        isTurningPage = true
+        withAnimation(.snappy(duration: 0.3), completionCriteria: .removed) {
+            next ? notebook.goToNextPage() : notebook.goToPreviousPage()
+        } completion: {
+            isTurningPage = false
+        }
     }
 }
 

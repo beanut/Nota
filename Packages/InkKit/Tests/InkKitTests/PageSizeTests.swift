@@ -197,3 +197,36 @@ struct ZoomLimitTests {
         #expect(ViewTransform.recentringAmount(from: 2, to: 2, fitScale: fit) == 1)
     }
 }
+
+@Suite("Page swipes")
+struct PageSwipeTests {
+    let width: CGFloat = 1000
+
+    @Test func longSidewaysDragsTurnThePage() {
+        #expect(PageSwipe.detect(translation: CGPoint(x: -300, y: 20), velocity: .zero, viewWidth: width) == .next)
+        #expect(PageSwipe.detect(translation: CGPoint(x: 300, y: -20), velocity: .zero, viewWidth: width) == .previous)
+    }
+
+    @Test func quickFlicksTurnThePage() {
+        #expect(PageSwipe.detect(translation: CGPoint(x: -60, y: 5), velocity: CGPoint(x: -900, y: 0), viewWidth: width) == .next)
+        #expect(PageSwipe.detect(translation: CGPoint(x: 60, y: 5), velocity: CGPoint(x: 900, y: 0), viewWidth: width) == .previous)
+    }
+
+    @Test func shortSlowDragsDoNothing() {
+        #expect(PageSwipe.detect(translation: CGPoint(x: -150, y: 0), velocity: CGPoint(x: -200, y: 0), viewWidth: width) == nil)
+        #expect(PageSwipe.detect(translation: CGPoint(x: -20, y: 0), velocity: CGPoint(x: -2000, y: 0), viewWidth: width) == nil)
+    }
+
+    @Test func mostlyVerticalDragsDoNothing() {
+        #expect(PageSwipe.detect(translation: CGPoint(x: -300, y: 250), velocity: .zero, viewWidth: width) == nil)
+    }
+
+    @Test func flickBackAgainstTheDragDoesNothing() {
+        // Dragged left, then flicked back right before lifting: the user changed their mind.
+        #expect(PageSwipe.detect(translation: CGPoint(x: -100, y: 0), velocity: CGPoint(x: 900, y: 0), viewWidth: width) == nil)
+    }
+
+    @Test func emptyViewDoesNothing() {
+        #expect(PageSwipe.detect(translation: CGPoint(x: -300, y: 0), velocity: .zero, viewWidth: 0) == nil)
+    }
+}

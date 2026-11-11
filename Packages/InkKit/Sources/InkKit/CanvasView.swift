@@ -56,6 +56,24 @@ struct ViewTransform: Equatable {
     }
 }
 
+/// A horizontal swipe that turns the page.
+enum PageSwipe: Equatable {
+    case next, previous
+
+    /// The page turn a finished pan asks for, if any. `translation` is the pan's total movement and
+    /// `velocity` its speed when the fingers lifted, both in view points. A swipe has to be mostly
+    /// sideways and either travel a quarter of `viewWidth` or be a quick flick. Swiping left (the page
+    /// moving left) shows the next page.
+    static func detect(translation: CGPoint, velocity: CGPoint, viewWidth: CGFloat) -> PageSwipe? {
+        let dx = translation.x, dy = translation.y
+        guard viewWidth > 0, abs(dx) > abs(dy) * 1.5 else { return nil }
+        let farEnough = abs(dx) > viewWidth * 0.25
+        let flicked = abs(dx) > 40 && abs(velocity.x) > 600 && velocity.x.sign == dx.sign
+        guard farEnough || flicked else { return nil }
+        return dx < 0 ? .next : .previous
+    }
+}
+
 /// Raw-touch drawing surface.
 ///
 /// Layers, bottom to top:
@@ -85,6 +103,16 @@ final class CanvasView: UIView {
     private var gestureStartTransform = ViewTransform()
     private var activeGestureCount = 0
     private var didTransformInTouchSequence = false
+    /// Most fingers down at once since the last time none were; a three-finger swipe is undo/redo, not a page turn.
+    private var maxDirectTouchesInSequence = 0
+    private var didPinchInSequence = false
+    /// Total movement of the current pan, for page swipes (the recognizer's translation is reset every frame).
+    private var panTranslation = CGPoint.zero
+    /// Drives the short slide back to the fitted page after a swipe that didn't turn the page.
+    private var settleLink: CADisplayLink?
+    private var settleFrom = ViewTransform()
+    private var settleTo = ViewTransform()
+    private var settleStart: CFTimeInterval = 0
     private var isCancellingGesture = false
 
     private let pageLayer = CALayer()
@@ -789,6 +817,13 @@ final class CanvasView: UIView {
             gestureStartTransform = viewTransform
             didTransformInTouchSequence = false
         }
+        if settleLink != nil { finishSettling() }   // never draw on a page that's still sliding
+        if priorDirectTouches == 0 {
+            maxDirectTouchesInSequence = 0
+            didPinchInSequence = false
+        }
+        let directTouches = priorDirectTouches + touches.filter { $0.type == .direct }.count
+        maxDirectTouchesInSequence = max(maxDirectTouchesInSequence, directTouches)
         for touch in touches {
             guard isDrawingTouch(touch, event: event) else { continue }
             guard activeTouch == nil, activeGestureCount == 0 else { continue }
@@ -1179,6 +1214,7 @@ final class CanvasView: UIView {
     }
 
     private func gestureBegan() {
+        finishSettling()
         if activeGestureCount == 0 && !didTransformInTouchSequence {
             gestureStartTransform = viewTransform
         }
@@ -1207,13 +1243,21 @@ final class CanvasView: UIView {
     @objc private func handlePan(_ g: UIPanGestureRecognizer) {
         switch g.state {
         case .began, .changed:
-            if g.state == .began { gestureBegan() }
+            if g.state == .began {
+                gestureBegan()
+                panTranslation = .zero
+            }
             let t = g.translation(in: self)
             viewTransform.offset.x += t.x
             viewTransform.offset.y += t.y
+            panTranslation.x += t.x
+            panTranslation.y += t.y
             g.setTranslation(.zero, in: self)
             transformDidChange()
-        case .ended, .cancelled, .failed:
+        case .ended:
+            gestureEnded()
+            if !turnPageIfSwiped(velocity: g.velocity(in: self)) { settleIfFitted() }
+        case .cancelled, .failed:
             gestureEnded()
         default:
             break
@@ -1229,6 +1273,7 @@ final class CanvasView: UIView {
             let range = ViewTransform.zoomRange(fitScale: fitted.scale)
             let newScale = min(max(viewTransform.scale * g.scale, range.lowerBound), range.upperBound)
             let oldScale = viewTransform.scale
+            if abs(g.scale - 1) > 0.01 { didPinchInSequence = true }
             let k = newScale / oldScale
             // Zoom about the pinch centroid: keep the canvas point under it fixed.
             viewTransform.offset = CGPoint(x: focus.x - (focus.x - viewTransform.offset.x) * k,
@@ -1248,6 +1293,63 @@ final class CanvasView: UIView {
         default:
             break
         }
+    }
+
+    /// Turns the page after a sideways swipe, but only while the whole page is in view: zoomed in, a pan
+    /// scrolls around the page instead. Pinches and three-finger swipes (undo/redo) never turn the page.
+    /// Returns whether the swipe was handed on to turn the page.
+    private func turnPageIfSwiped(velocity: CGPoint) -> Bool {
+        guard maxDirectTouchesInSequence <= 2, !didPinchInSequence, isAtFittedZoom,
+              let swipe = PageSwipe.detect(translation: panTranslation, velocity: velocity, viewWidth: bounds.width),
+              let controller, controller.canSwipe(swipe)
+        else { return false }
+        controller.swipeToPage(swipe)
+        return true
+    }
+
+    private var isAtFittedZoom: Bool { viewTransform.scale <= fittedTransform().scale * 1.02 }
+
+    /// While the whole page is in view there's nothing to pan to, so a drag that didn't turn the page
+    /// (too short, or past the first or last page) slides the page back to the centre.
+    private func settleIfFitted() {
+        guard isAtFittedZoom, activeGestureCount == 0 else { return }
+        let target = fittedTransform()
+        guard target != viewTransform else { return }
+        settleLink?.invalidate()
+        settleFrom = viewTransform
+        settleTo = target
+        settleStart = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(stepSettling(_:)))
+        link.add(to: .main, forMode: .common)
+        settleLink = link
+    }
+
+    @objc private func stepSettling(_ link: CADisplayLink) {
+        let t = min((CACurrentMediaTime() - settleStart) / 0.25, 1)
+        let e = 1 - pow(1 - t, 3)   // ease out
+        viewTransform = ViewTransform(
+            scale: settleFrom.scale + (settleTo.scale - settleFrom.scale) * e,
+            offset: CGPoint(x: settleFrom.offset.x + (settleTo.offset.x - settleFrom.offset.x) * e,
+                            y: settleFrom.offset.y + (settleTo.offset.y - settleFrom.offset.y) * e))
+        updateCommittedLayerTransform()
+        updatePageChrome()
+        liveView.follow(viewTransform)
+        updateLassoOverlay()
+        if t >= 1 { finishSettling() }
+    }
+
+    /// Jumps to the end of the slide back, if one is running.
+    private func finishSettling() {
+        guard let link = settleLink else { return }
+        link.invalidate()
+        settleLink = nil
+        viewTransform = settleTo
+        updateCommittedLayerTransform()
+        updatePageChrome()
+        liveView.settle(at: viewTransform)
+        updateLassoOverlay()
+        requestFullRender()
+        controller?.zoomDidChange(viewTransform.scale)
     }
 
     /// Cancels any incidental pan/pinch from multi-finger taps or swipes and restores `gestureStartTransform`.

@@ -36,6 +36,13 @@ final class CanvasController: ObservableObject {
     @Published var quickPaletteLocation: CGPoint?
 
     weak var canvas: CanvasView?
+    /// Called when the canvas is swiped sideways to turn the page. Set by the editor that owns the pages.
+    var onSwipeToPage: ((PageSwipe) -> Void)?
+    /// Whether there's a page to turn to in that direction (and no page turn already under way).
+    var canSwipeToPage: ((PageSwipe) -> Bool)?
+
+    func canSwipe(_ swipe: PageSwipe) -> Bool { canSwipeToPage?(swipe) ?? false }
+    func swipeToPage(_ swipe: PageSwipe) { onSwipeToPage?(swipe) }
 
     static func widthRange(for tool: Tool) -> ClosedRange<Double> {
         switch tool {
