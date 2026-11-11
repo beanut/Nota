@@ -33,6 +33,27 @@ struct ViewTransform: Equatable {
                              offset: CGPoint(x: available.midX - page.midX * scale,
                                              y: available.midY - page.midY * scale))
     }
+
+    /// The most a page can be zoomed in, as a multiple of the scale that fits the whole page in view.
+    static let maxZoomFactor: CGFloat = 6
+    /// The scales a page can be zoomed to, given `fitScale`, the scale that shows the whole page.
+    /// Zooming out stops at the whole page. Zooming in stops at `maxZoomFactor` × the fitted scale, or
+    /// `maxZoomFactor` × actual size if that's larger, so a very large page can still be zoomed in to write on.
+    static func zoomRange(fitScale: CGFloat) -> ClosedRange<CGFloat> {
+        guard fitScale > 0, fitScale.isFinite else { return 1...maxZoomFactor }
+        return fitScale...max(fitScale, 1) * maxZoomFactor
+    }
+
+    /// How far (0–1) to move the page towards its centred, fitted position when a pinch zooms from `old`
+    /// to `new`. Within 25% of `fitScale`, zooming out closes the gap in step with the scale, so the page
+    /// arrives centred exactly as it reaches the zoom-out limit. Zooming in, or above that band, gives 0.
+    static func recentringAmount(from old: CGFloat, to new: CGFloat, fitScale: CGFloat) -> CGFloat {
+        guard fitScale > 0 else { return 0 }
+        if new <= fitScale { return 1 }
+        let start = min(old, fitScale * 1.25)
+        guard new < start else { return 0 }
+        return (start - new) / (start - fitScale)
+    }
 }
 
 /// Raw-touch drawing surface.
@@ -47,7 +68,6 @@ final class CanvasView: UIView {
     /// The surface around the page.
     static let deskColor = UIColor { $0.userInterfaceStyle == .dark
         ? UIColor(white: 0.16, alpha: 1) : UIColor(red: 0.90, green: 0.90, blue: 0.91, alpha: 1) }
-    static let zoomRange: ClosedRange<CGFloat> = 0.25...8
     /// Space kept around the page when it's fitted to the view, on top of the safe area. The top and bottom
     /// leave room for the floating tool palette and page bar.
     static let pageMargins = UIEdgeInsets(top: 76, left: 24, bottom: 76, right: 24)
@@ -612,7 +632,7 @@ final class CanvasView: UIView {
         let insets = UIEdgeInsets(top: s.top + m.top, left: s.left + m.left,
                                   bottom: s.bottom + m.bottom, right: s.right + m.right)
         return ViewTransform.fitting(page: document.pageBounds, in: bounds, insets: insets,
-                                     scaleRange: Self.zoomRange)
+                                     scaleRange: .leastNonzeroMagnitude...(.greatestFiniteMagnitude))
     }
 
     /// The page rectangle in view coordinates at the current pan/zoom.
@@ -1205,12 +1225,22 @@ final class CanvasView: UIView {
         case .began, .changed:
             if g.state == .began { gestureBegan() }
             let focus = g.location(in: self)
-            let newScale = min(max(viewTransform.scale * g.scale, Self.zoomRange.lowerBound), Self.zoomRange.upperBound)
-            let k = newScale / viewTransform.scale
+            let fitted = fittedTransform()
+            let range = ViewTransform.zoomRange(fitScale: fitted.scale)
+            let newScale = min(max(viewTransform.scale * g.scale, range.lowerBound), range.upperBound)
+            let oldScale = viewTransform.scale
+            let k = newScale / oldScale
             // Zoom about the pinch centroid: keep the canvas point under it fixed.
             viewTransform.offset = CGPoint(x: focus.x - (focus.x - viewTransform.offset.x) * k,
                                            y: focus.y - (focus.y - viewTransform.offset.y) * k)
             viewTransform.scale = newScale
+            // Near the zoom-out limit, ease the page back to the centre so it lands exactly on the fitted
+            // view rather than stopping wherever the pinch left it.
+            let pull = ViewTransform.recentringAmount(from: oldScale, to: newScale, fitScale: fitted.scale)
+            if pull > 0 {
+                viewTransform.offset = CGPoint(x: viewTransform.offset.x + (fitted.offset.x - viewTransform.offset.x) * pull,
+                                               y: viewTransform.offset.y + (fitted.offset.y - viewTransform.offset.y) * pull)
+            }
             g.scale = 1
             transformDidChange()
         case .ended, .cancelled, .failed:
