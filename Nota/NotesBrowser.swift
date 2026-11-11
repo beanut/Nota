@@ -60,18 +60,16 @@ struct NotesBrowser: View {
     var body: some View {
         let notes = visibleNotes
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                filterBar
-
-                LazyVGrid(columns: columns, alignment: .leading, spacing: 28) {
-                    ForEach(notes) { note in
-                        card(for: note)
-                    }
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 28) {
+                ForEach(notes) { note in
+                    card(for: note)
                 }
             }
             .padding(.horizontal, 24)
+            .padding(.top, 8)
             .padding(.bottom, 32)
         }
+        .safeAreaInset(edge: .top, spacing: 0) { stickyFilterBar }
         .scrollDismissesKeyboard(.immediately)
         .background(Color(.systemGroupedBackground))
         .overlay {
@@ -110,19 +108,30 @@ struct NotesBrowser: View {
 
     // MARK: Pieces
 
+    /// Pinned above the scrolling grid. On iOS 26+ the pills are Liquid Glass; earlier systems get
+    /// the classic bordered chips on a bar material.
+    @ViewBuilder
+    private var stickyFilterBar: some View {
+        if #available(iOS 26, *) {
+            GlassEffectContainer(spacing: 8) {
+                filterBar
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            filterBar
+                .padding(.horizontal, 24)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.bar)
+        }
+    }
+
     private var filterBar: some View {
         HStack(spacing: 8) {
             ForEach(LibraryFilter.allCases) { option in
-                if option == filter {
-                    Button(option.title) { filter = option }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Color(.label))
-                        .foregroundStyle(Color(.systemBackground))
-                } else {
-                    Button(option.title) { filter = option }
-                        .buttonStyle(.bordered)
-                        .tint(.primary)
-                }
+                filterButton(option)
             }
         }
         .font(.subheadline.weight(.semibold))
@@ -130,6 +139,32 @@ struct NotesBrowser: View {
         .animation(.snappy, value: filter)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Filter")
+    }
+
+    @ViewBuilder
+    private func filterButton(_ option: LibraryFilter) -> some View {
+        let isSelected = option == filter
+        if #available(iOS 26, *) {
+            if isSelected {
+                Button(option.title) { filter = option }
+                    .buttonStyle(.glassProminent)
+                    .tint(Color(.label))
+                    .foregroundStyle(Color(.systemBackground))
+            } else {
+                Button(option.title) { filter = option }
+                    .buttonStyle(.glass)
+                    .tint(.primary)
+            }
+        } else if isSelected {
+            Button(option.title) { filter = option }
+                .buttonStyle(.borderedProminent)
+                .tint(Color(.label))
+                .foregroundStyle(Color(.systemBackground))
+        } else {
+            Button(option.title) { filter = option }
+                .buttonStyle(.bordered)
+                .tint(.primary)
+        }
     }
 
     @ViewBuilder
