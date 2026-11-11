@@ -5,18 +5,24 @@ import SwiftUI
 struct NoteEditorView: View {
     @Bindable var note: Note
     @Environment(InkStore.self) private var inkStore
-    @State private var strokeCountOnOpen = 0
+    @State private var inkOnOpen: [Int] = []
 
     var body: some View {
-        let document = inkStore.document(for: note.id)
-        InkCanvasEditor(document: document)
+        let notebook = inkStore.notebook(for: note.id, pageCount: note.pageCount)
+        InkCanvasEditor(notebook: notebook)
             .navigationTitle($note.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarRole(.editor)
             .toolbarBackground(.visible, for: .navigationBar)
-            .onAppear { strokeCountOnOpen = document.strokeCount }
+            .onAppear { inkOnOpen = notebook.pages.map(\.strokeCount) }
+            .onReceive(notebook.$pages) { pages in
+                if note.pageCount != pages.count {
+                    note.pageCount = pages.count
+                    note.modifiedAt = .now
+                }
+            }
             .onDisappear {
-                if document.strokeCount != strokeCountOnOpen { note.modifiedAt = .now }
+                if notebook.pages.map(\.strokeCount) != inkOnOpen { note.modifiedAt = .now }
             }
     }
 }

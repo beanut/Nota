@@ -9,5 +9,6 @@ let package = Package(
     ],
     targets: [
         .target(name: "InkKit"),
+        .testTarget(name: "InkKitTests", dependencies: ["InkKit"]),
     ]
 )

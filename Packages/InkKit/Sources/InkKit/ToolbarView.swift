@@ -67,7 +67,7 @@ struct ToolbarView: View {
                     .frame(minWidth: 44, minHeight: 36)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Reset zoom")
+            .accessibilityLabel("Fit page")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

@@ -15,6 +15,24 @@ struct ViewTransform: Equatable {
     func toCanvas(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - offset.x) / scale, y: (p.y - offset.y) / scale) }
     func toView(_ r: CGRect) -> CGRect { r.isNull ? r : r.applying(affine) }
     func toCanvas(_ r: CGRect) -> CGRect { r.isNull ? r : r.applying(affine.inverted()) }
+
+    /// The transform that shows all of `page` (canvas space) as large as possible inside `bounds` minus
+    /// `insets`, centred. Scale is clamped to `scaleRange`. Empty inputs give the identity.
+    static func fitting(page: CGRect, in bounds: CGRect, insets: UIEdgeInsets = .zero,
+                        scaleRange: ClosedRange<CGFloat> = 0.25...8) -> ViewTransform {
+        // Not `bounds.inset(by:)`: a rect inset past empty is standardized to a positive size.
+        let available = CGRect(x: bounds.minX + insets.left, y: bounds.minY + insets.top,
+                               width: bounds.width - insets.left - insets.right,
+                               height: bounds.height - insets.top - insets.bottom)
+        guard page.width > 0, page.height > 0, available.size.width > 0, available.size.height > 0 else {
+            return ViewTransform()
+        }
+        let fit = min(available.width / page.width, available.height / page.height)
+        let scale = min(max(fit, scaleRange.lowerBound), scaleRange.upperBound)
+        return ViewTransform(scale: scale,
+                             offset: CGPoint(x: available.midX - page.midX * scale,
+                                             y: available.midY - page.midY * scale))
+    }
 }
 
 /// Raw-touch drawing surface.
@@ -26,6 +44,13 @@ struct ViewTransform: Equatable {
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
 final class CanvasView: UIView {
     static let paperColor = UIColor(red: 0.988, green: 0.984, blue: 0.97, alpha: 1)
+    /// The surface around the page.
+    static let deskColor = UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(white: 0.16, alpha: 1) : UIColor(red: 0.90, green: 0.90, blue: 0.91, alpha: 1) }
+    static let zoomRange: ClosedRange<CGFloat> = 0.25...8
+    /// Space kept around the page when it's fitted to the view, on top of the safe area. The top and bottom
+    /// leave room for the floating tool palette and page bar.
+    static let pageMargins = UIEdgeInsets(top: 76, left: 24, bottom: 76, right: 24)
 
     let document: CanvasDocument
     weak var controller: CanvasController?
@@ -42,6 +67,11 @@ final class CanvasView: UIView {
     private var didTransformInTouchSequence = false
     private var isCancellingGesture = false
 
+    private let pageLayer = CALayer()
+    /// Holds the ink layers; masked to the page so strokes running off the edge are clipped.
+    private let inkClipView = UIView()
+    private let inkMask = CAShapeLayer()
+    private var fittedBoundsSize = CGSize.zero
     private let committedLayer = CALayer()
     private let liveView = LiveInkView()
     private let renderQueue = DispatchQueue(label: "InkCanvas.render", qos: .userInteractive)
@@ -108,15 +138,27 @@ final class CanvasView: UIView {
     init(frame: CGRect, document: CanvasDocument) {
         self.document = document
         super.init(frame: frame)
-        backgroundColor = Self.paperColor
+        backgroundColor = Self.deskColor
         isMultipleTouchEnabled = true
 
+        pageLayer.backgroundColor = Self.paperColor.cgColor
+        pageLayer.shadowColor = UIColor.black.cgColor
+        pageLayer.shadowOpacity = 0.18
+        pageLayer.shadowRadius = 6
+        pageLayer.shadowOffset = CGSize(width: 0, height: 2)
+        layer.addSublayer(pageLayer)
+
+        inkClipView.isUserInteractionEnabled = false
+        inkClipView.backgroundColor = .clear
+        inkClipView.layer.mask = inkMask
+        addSubview(inkClipView)
+
         committedLayer.anchorPoint = .zero
-        layer.addSublayer(committedLayer)
+        inkClipView.layer.addSublayer(committedLayer)
 
         liveView.paperColor = Self.paperColor.cgColor
         liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
-        addSubview(liveView)
+        inkClipView.addSubview(liveView)
 
         lassoOverlayView.canvas = self
         addSubview(lassoOverlayView)
@@ -130,6 +172,7 @@ final class CanvasView: UIView {
             guard let self else { return }
             self.controller?.documentDidChange(canUndo: self.document.canUndo, canRedo: self.document.canRedo)
         }
+        document.onPageSizeChange = { [weak self] in self?.resetView() }
     }
 
     @available(*, unavailable)
@@ -147,8 +190,18 @@ final class CanvasView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        inkClipView.frame = bounds
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
+        if bounds.size != fittedBoundsSize, bounds.width > 0, bounds.height > 0 {
+            // First layout or a rotation / split-view resize: show the whole page again.
+            fittedBoundsSize = bounds.size
+            viewTransform = fittedTransform()
+            liveView.settle(at: viewTransform)
+            updateCommittedLayerTransform()
+            controller?.zoomDidChange(viewTransform.scale)
+        }
+        updatePageChrome()
         let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
         let pixels = CGSize(width: (bounds.width * scale).rounded(.up), height: (bounds.height * scale).rounded(.up))
         guard pixels != bitmapPixelSize || scale != bitmapScale else { return }
@@ -542,11 +595,45 @@ final class CanvasView: UIView {
     }
 
     func resetView() {
-        viewTransform = ViewTransform()
+        viewTransform = fittedTransform()
         liveView.settle(at: viewTransform)
+        updateCommittedLayerTransform()
+        updatePageChrome()
         updateLassoOverlay()
         requestFullRender()
         controller?.zoomDidChange(viewTransform.scale)
+    }
+
+    // MARK: - Page
+
+    /// The transform that fits the whole page between the margins.
+    func fittedTransform() -> ViewTransform {
+        let s = safeAreaInsets, m = Self.pageMargins
+        let insets = UIEdgeInsets(top: s.top + m.top, left: s.left + m.left,
+                                  bottom: s.bottom + m.bottom, right: s.right + m.right)
+        return ViewTransform.fitting(page: document.pageBounds, in: bounds, insets: insets,
+                                     scaleRange: Self.zoomRange)
+    }
+
+    /// The page rectangle in view coordinates at the current pan/zoom.
+    var pageFrameInView: CGRect { viewTransform.toView(document.pageBounds) }
+
+    /// Moves the paper and the ink clip to follow the page.
+    private func updatePageChrome() {
+        let frame = pageFrameInView
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pageLayer.frame = frame
+        pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
+        inkMask.frame = inkClipView.bounds
+        inkMask.path = CGPath(rect: frame, transform: nil)
+        CATransaction.commit()
+    }
+
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        fittedBoundsSize = .zero   // refit with the new insets on the next layout
+        setNeedsLayout()
     }
 
     // MARK: - Lasso
@@ -686,7 +773,7 @@ final class CanvasView: UIView {
             guard isDrawingTouch(touch, event: event) else { continue }
             guard activeTouch == nil, activeGestureCount == 0 else { continue }
             activeTouch = touch
-            beginStroke()
+            beginStroke(at: viewTransform.toCanvas(touch.preciseLocation(in: self)))
             ingest(touch, event: event, final: false)
         }
         updateFingerState(event)
@@ -785,7 +872,9 @@ final class CanvasView: UIView {
         schedulePendingCommit()
     }
 
-    private func beginStroke() {
+    /// `start` is the touch-down point in canvas space. Ink only starts on the page; erasing and the
+    /// lasso work from anywhere, since they may need to reach strokes hanging off the edge.
+    private func beginStroke(at start: CGPoint) {
         guard let controller else { return }
         if pendingEstimates.count > 1024 {
             pendingEstimates.removeAll()
@@ -799,7 +888,7 @@ final class CanvasView: UIView {
             lassoPending = true
         } else if controller.tool == .eraser && controller.eraserMode == .stroke {
             eraseSession = EraseSession()
-        } else {
+        } else if controller.tool == .eraser || document.contains(start) {
             let (kind, color, style) = controller.strokeTemplate(viewScale: viewTransform.scale)
             live = LiveStroke(stroke: Stroke(id: UUID(), tool: kind, color: color, style: style, points: []))
         }
@@ -1088,6 +1177,7 @@ final class CanvasView: UIView {
     private func transformDidChange() {
         didTransformInTouchSequence = true
         updateCommittedLayerTransform()
+        updatePageChrome()
         liveView.follow(viewTransform)
         updateLassoOverlay()
         requestFullRender()
@@ -1115,7 +1205,7 @@ final class CanvasView: UIView {
         case .began, .changed:
             if g.state == .began { gestureBegan() }
             let focus = g.location(in: self)
-            let newScale = min(max(viewTransform.scale * g.scale, 0.25), 8)
+            let newScale = min(max(viewTransform.scale * g.scale, Self.zoomRange.lowerBound), Self.zoomRange.upperBound)
             let k = newScale / viewTransform.scale
             // Zoom about the pinch centroid: keep the canvas point under it fixed.
             viewTransform.offset = CGPoint(x: focus.x - (focus.x - viewTransform.offset.x) * k,
@@ -1145,6 +1235,7 @@ final class CanvasView: UIView {
         viewTransform = gestureStartTransform
         generation &+= 1
         updateCommittedLayerTransform()
+        updatePageChrome()
         liveView.settle(at: viewTransform)
         controller?.zoomDidChange(viewTransform.scale)
         return bitmapTransform != viewTransform || displayedTransform != viewTransform
@@ -1368,6 +1459,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         view.controller = controller
         view.telemetry = telemetry
         controller.canvas = view
+        // A new page: the tool palette's undo and selection state must describe this document.
+        controller.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
+        controller.selectionDidChange(false)
         return view
     }
 

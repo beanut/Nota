@@ -1,10 +1,29 @@
 import CoreGraphics
 import Foundation
 
-/// Stroke list plus an undo/redo command stack.
+/// One page: its paper size, stroke list and undo/redo command stack.
 @MainActor
-public final class CanvasDocument {
-    public init() {}
+public final class CanvasDocument: Identifiable {
+    public let id: UUID
+
+    /// Paper size of the page. Strokes are kept where they are when it changes, so ink beyond the new
+    /// edge is hidden rather than deleted and comes back if the page grows again.
+    public var pageSize: PageSize {
+        didSet { if pageSize != oldValue { onPageSizeChange?() } }
+    }
+
+    /// The page in canvas space: `(0, 0)` to `(width, height)`.
+    public var pageBounds: CGRect { pageSize.bounds }
+
+    public init(pageSize: PageSize = .default, id: UUID = UUID()) {
+        self.id = id
+        self.pageSize = pageSize
+    }
+
+    /// True when `point` (canvas space) is on the page.
+    public func contains(_ point: CGPoint) -> Bool { pageBounds.contains(point) }
+
+    var onPageSizeChange: (() -> Void)?
 
     /// Number of strokes on the page (including pixel-eraser strokes).
     public var strokeCount: Int { strokes.count }
