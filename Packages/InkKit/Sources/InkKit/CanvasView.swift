@@ -1,0 +1,1375 @@
+import SwiftUI
+import UIKit
+import UIKit.UIGestureRecognizerSubclass
+
+/// Canvas → view mapping: uniform scale then translation, no rotation.
+/// Because there's no rotation, angles (azimuth) are the same in both spaces.
+struct ViewTransform: Equatable {
+    var scale: CGFloat = 1
+    var offset: CGPoint = .zero
+
+    var affine: CGAffineTransform {
+        CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: offset.x, ty: offset.y)
+    }
+    func toView(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * scale + offset.x, y: p.y * scale + offset.y) }
+    func toCanvas(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - offset.x) / scale, y: (p.y - offset.y) / scale) }
+    func toView(_ r: CGRect) -> CGRect { r.isNull ? r : r.applying(affine) }
+    func toCanvas(_ r: CGRect) -> CGRect { r.isNull ? r : r.applying(affine.inverted()) }
+}
+
+/// Raw-touch drawing surface.
+///
+/// Layers, bottom to top:
+///  1. `committedLayer` – cached bitmap of finished strokes rasterized asynchronously on `renderQueue`
+///     via coalesced, non-blocking full re-renders and incremental commits.
+///  2. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
+///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
+final class CanvasView: UIView {
+    static let paperColor = UIColor(red: 0.988, green: 0.984, blue: 0.97, alpha: 1)
+
+    let document: CanvasDocument
+    weak var controller: CanvasController?
+    weak var telemetry: PencilTelemetry?
+
+    private(set) var viewTransform = ViewTransform()
+    private var bitmapTransform = ViewTransform()     // transform the bitmap is / will be rendered at once queued jobs run; pending strokes draw with this
+    private var displayedTransform = ViewTransform()  // transform of the image currently in committedLayer.contents
+    private var fullRenderInFlight = false
+    private var fullRenderRequested = false
+    private var modifiedSinceSnapshot = Set<UUID>()
+    private var gestureStartTransform = ViewTransform()
+    private var activeGestureCount = 0
+    private var didTransformInTouchSequence = false
+    private var isCancellingGesture = false
+
+    private let committedLayer = CALayer()
+    private let liveView = LiveInkView()
+    private let renderQueue = DispatchQueue(label: "InkCanvas.render", qos: .userInteractive)
+    private var generation: UInt64 = 0
+    private var bitmap: CGContext?
+    private var bitmapPixelSize = CGSize.zero
+    private var bitmapScale: CGFloat = 2
+    private var geometryCache: [UUID: StrokeGeometry] = [:]
+
+    private final class PendingStroke {
+        var live: LiveStroke
+        var geometry: StrokeGeometry
+        var bounds: CGRect
+        var deadline: CFTimeInterval
+        var submitted = false
+        var geometryDirty = false
+
+        init(live: LiveStroke, geometry: StrokeGeometry, deadline: CFTimeInterval, submitted: Bool = false) {
+            self.live = live
+            self.geometry = geometry
+            self.bounds = geometry.bounds
+            self.deadline = deadline
+            self.submitted = submitted
+        }
+    }
+    private var pending: [PendingStroke] = []
+    private var isCommitScheduled = false
+
+    // Input state
+    private var activeTouch: UITouch?
+    private var live: LiveStroke?
+    private var eraseSession: EraseSession?
+    private struct EraseSession {
+        var removals: [CanvasDocument.Removal] = []
+        var last: CGPoint?
+    }
+    // Lasso state
+    private enum LassoSession {
+        case drawing([CGPoint])                       // canvas-space gesture path
+        case moving(last: CGPoint, total: CGPoint)    // dragging the current selection
+    }
+    private var lassoPending = false                  // lasso touch began, first sample not yet seen
+    private var lassoSession: LassoSession?
+    private var selection = Set<UUID>()
+    private var selectionBounds = CGRect.null         // canvas space
+    private let lassoOverlayView = LassoOverlayView()
+    private struct PointRef { let strokeID: UUID; let index: Int }
+    private var pendingEstimates: [NSNumber: PointRef] = [:]
+    private var outstandingEstimates: [UUID: Int] = [:]
+    private var hoverActive = false
+
+    // HUD
+    private var hud = PencilTelemetry.Snapshot()
+    private var sampleRate = RateCounter()
+    private var eventRate = RateCounter()
+
+    #if targetEnvironment(simulator)
+    private var simPrevious: (location: CGPoint, time: TimeInterval, force: CGFloat)?
+    #endif
+
+    private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+    private lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+
+    init(frame: CGRect, document: CanvasDocument) {
+        self.document = document
+        super.init(frame: frame)
+        backgroundColor = Self.paperColor
+        isMultipleTouchEnabled = true
+
+        committedLayer.anchorPoint = .zero
+        layer.addSublayer(committedLayer)
+
+        liveView.paperColor = Self.paperColor.cgColor
+        liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
+        addSubview(liveView)
+
+        lassoOverlayView.canvas = self
+        addSubview(lassoOverlayView)
+
+        setUpGestures()
+        let pencil = UIPencilInteraction()
+        pencil.delegate = self
+        addInteraction(pencil)
+
+        document.onChange = { [weak self] in
+            guard let self else { return }
+            self.controller?.documentDidChange(canUndo: self.document.canUndo, canRedo: self.document.canRedo)
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    // Disable the system's three-finger undo/redo/copy gestures; we drive undo ourselves.
+    override var canBecomeFirstResponder: Bool { true }
+    override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else { return }
+        DispatchQueue.main.async { [weak self] in _ = self?.becomeFirstResponder() }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        liveView.frame = bounds
+        lassoOverlayView.frame = bounds
+        let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
+        let pixels = CGSize(width: (bounds.width * scale).rounded(.up), height: (bounds.height * scale).rounded(.up))
+        guard pixels != bitmapPixelSize || scale != bitmapScale else { return }
+        bitmapPixelSize = pixels
+        bitmapScale = scale
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        committedLayer.bounds = bounds
+        committedLayer.position = .zero
+        committedLayer.contentsScale = scale
+        CATransaction.commit()
+        makeBitmap()
+        requestFullRender()
+    }
+
+    // MARK: - Committed bitmap
+
+    private func makeBitmap() {
+        let pixelSize = bitmapPixelSize
+        let scale = bitmapScale
+        renderQueue.sync {
+            guard pixelSize.width > 0, pixelSize.height > 0,
+                  let space = CGColorSpace(name: CGColorSpace.sRGB),
+                  let ctx = CGContext(data: nil,
+                                      width: Int(pixelSize.width),
+                                      height: Int(pixelSize.height),
+                                      bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                          | CGBitmapInfo.byteOrder32Little.rawValue)
+            else { self.bitmap = nil; return }
+            // Flip to UIKit's top-left origin and scale so the bitmap is addressed in view points.
+            ctx.translateBy(x: 0, y: pixelSize.height)
+            ctx.scaleBy(x: scale, y: -scale)
+            ctx.setShouldAntialias(true)
+            self.bitmap = ctx
+        }
+    }
+
+    private func geometry(for stroke: Stroke) -> StrokeGeometry {
+        if let g = geometryCache[stroke.id] { return g }
+        let g = StrokeRenderer.geometry(for: stroke)
+        geometryCache[stroke.id] = g
+        return g
+    }
+
+    func requestFullRender() {
+        if fullRenderInFlight {
+            fullRenderRequested = true
+        } else {
+            startFullRender()
+        }
+    }
+
+    private struct RenderSnapshotItem {
+        let id: UUID
+        let kind: InkKind
+        let color: RGBA
+        let cachedGeometry: StrokeGeometry?
+        let stroke: Stroke?
+    }
+
+    private func startFullRender() {
+        generation &+= 1
+        let currentGeneration = generation
+        fullRenderInFlight = true
+        bitmapTransform = viewTransform
+        modifiedSinceSnapshot.removeAll()
+
+        let currentBounds = bounds
+        let targetTransform = bitmapTransform
+
+        let unsubmittedIDs = Set(pending.filter { !$0.submitted }.map { $0.live.stroke.id })
+        var itemsToRender: [RenderSnapshotItem] = []
+        for stroke in document.strokes {
+            guard !unsubmittedIDs.contains(stroke.id) else { continue }
+            if let cached = geometryCache[stroke.id] {
+                itemsToRender.append(RenderSnapshotItem(
+                    id: stroke.id,
+                    kind: stroke.tool,
+                    color: stroke.color,
+                    cachedGeometry: cached,
+                    stroke: nil
+                ))
+            } else {
+                itemsToRender.append(RenderSnapshotItem(
+                    id: stroke.id,
+                    kind: stroke.tool,
+                    color: stroke.color,
+                    cachedGeometry: nil,
+                    stroke: stroke
+                ))
+            }
+        }
+
+        let coveredPending = pending.filter { $0.submitted }
+
+        renderQueue.async { [weak self] in
+            guard let self else { return }
+            let visible = targetTransform.toCanvas(currentBounds)
+            var computedGeometries: [(UUID, StrokeGeometry)] = []
+
+            struct DrawItem {
+                let runs: [StrokeRun]
+                let clip: CGRect
+                let kind: InkKind
+                let color: RGBA
+            }
+            var drawItems: [DrawItem] = []
+            drawItems.reserveCapacity(itemsToRender.count)
+
+            for item in itemsToRender {
+                let geom: StrokeGeometry
+                if let cached = item.cachedGeometry {
+                    geom = cached
+                } else if let stroke = item.stroke {
+                    let computed = StrokeRenderer.geometry(for: stroke)
+                    computedGeometries.append((item.id, computed))
+                    geom = computed
+                } else {
+                    continue
+                }
+                if geom.bounds.intersects(visible) {
+                    drawItems.append(DrawItem(
+                        runs: geom.runs,
+                        clip: geom.bounds.insetBy(dx: -2, dy: -2),
+                        kind: item.kind,
+                        color: item.color
+                    ))
+                }
+            }
+
+            var image: CGImage?
+            if let ctx = self.bitmap {
+                ctx.clear(currentBounds)
+                ctx.saveGState()
+                ctx.concatenate(targetTransform.affine)
+                PencilTexture.prepareContext(ctx, phase: targetTransform.offset)
+                for item in drawItems {
+                    StrokeRenderer.draw(runs: item.runs, clip: item.clip,
+                                        kind: item.kind, color: item.color, in: ctx)
+                }
+                ctx.restoreGState()
+                image = ctx.makeImage()
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.generation == currentGeneration {
+                    if let image {
+                        self.publish(image: image, transform: targetTransform)
+                    }
+                    for (id, geom) in computedGeometries {
+                        if self.geometryCache[id] == nil && !self.modifiedSinceSnapshot.contains(id) {
+                            self.geometryCache[id] = geom
+                        }
+                    }
+                    for item in coveredPending {
+                        if let idx = self.pending.firstIndex(where: { $0 === item }) {
+                            self.pending.remove(at: idx)
+                        }
+                        self.invalidateLive(canvasRect: item.bounds)
+                    }
+                    self.liveView.invalidateAll()
+                }
+                self.fullRenderInFlight = false
+                if self.fullRenderRequested {
+                    self.fullRenderRequested = false
+                    self.startFullRender()
+                }
+            }
+        }
+    }
+
+    private func updateCommittedLayerTransform() {
+        let t: CGAffineTransform
+        if displayedTransform == viewTransform {
+            t = .identity
+        } else {
+            let k = viewTransform.scale / displayedTransform.scale
+            t = CGAffineTransform(a: k, b: 0, c: 0, d: k,
+                                  tx: viewTransform.offset.x - displayedTransform.offset.x * k,
+                                  ty: viewTransform.offset.y - displayedTransform.offset.y * k)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        committedLayer.setAffineTransform(t)
+        CATransaction.commit()
+    }
+
+    private func publish(image: CGImage, transform: ViewTransform) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        committedLayer.contents = image
+        displayedTransform = transform
+        updateCommittedLayerTransform()
+        CATransaction.commit()
+        liveView.underlay = image
+    }
+
+    private func submitPendingStroke(_ item: PendingStroke) {
+        item.submitted = true
+        let geom = item.live.geometry()
+        item.geometry = geom
+        item.bounds = geom.bounds
+        geometryCache[item.live.stroke.id] = geom
+        let runs = geom.runs
+        let bounds = geom.bounds
+        let tool = item.live.stroke.tool
+        let color = item.live.stroke.color
+        let targetTransform = bitmapTransform
+        let currentGeneration = generation
+
+        renderQueue.async { [weak self] in
+            guard let self else { return }
+            guard let ctx = self.bitmap else { return }
+            ctx.saveGState()
+            ctx.concatenate(targetTransform.affine)
+            if tool == .pencil {
+                PencilTexture.prepareContext(ctx, phase: targetTransform.offset)
+            }
+            StrokeRenderer.draw(runs: runs, clip: bounds.insetBy(dx: -2, dy: -2),
+                                kind: tool, color: color, in: ctx)
+            ctx.restoreGState()
+            let image = ctx.makeImage()
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard self.generation == currentGeneration else { return }
+                guard let image else { return }
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self.publish(image: image, transform: targetTransform)
+                if let idx = self.pending.firstIndex(where: { $0 === item }) {
+                    self.pending.remove(at: idx)
+                }
+                self.invalidateLive(canvasRect: bounds)
+                CATransaction.commit()
+            }
+        }
+    }
+
+    private func schedulePendingCommit() {
+        let now = CACurrentMediaTime()
+        var hasWaiting = false
+
+        for item in pending {
+            if item.submitted {
+                continue
+            }
+            let hasEstimates = (outstandingEstimates[item.live.stroke.id] ?? 0) > 0
+            let ready = !hasEstimates || now >= item.deadline
+            if ready {
+                submitPendingStroke(item)
+            } else {
+                hasWaiting = true
+                break
+            }
+        }
+
+        if hasWaiting && !isCommitScheduled {
+            isCommitScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+                guard let self else { return }
+                self.isCommitScheduled = false
+                self.schedulePendingCommit()
+            }
+        }
+    }
+
+    private func decrementOutstandingEstimates(for strokeID: UUID) {
+        if let count = outstandingEstimates[strokeID] {
+            if count <= 1 {
+                outstandingEstimates.removeValue(forKey: strokeID)
+            } else {
+                outstandingEstimates[strokeID] = count - 1
+            }
+        }
+    }
+
+    private func dropOrphanedPendingStrokes() {
+        let strokeIDs = Set(document.strokes.map(\.id))
+        pending.removeAll { !strokeIDs.contains($0.live.stroke.id) }
+        if !selection.isEmpty, !selection.isSubset(of: strokeIDs) {
+            selection.formIntersection(strokeIDs)
+            updateSelectionBounds()
+        }
+        liveView.invalidateAll()
+        updateLassoOverlay()
+    }
+
+    // MARK: - Live layer
+
+    /// What the live layer shows, bottom to top: pending strokes in commit order, then the active stroke.
+    private func liveEntries() -> [LiveInkView.Entry] {
+        var entries: [LiveInkView.Entry] = []
+        entries.reserveCapacity(pending.count + 1)
+        for stroke in pending.map(\.live) + (live.map { [$0] } ?? []) {
+            entries.append(LiveInkView.Entry(
+                stroke: stroke,
+                previewFill: stroke.stroke.tool == .pixelEraser ? Self.paperColor.cgColor : nil))
+        }
+        return entries
+    }
+
+    fileprivate func drawLassoOverlay(in ctx: CGContext) {
+        let accent = UIColor.systemBlue
+        if !selection.isEmpty, !selectionBounds.isNull {
+            let r = viewTransform.toView(selectionBounds).insetBy(dx: -6, dy: -6)
+            ctx.setFillColor(accent.withAlphaComponent(0.08).cgColor)
+            ctx.fill(r)
+            ctx.setStrokeColor(accent.cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.setLineDash(phase: 0, lengths: [6, 4])
+            ctx.stroke(r)
+            ctx.setLineDash(phase: 0, lengths: [])
+        }
+        if case .drawing(let pts)? = lassoSession,
+           let polygon = LassoGeometry.region(mode: controller?.lassoMode ?? .freeform, points: pts)
+            ?? (pts.count >= 2 ? pts : nil) {
+            let path = CGMutablePath()
+            path.addLines(between: polygon, transform: viewTransform.affine)
+            path.closeSubpath()
+            ctx.addPath(path)
+            ctx.setFillColor(accent.withAlphaComponent(0.10).cgColor)
+            ctx.fillPath()
+            ctx.addPath(path)
+            ctx.setStrokeColor(accent.cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.setLineDash(phase: 0, lengths: [6, 4])
+            ctx.strokePath()
+            ctx.setLineDash(phase: 0, lengths: [])
+        }
+    }
+
+    private func updateLassoOverlay() {
+        lassoOverlayView.setNeedsDisplay()
+    }
+
+    private func invalidateLive(canvasRect: CGRect) {
+        liveView.invalidate(canvasRect: canvasRect)
+    }
+
+    private func setCursor(_ path: CGPath?) {
+        liveView.setCursor(path)
+    }
+
+    private func tipOutline(at canvasPoint: CGPoint, altitude: CGFloat, azimuth: CGFloat) -> CGPath? {
+        guard let controller, controller.tool != .lasso else { return nil }
+        let path = CGMutablePath()
+        if controller.tool == .eraser {
+            let r = CGFloat(controller.current.width) / 2
+            let c = viewTransform.toView(canvasPoint)
+            path.addEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
+        } else {
+            let (_, _, style) = controller.strokeTemplate(viewScale: viewTransform.scale)
+            let sample = StrokePoint(location: canvasPoint, force: 1, altitude: altitude, azimuth: azimuth, timestamp: 0)
+            let poly = StrokeRenderer.polygon(for: StrokeRenderer.tip(for: sample, style: style))
+            path.addLines(between: poly, transform: viewTransform.affine)
+            path.closeSubpath()
+        }
+        return path
+    }
+
+    // MARK: - Commands
+
+    @discardableResult
+    func undo() -> Bool {
+        guard live == nil, lassoSession == nil, document.undo() else { return false }
+        generation &+= 1
+        invalidateMoved()
+        dropOrphanedPendingStrokes()
+        requestFullRender()
+        return true
+    }
+
+    @discardableResult
+    func redo() -> Bool {
+        guard live == nil, lassoSession == nil, document.redo() else { return false }
+        generation &+= 1
+        invalidateMoved()
+        dropOrphanedPendingStrokes()
+        requestFullRender()
+        return true
+    }
+
+    func clearCanvas() {
+        document.clear()
+        generation &+= 1
+        dropOrphanedPendingStrokes()
+        requestFullRender()
+    }
+
+    func resetView() {
+        viewTransform = ViewTransform()
+        liveView.settle(at: viewTransform)
+        updateLassoOverlay()
+        requestFullRender()
+        controller?.zoomDidChange(viewTransform.scale)
+    }
+
+    // MARK: - Lasso
+
+    private func invalidateMoved() {
+        let ids = document.lastMovedIDs
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            geometryCache[id] = nil
+            modifiedSinceSnapshot.insert(id)
+        }
+        // Moved strokes may still be waiting in `pending` with stale geometry; the full render redraws them.
+        pending.removeAll { ids.contains($0.live.stroke.id) }
+        if !selection.isEmpty {
+            updateSelectionBounds()
+        }
+    }
+
+    private func updateSelectionBounds() {
+        var r = CGRect.null
+        for stroke in document.strokes where selection.contains(stroke.id) {
+            r = r.union(geometry(for: stroke).bounds)
+        }
+        selectionBounds = r
+        controller?.selectionDidChange(!selection.isEmpty)
+        updateLassoOverlay()
+    }
+
+    func clearSelection() {
+        guard !selection.isEmpty else { return }
+        selection.removeAll()
+        updateSelectionBounds()
+    }
+
+    func deleteSelection() {
+        guard !selection.isEmpty else { return }
+        let ids = selection
+        for id in ids {
+            geometryCache[id] = nil
+            modifiedSinceSnapshot.insert(id)
+        }
+        document.recordErase(document.remove(ids: ids))
+        dropOrphanedPendingStrokes()   // also prunes the selection
+        requestFullRender()
+    }
+
+    private func handleLassoSample(_ p: CGPoint) {
+        guard let controller else { return }
+        switch lassoSession {
+        case nil:
+            let slop = 10 / viewTransform.scale
+            if !selection.isEmpty, selectionBounds.insetBy(dx: -slop, dy: -slop).contains(p) {
+                // Dragging inside the selection moves it. Pending strokes are redrawn by the full render.
+                pending.removeAll { selection.contains($0.live.stroke.id) }
+                lassoSession = .moving(last: p, total: .zero)
+            } else {
+                clearSelection()
+                lassoSession = .drawing([p])
+            }
+            lassoPending = false
+        case .drawing(var pts)?:
+            switch controller.lassoMode {
+            case .freeform:
+                if let last = pts.last, last.distance(to: p) * viewTransform.scale < 1.5 { return }
+                pts.append(p)
+            case .square:
+                pts = [pts[0], p]
+            }
+            lassoSession = .drawing(pts)
+            updateLassoOverlay()
+        case .moving(let last, let total)?:
+            let d = p - last
+            guard d != .zero else { return }
+            for id in selection { geometryCache[id] = nil; modifiedSinceSnapshot.insert(id) }
+            document.translate(ids: selection, by: d)
+            selectionBounds = selectionBounds.offsetBy(dx: d.x, dy: d.y)
+            lassoSession = .moving(last: p, total: total + d)
+            requestFullRender()
+            updateLassoOverlay()
+        }
+    }
+
+    private func finishLasso(commit: Bool) {
+        defer { lassoSession = nil; lassoPending = false; updateLassoOverlay() }
+        switch lassoSession {
+        case .drawing(let pts)?:
+            guard commit, let controller,
+                  let polygon = LassoGeometry.region(mode: controller.lassoMode, points: pts) else { return }
+            let pb = LassoGeometry.bounds(of: polygon)
+            var hit = Set<UUID>()
+            // Whole strokes are selected even if only part of them is inside the region.
+            // Pixel-eraser strokes are invisible, so they're never selectable.
+            for stroke in document.strokes where stroke.tool != .pixelEraser {
+                guard geometry(for: stroke).bounds.intersects(pb) else { continue }
+                if LassoGeometry.stroke(stroke.points.map(\.location), touches: polygon, polygonBounds: pb) {
+                    hit.insert(stroke.id)
+                }
+            }
+            selection = hit
+            updateSelectionBounds()
+        case .moving(_, let total)?:
+            if commit {
+                document.recordMove(ids: selection, by: total)
+            } else if total != .zero {
+                document.translate(ids: selection, by: CGPoint(x: -total.x, y: -total.y))
+                for id in selection { geometryCache[id] = nil; modifiedSinceSnapshot.insert(id) }
+                requestFullRender()
+            }
+            updateSelectionBounds()
+        case nil:
+            break
+        }
+    }
+
+    // MARK: - Touch input
+
+    private func isDrawingTouch(_ touch: UITouch, event: UIEvent?) -> Bool {
+        if touch.type == .pencil { return true }
+        #if targetEnvironment(simulator)
+        // No Pencil in the simulator: a lone mouse-driven touch stands in for it.
+        return touch.type == .direct && (event?.allTouches?.count ?? 1) == 1
+        #else
+        return false
+        #endif
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if !isFirstResponder { _ = becomeFirstResponder() }
+        let priorDirectTouches = event?.allTouches?.filter {
+            $0.type == .direct && !touches.contains($0) && $0.phase != .ended && $0.phase != .cancelled
+        }.count ?? 0
+        if priorDirectTouches == 0 && activeGestureCount == 0 && touches.contains(where: { $0.type == .direct }) {
+            gestureStartTransform = viewTransform
+            didTransformInTouchSequence = false
+        }
+        for touch in touches {
+            guard isDrawingTouch(touch, event: event) else { continue }
+            guard activeTouch == nil, activeGestureCount == 0 else { continue }
+            activeTouch = touch
+            beginStroke()
+            ingest(touch, event: event, final: false)
+        }
+        updateFingerState(event)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = activeTouch, touches.contains(touch) else { return }
+        ingest(touch, event: event, final: false)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let touch = activeTouch, touches.contains(touch) {
+            ingest(touch, event: event, final: true)
+            endStroke(commit: true)
+        }
+        updateFingerState(event, ending: touches)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let touch = activeTouch, touches.contains(touch) {
+            endStroke(commit: false)
+        }
+        updateFingerState(event, ending: touches)
+    }
+
+    /// Pencil force/tilt are often first reported as estimates and refined a few ms later.
+    override func touchesEstimatedPropertiesUpdated(_ touches: Set<UITouch>) {
+        var liveDirty = CGRect.null
+        var liveTouchesTail = false
+        var pendingDirty = CGRect.null
+        for touch in touches {
+            guard let key = touch.estimationUpdateIndex, let ref = pendingEstimates[key] else { continue }
+            let refined = sampleValues(touch)
+            let apply: (inout StrokePoint) -> Void = { p in
+                p.force = refined.force
+                p.altitude = refined.altitude
+                p.azimuth = refined.azimuth
+            }
+            if let live, live.stroke.id == ref.strokeID, live.stroke.points.indices.contains(ref.index) {
+                apply(&live.stroke.points[ref.index])
+                let r = live.refreshPoint(ref.index)
+                liveView.geometryChanged(of: live, fromSegment: ref.index - 1, canvasRect: r.dirty)
+                liveDirty = liveDirty.union(r.dirty)
+                if r.touchesTail {
+                    liveTouchesTail = true
+                }
+            } else if let pendingStroke = pending.first(where: { $0.live.stroke.id == ref.strokeID && !$0.submitted }),
+                      pendingStroke.live.stroke.points.indices.contains(ref.index) {
+                apply(&pendingStroke.live.stroke.points[ref.index])
+                _ = document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply)
+                let r = pendingStroke.live.refreshPoint(ref.index)
+                liveView.geometryChanged(of: pendingStroke.live, fromSegment: ref.index - 1, canvasRect: r.dirty)
+                var dirty = r.dirty
+                if r.touchesTail {
+                    dirty = dirty.union(pendingStroke.live.rebuildTail(predicted: []))
+                }
+                pendingDirty = pendingDirty.union(dirty)
+                pendingStroke.geometryDirty = true
+                geometryCache[ref.strokeID] = nil
+                modifiedSinceSnapshot.insert(ref.strokeID)
+            } else if document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply) {
+                geometryCache[ref.strokeID] = nil
+                modifiedSinceSnapshot.insert(ref.strokeID)
+                requestFullRender()
+            }
+            if touch.estimatedPropertiesExpectingUpdates.isEmpty {
+                if let live, live.stroke.id == ref.strokeID {
+                    live.unsettledPoints.remove(ref.index)
+                } else {
+                    pending.first { $0.live.stroke.id == ref.strokeID }?.live.unsettledPoints.remove(ref.index)
+                }
+                pendingEstimates[key] = nil
+                decrementOutstandingEstimates(for: ref.strokeID)
+            }
+        }
+        if let live {
+            if liveTouchesTail {
+                let tailDirty = live.rebuildTail(predicted: live.lastPredicted)
+                liveDirty = liveDirty.union(tailDirty)
+            }
+            if !liveDirty.isNull {
+                invalidateLive(canvasRect: liveDirty)
+            }
+        }
+        for p in pending where p.geometryDirty {
+            p.geometryDirty = false
+            let newGeom = p.live.geometry()
+            p.geometry = newGeom
+            p.bounds = newGeom.bounds
+            geometryCache[p.live.stroke.id] = nil
+            modifiedSinceSnapshot.insert(p.live.stroke.id)
+        }
+        if !pendingDirty.isNull {
+            invalidateLive(canvasRect: pendingDirty)
+        }
+        schedulePendingCommit()
+    }
+
+    private func beginStroke() {
+        guard let controller else { return }
+        if pendingEstimates.count > 1024 {
+            pendingEstimates.removeAll()
+            outstandingEstimates.removeAll()
+        }
+        #if targetEnvironment(simulator)
+        simPrevious = nil
+        #endif
+        liveView.settle(at: viewTransform)
+        if controller.tool == .lasso {
+            lassoPending = true
+        } else if controller.tool == .eraser && controller.eraserMode == .stroke {
+            eraseSession = EraseSession()
+        } else {
+            let (kind, color, style) = controller.strokeTemplate(viewScale: viewTransform.scale)
+            live = LiveStroke(stroke: Stroke(id: UUID(), tool: kind, color: color, style: style, points: []))
+        }
+        if hoverActive { setCursor(nil) }
+    }
+
+    /// Feeds every coalesced sample since the last event (up to 240 Hz on Pencil, vs. the 120 Hz
+    /// display-rate `touchesMoved`), then appends predicted samples as a throwaway preview tail.
+    private func ingest(_ touch: UITouch, event: UIEvent?, final: Bool) {
+        eventRate.record(touch.timestamp)
+        let samples = event?.coalescedTouches(for: touch) ?? [touch]
+        for sample in samples { appendSample(sample) }
+
+        if let live {
+            // Predicted touches are never stored: the tail is rebuilt (and they're dropped) on the next real event.
+            let predicted = final ? [] : (event?.predictedTouches(for: touch) ?? []).map { makePoint($0, predicted: true) }
+            hud.predictedCount = predicted.count
+            let dirty = live.finalizeAvailable().union(live.rebuildTail(predicted: predicted))
+            invalidateLive(canvasRect: dirty)
+        }
+        hud.state = touch.type == .pencil ? .pencilDown : .simulatedPencil
+        publishHUD(force: final)
+    }
+
+    private func appendSample(_ touch: UITouch) {
+        let point = makePoint(touch, predicted: false)
+        sampleRate.record(touch.timestamp)
+        hud.force = touch.type == .pencil ? touch.force : point.force
+        hud.maxForce = touch.type == .pencil ? touch.maximumPossibleForce : 1
+        hud.normalizedForce = point.force
+        hud.altitude = point.altitude
+        hud.azimuth = point.azimuth
+
+        if lassoPending || lassoSession != nil {
+            handleLassoSample(point.location)
+            return
+        }
+        if eraseSession != nil {
+            eraseStrokes(along: point.location)
+            return
+        }
+        guard let live else { return }
+        if let last = live.stroke.points.last,
+           last.location.distance(to: point.location) * viewTransform.scale < 0.3 {
+            // Near-duplicate sample: keep the newest pressure but don't add a degenerate segment.
+            live.stroke.points[live.stroke.points.count - 1].force = point.force
+            return
+        }
+        let index = live.stroke.points.count
+        live.stroke.points.append(point)
+        if !touch.estimatedPropertiesExpectingUpdates.isEmpty, let key = touch.estimationUpdateIndex {
+            if let old = pendingEstimates[key] {
+                decrementOutstandingEstimates(for: old.strokeID)
+            }
+            pendingEstimates[key] = PointRef(strokeID: live.stroke.id, index: index)
+            live.unsettledPoints.insert(index)
+            outstandingEstimates[live.stroke.id, default: 0] += 1
+        }
+    }
+
+    private func sampleValues(_ touch: UITouch) -> (force: CGFloat, altitude: CGFloat, azimuth: CGFloat) {
+        let maxForce = touch.maximumPossibleForce
+        let force = maxForce > 0 ? min(touch.force / maxForce, 1) : 0.5
+        return (force, touch.altitudeAngle, touch.azimuthAngle(in: self))
+    }
+
+    /// `preciseLocation` is in this view's coordinate space; strokes are stored in canvas space.
+    private func makePoint(_ touch: UITouch, predicted: Bool) -> StrokePoint {
+        let viewLocation = touch.preciseLocation(in: self)
+        let location = viewTransform.toCanvas(viewLocation)
+        #if targetEnvironment(simulator)
+        if touch.type != .pencil {
+            return simulatedPoint(touch, viewLocation: viewLocation, canvasLocation: location, predicted: predicted)
+        }
+        #endif
+        let v = sampleValues(touch)
+        return StrokePoint(location: location, force: v.force, altitude: v.altitude, azimuth: v.azimuth,
+                           timestamp: touch.timestamp)
+    }
+
+    #if targetEnvironment(simulator)
+    /// Fake pressure from drag speed: slow = heavy, fast = light, low-passed so width changes smoothly.
+    private func simulatedPoint(_ touch: UITouch, viewLocation: CGPoint, canvasLocation: CGPoint,
+                                predicted: Bool) -> StrokePoint {
+        var force: CGFloat = 0.6
+        if let prev = simPrevious {
+            force = prev.force
+            let dt = touch.timestamp - prev.time
+            if dt > 0 {
+                let speed = viewLocation.distance(to: prev.location) / CGFloat(dt)   // points per second
+                let target = min(max(1 - speed / 2200, 0.1), 1)
+                force = prev.force + (target - prev.force) * 0.2
+            }
+        }
+        if !predicted { simPrevious = (viewLocation, touch.timestamp, force) }
+        return StrokePoint(location: canvasLocation, force: force,
+                           altitude: controller?.simulatedAltitude ?? .pi / 2,
+                           azimuth: -.pi / 4, timestamp: touch.timestamp)
+    }
+    #endif
+
+    private func endStroke(commit: Bool) {
+        activeTouch = nil
+        if lassoPending || lassoSession != nil { finishLasso(commit: commit) }
+        if let session = eraseSession {
+            document.recordErase(session.removals)
+            eraseSession = nil
+            setCursor(nil)
+        }
+        if let live {
+            self.live = nil
+            if commit && !live.stroke.points.isEmpty {
+                let geom = live.geometry()
+                geometryCache[live.stroke.id] = geom
+                let splits = live.stroke.tool == .pixelEraser
+                    ? splits(cutBy: live.stroke, hulls: live.allHulls) : []
+                document.add(live.stroke, splits: splits)
+                let deadline = CACurrentMediaTime() + 0.25
+                pending.append(PendingStroke(live: live, geometry: geom, deadline: deadline))
+                schedulePendingCommit()
+            } else {
+                liveView.invalidateAll()   // clears the live layer
+            }
+        }
+        hud.state = .idle
+        hud.predictedCount = 0
+        publishHUD(force: true)
+    }
+
+    // MARK: - Pixel eraser splits
+
+    /// Ink strokes that `eraser` (about to be appended on top) cuts clean through, with their pieces.
+    /// Only strokes overlapping the eraser are examined. Coverage is the union of every pixel eraser
+    /// above each stroke that overlaps it, so two partial erases that together sever a line count too.
+    /// `hulls` are the eraser's own, reused from its `LiveStroke` (identical to a fresh build once it ended).
+    private func splits(cutBy eraser: Stroke, hulls eraserOwnHulls: [Hull]) -> [CanvasDocument.Split] {
+        let eraserBounds = geometry(for: eraser).bounds
+        guard !eraserBounds.isNull else { return [] }
+        let strokes = document.strokes
+        var eraserHulls: [UUID: [Hull]] = [eraser.id: eraserOwnHulls]
+        func hulls(of e: Stroke) -> [Hull] {
+            if let h = eraserHulls[e.id] { return h }
+            let h = StrokeRenderer.hulls(for: e.points, style: e.style)
+            eraserHulls[e.id] = h
+            return h
+        }
+
+        var splits: [CanvasDocument.Split] = []
+        for (index, stroke) in strokes.enumerated() where stroke.tool != .pixelEraser {
+            let bounds = geometry(for: stroke).bounds
+            guard bounds.intersects(eraserBounds) else { continue }
+            let region = bounds.insetBy(dx: -1, dy: -1)
+            var coverage = StrokeSplitter.Coverage()
+            for other in strokes[(index + 1)...] where other.tool == .pixelEraser
+                && geometry(for: other).bounds.intersects(region) {
+                coverage.add(hulls(of: other), within: region)
+            }
+            coverage.add(hulls(of: eraser), within: region)
+            if let pieces = StrokeSplitter.pieces(of: stroke, coverage: coverage) {
+                splits.append(CanvasDocument.Split(index: index, original: stroke, pieces: pieces))
+            }
+        }
+        return splits
+    }
+
+    // MARK: - Stroke eraser
+
+    private func eraseStrokes(along point: CGPoint) {
+        guard var session = eraseSession, let controller else { return }
+        let radius = CGFloat(controller.current.width) / 2 / viewTransform.scale
+        let from = session.last ?? point
+        let steps = max(1, Int((from.distance(to: point) / (radius * 0.5)).rounded(.up)))
+        let sweep = CGRect(x: min(from.x, point.x), y: min(from.y, point.y),
+                           width: abs(from.x - point.x), height: abs(from.y - point.y))
+            .insetBy(dx: -radius, dy: -radius)
+
+        var hits = Set<UUID>()
+        // Pixel-eraser strokes are invisible; removing them would resurrect ink, so they're skipped.
+        for stroke in document.strokes where stroke.tool != .pixelEraser {
+            let bounds = geometry(for: stroke).bounds
+            guard bounds.intersects(sweep) else { continue }
+            for k in 0...steps {
+                let t = CGFloat(k) / CGFloat(steps)
+                if StrokeRenderer.hitTest(stroke, bounds: bounds, point: from + (point - from) * t, radius: radius) {
+                    hits.insert(stroke.id)
+                    break
+                }
+            }
+        }
+        if !hits.isEmpty {
+            for id in hits {
+                geometryCache[id] = nil
+                modifiedSinceSnapshot.insert(id)
+            }
+            session.removals += document.remove(ids: hits)
+            dropOrphanedPendingStrokes()
+            requestFullRender()
+        }
+        session.last = point
+        eraseSession = session
+
+        let c = viewTransform.toView(point), r = radius * viewTransform.scale
+        setCursor(CGPath(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r), transform: nil))
+    }
+
+    // MARK: - HUD
+
+    private func updateFingerState(_ event: UIEvent?, ending: Set<UITouch> = []) {
+        guard activeTouch == nil else { return }
+        let fingers = event?.allTouches?.filter {
+            $0.type == .direct && !ending.contains($0) && $0.phase != .ended && $0.phase != .cancelled
+        }.count ?? 0
+        hud.state = fingers > 0 ? .finger(fingers) : (hoverActive ? .hovering : .idle)
+        publishHUD(force: true)
+    }
+
+    private func publishHUD(force: Bool) {
+        guard let telemetry, controller?.hudVisible == true else { return }
+        let now = ProcessInfo.processInfo.systemUptime   // same clock as UITouch.timestamp
+        hud.samplesPerSecond = sampleRate.rate(at: now)
+        hud.eventsPerSecond = eventRate.rate(at: now)
+        hud.pendingEstimates = pendingEstimates.count
+        hud.strokeCount = document.strokes.count
+        telemetry.submit(hud, immediately: force)
+    }
+
+    // MARK: - Gestures
+
+    private func setUpGestures() {
+        let direct = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+
+        pan.allowedTouchTypes = direct   // the Pencil never pans
+        #if targetEnvironment(simulator)
+        pan.minimumNumberOfTouches = 2   // one simulated touch draws
+        #else
+        pan.minimumNumberOfTouches = 1
+        #endif
+        pan.maximumNumberOfTouches = 2
+        pan.delegate = self
+        addGestureRecognizer(pan)
+
+        pinch.allowedTouchTypes = direct
+        pinch.delegate = self
+        addGestureRecognizer(pinch)
+
+        for direction in [UISwipeGestureRecognizer.Direction.left, .right] {
+            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
+            swipe.direction = direction
+            swipe.numberOfTouchesRequired = 3
+            swipe.allowedTouchTypes = direct
+            swipe.delegate = self
+            addGestureRecognizer(swipe)
+        }
+
+        // Two-finger tap = undo, three-finger tap = redo. Recognizes immediately on touch-up
+        // with zero multi-tap delay and without conflicting with system 3-finger tap recognizers.
+        let twoFingerTap = MultiFingerTapRecognizer(touchesRequired: 2, target: self, action: #selector(handleTwoFingerTap(_:)))
+        twoFingerTap.delegate = self
+        addGestureRecognizer(twoFingerTap)
+
+        let threeFingerTap = MultiFingerTapRecognizer(touchesRequired: 3, target: self, action: #selector(handleThreeFingerTap(_:)))
+        threeFingerTap.delegate = self
+        addGestureRecognizer(threeFingerTap)
+
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
+        hover.delegate = self
+        addGestureRecognizer(hover)
+    }
+
+    private func gestureBegan() {
+        if activeGestureCount == 0 && !didTransformInTouchSequence {
+            gestureStartTransform = viewTransform
+        }
+        activeGestureCount += 1
+    }
+
+    private func gestureEnded() {
+        activeGestureCount = max(0, activeGestureCount - 1)
+        guard !isCancellingGesture else { return }
+        if activeGestureCount == 0 { liveView.settle(at: viewTransform) }
+        if activeGestureCount == 0 && (bitmapTransform != viewTransform || displayedTransform != viewTransform) {
+            requestFullRender()
+        }
+    }
+
+    private func transformDidChange() {
+        didTransformInTouchSequence = true
+        updateCommittedLayerTransform()
+        liveView.follow(viewTransform)
+        updateLassoOverlay()
+        requestFullRender()
+        controller?.zoomDidChange(viewTransform.scale)
+    }
+
+    @objc private func handlePan(_ g: UIPanGestureRecognizer) {
+        switch g.state {
+        case .began, .changed:
+            if g.state == .began { gestureBegan() }
+            let t = g.translation(in: self)
+            viewTransform.offset.x += t.x
+            viewTransform.offset.y += t.y
+            g.setTranslation(.zero, in: self)
+            transformDidChange()
+        case .ended, .cancelled, .failed:
+            gestureEnded()
+        default:
+            break
+        }
+    }
+
+    @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
+        switch g.state {
+        case .began, .changed:
+            if g.state == .began { gestureBegan() }
+            let focus = g.location(in: self)
+            let newScale = min(max(viewTransform.scale * g.scale, 0.25), 8)
+            let k = newScale / viewTransform.scale
+            // Zoom about the pinch centroid: keep the canvas point under it fixed.
+            viewTransform.offset = CGPoint(x: focus.x - (focus.x - viewTransform.offset.x) * k,
+                                           y: focus.y - (focus.y - viewTransform.offset.y) * k)
+            viewTransform.scale = newScale
+            g.scale = 1
+            transformDidChange()
+        case .ended, .cancelled, .failed:
+            gestureEnded()
+        default:
+            break
+        }
+    }
+
+    /// Cancels any incidental pan/pinch from multi-finger taps or swipes and restores `gestureStartTransform`.
+    /// Returns true if the transform was reverted and needs a full render when undo/redo is a no-op.
+    private func cancelIncidentalPanZoom() -> Bool {
+        guard activeGestureCount > 0 || didTransformInTouchSequence else { return false }
+        isCancellingGesture = true
+        for r in [pan, pinch] as [UIGestureRecognizer] {
+            r.isEnabled = false
+            r.isEnabled = true
+        }
+        isCancellingGesture = false
+        activeGestureCount = 0
+        didTransformInTouchSequence = false
+        viewTransform = gestureStartTransform
+        generation &+= 1
+        updateCommittedLayerTransform()
+        liveView.settle(at: viewTransform)
+        controller?.zoomDidChange(viewTransform.scale)
+        return bitmapTransform != viewTransform || displayedTransform != viewTransform
+    }
+
+    @objc private func handleSwipe(_ g: UISwipeGestureRecognizer) {
+        let needsRender = cancelIncidentalPanZoom()
+        let changed = g.direction == .left ? undo() : redo()
+        if needsRender && !changed { requestFullRender() }
+    }
+
+    @objc private func handleTwoFingerTap(_ g: MultiFingerTapRecognizer) {
+        guard g.state == .ended else { return }
+        let needsRender = cancelIncidentalPanZoom()
+        if !undo() && needsRender { requestFullRender() }
+    }
+
+    @objc private func handleThreeFingerTap(_ g: MultiFingerTapRecognizer) {
+        guard g.state == .ended else { return }
+        let needsRender = cancelIncidentalPanZoom()
+        if !redo() && needsRender { requestFullRender() }
+    }
+
+    @objc private func handleHover(_ g: UIHoverGestureRecognizer) {
+        // Pencil hover reports a height above the glass; a trackpad pointer reports zero.
+        let pencilHovering = (g.state == .began || g.state == .changed) && g.zOffset > 0
+        if pencilHovering {
+            hoverActive = true
+            let altitude = g.altitudeAngle, azimuth = g.azimuthAngle(in: self)
+            hud.altitude = altitude
+            hud.azimuth = azimuth
+            hud.zOffset = g.zOffset
+            if activeTouch == nil {
+                hud.state = .hovering
+                setCursor(tipOutline(at: viewTransform.toCanvas(g.location(in: self)), altitude: altitude, azimuth: azimuth))
+            }
+            publishHUD(force: false)
+        } else if hoverActive {
+            hoverActive = false
+            hud.zOffset = 0
+            if activeTouch == nil {
+                setCursor(nil)
+                hud.state = .idle
+            }
+            publishHUD(force: true)
+        }
+    }
+}
+
+// MARK: - Gesture delegate
+
+extension CanvasView: UIGestureRecognizerDelegate {
+    override func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        if g is UIHoverGestureRecognizer { return true }
+        if activeTouch != nil { return false }   // palm rejection: no panning while the Pencil is down
+        if g === pinch { return g.numberOfTouches == 2 }
+        return true
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        if g is MultiFingerTapRecognizer && other is UISwipeGestureRecognizer { return false }
+        if g is UISwipeGestureRecognizer && other is MultiFingerTapRecognizer { return false }
+        return true
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRequireFailureOf other: UIGestureRecognizer) -> Bool { false }
+}
+
+// MARK: - Multi-finger tap recognizer
+
+/// Recognizes an exact N-finger single tap immediately on touch-up with zero multi-tap delay,
+/// and avoids UIKit's built-in `UITapGestureRecognizer` failure dependencies with iPadOS's
+/// system three-finger productivity tap recognizers.
+private final class MultiFingerTapRecognizer: UIGestureRecognizer {
+    let numberOfTouchesRequired: Int
+    private let maxDuration: TimeInterval = 0.35
+    private let maxMovement: CGFloat = 28
+
+    private var startPositions: [UITouch: CGPoint] = [:]
+    private var activeTouches: Set<UITouch> = []
+    private var maxTouchCount = 0
+    private var startTime: TimeInterval = 0
+
+    init(touchesRequired: Int, target: Any?, action: Selector?) {
+        self.numberOfTouchesRequired = touchesRequired
+        super.init(target: target, action: action)
+        allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    override func reset() {
+        super.reset()
+        startPositions.removeAll()
+        activeTouches.removeAll()
+        maxTouchCount = 0
+        startTime = 0
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesBegan(touches, with: event)
+        guard let view else { state = .failed; return }
+        for touch in touches {
+            if startPositions.isEmpty {
+                startTime = touch.timestamp
+            }
+            startPositions[touch] = touch.location(in: view)
+            activeTouches.insert(touch)
+        }
+        maxTouchCount = max(maxTouchCount, startPositions.count)
+        if maxTouchCount > numberOfTouchesRequired {
+            state = .failed
+        }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesMoved(touches, with: event)
+        guard let view else { state = .failed; return }
+        for touch in touches {
+            if touch.timestamp - startTime > maxDuration {
+                state = .failed
+                return
+            }
+            if let start = startPositions[touch],
+               touch.location(in: view).distance(to: start) > maxMovement {
+                state = .failed
+                return
+            }
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        guard let view else { state = .failed; return }
+        for touch in touches {
+            if touch.timestamp - startTime > maxDuration {
+                state = .failed
+                return
+            }
+            if let start = startPositions[touch],
+               touch.location(in: view).distance(to: start) > maxMovement {
+                state = .failed
+                return
+            }
+            activeTouches.remove(touch)
+        }
+        if activeTouches.isEmpty {
+            state = (maxTouchCount == numberOfTouchesRequired) ? .ended : .failed
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        state = .failed
+    }
+}
+
+// MARK: - Lasso overlay
+
+private final class LassoOverlayView: UIView {
+    weak var canvas: CanvasView?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        isOpaque = false
+        backgroundColor = .clear
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ rect: CGRect) {
+        guard let canvas, let ctx = UIGraphicsGetCurrentContext() else { return }
+        canvas.drawLassoOverlay(in: ctx)
+    }
+}
+
+// MARK: - Apple Pencil interactions
+
+extension CanvasView: UIPencilInteractionDelegate {
+    @available(iOS 17.5, *)
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        handlePencilTap()
+    }
+
+    /// Pre-17.5 path (2nd-gen Pencil double-tap).
+    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        handlePencilTap()
+    }
+
+    /// Pencil Pro squeeze: show a quick tool palette at the hover position.
+    @available(iOS 17.5, *)
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        guard squeeze.phase == .ended, UIPencilInteraction.preferredSqueezeAction != .ignore else { return }
+        let location = squeeze.hoverPose?.location ?? CGPoint(x: bounds.midX, y: bounds.midY)
+        controller?.quickPaletteLocation = controller?.quickPaletteLocation == nil ? location : nil
+    }
+
+    private func handlePencilTap() {
+        switch UIPencilInteraction.preferredTapAction {
+        case .ignore: return
+        case .switchPrevious: controller?.switchToPrevious()
+        default: controller?.toggleEraser()   // .switchEraser and palette actions
+        }
+    }
+}
+
+// MARK: - SwiftUI bridge
+
+struct CanvasRepresentable: UIViewRepresentable {
+    let controller: CanvasController
+    let telemetry: PencilTelemetry
+    let document: CanvasDocument
+
+    func makeUIView(context: Context) -> CanvasView {
+        let view = CanvasView(frame: .zero, document: document)
+        view.controller = controller
+        view.telemetry = telemetry
+        controller.canvas = view
+        return view
+    }
+
+    func updateUIView(_ uiView: CanvasView, context: Context) {}
+}
