@@ -1,12 +1,14 @@
 import Foundation
 import SwiftData
 
-/// Seeds the library with sample folders and notes the first time the app launches.
+/// Seeds the library with sample folders and notes the first time the staging app launches.
+/// Production builds never seed (see `AppEnvironment.seedsSampleData`).
 @MainActor
 enum SampleData {
     private static let seededKey = "didSeedSampleLibrary"
 
     static func seedIfNeeded(in context: ModelContext) {
+        guard AppEnvironment.current.seedsSampleData else { return }
         guard !UserDefaults.standard.bool(forKey: seededKey) else { return }
         defer { UserDefaults.standard.set(true, forKey: seededKey) }
 
