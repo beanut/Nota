@@ -6,42 +6,48 @@ import InkKit
 ///
 /// The manifest is the source of truth for a note's page count and modification date; the SwiftData
 /// `Note` mirrors them for the library. Ink is not stored yet (NOT-6 adds page files alongside it).
-struct NoteManifest: Codable, Equatable {
-    static let currentFormatVersion = 1
+public struct NoteManifest: Codable, Equatable, Sendable {
+    public static let currentFormatVersion = 1
 
-    struct Page: Codable, Equatable {
-        var id: UUID
-        var size: PageSize
-        var paper: PaperStyle
+    public struct Page: Codable, Equatable, Sendable {
+        public var id: UUID
+        public var size: PageSize
+        public var paper: PaperStyle
+
+        public init(id: UUID, size: PageSize, paper: PaperStyle) {
+            self.id = id
+            self.size = size
+            self.paper = paper
+        }
     }
 
-    var formatVersion = Self.currentFormatVersion
-    var pages: [Page]
+    public var formatVersion = Self.currentFormatVersion
+    public var pages: [Page]
     /// The size new pages get when there's no neighbouring page to copy, and the size "Use … for All
     /// Pages" last applied.
-    var defaultPageSize: PageSize
-    var createdAt: Date
-    var modifiedAt: Date
+    public var defaultPageSize: PageSize
+    public var createdAt: Date
+    public var modifiedAt: Date
 
     /// A manifest of `pageCount` blank pages (at least one) of `size` and `paper`.
-    init(pageCount: Int = 1, size: PageSize, paper: PaperStyle, createdAt: Date = .now, modifiedAt: Date = .now) {
+    public init(pageCount: Int = 1, size: PageSize, paper: PaperStyle, createdAt: Date = .now, modifiedAt: Date = .now) {
         pages = (0 ..< max(1, pageCount)).map { _ in Page(id: UUID(), size: size, paper: paper) }
         defaultPageSize = size
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
     }
 
-    var pageCount: Int {
+    public var pageCount: Int {
         pages.count
     }
 
     /// The paper of the note's first page, which its cover is drawn on.
-    var coverPaper: PaperStyle {
+    public var coverPaper: PaperStyle {
         pages.first?.paper ?? .lined
     }
 
     /// The same pages and sizes with fresh page IDs, for a duplicated note.
-    func duplicated(at date: Date = .now) -> NoteManifest {
+    public func duplicated(at date: Date = .now) -> NoteManifest {
         var copy = self
         copy.pages = pages.map { Page(id: UUID(), size: $0.size, paper: $0.paper) }
         copy.createdAt = date
@@ -50,7 +56,7 @@ struct NoteManifest: Codable, Equatable {
     }
 
     /// True when the two manifests describe the same pages, ignoring timestamps.
-    func hasSameLayout(as other: NoteManifest) -> Bool {
+    public func hasSameLayout(as other: NoteManifest) -> Bool {
         pages == other.pages && defaultPageSize == other.defaultPageSize
     }
 
@@ -71,7 +77,7 @@ struct NoteManifest: Codable, Equatable {
 
     /// The manifest at `url`, or nil if there's none or it can't be read (including one written by a newer
     /// format version) or lists no pages.
-    static func read(from url: URL) -> NoteManifest? {
+    public static func read(from url: URL) -> NoteManifest? {
         guard let data = try? Data(contentsOf: url),
               let manifest = try? decoder.decode(NoteManifest.self, from: data),
               manifest.formatVersion <= currentFormatVersion,
@@ -81,7 +87,7 @@ struct NoteManifest: Codable, Equatable {
     }
 
     /// Writes the manifest to `url` atomically, creating the package directory if needed.
-    func write(to url: URL) throws {
+    public func write(to url: URL) throws {
         let data = try Self.encoder.encode(self)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)

@@ -1,4 +1,5 @@
 import InkKit
+import NotaCore
 import NotaUI
 import SwiftUI
 

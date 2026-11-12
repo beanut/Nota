@@ -2,7 +2,8 @@ import Foundation
 import InkKit
 import Observation
 
-/// Keeps each note's InkKit notebook alive for the session and its page layout on disk.
+/// Keeps each note's InkKit notebook alive for the session and its page layout on disk. Replaces the
+/// app's former `InkStore`; lazy page loading, autosave and an LRU of open pages arrive with NOT-6.
 ///
 /// Each note package holds a `manifest.json` (see `NoteManifest`) with every page's size and paper, so a
 /// note reopens after relaunch with the same pages. The note's `pageCount`, `modifiedAt` and `paper` are
@@ -10,13 +11,13 @@ import Observation
 /// on-disk stroke format until NOT-6.
 @Observable
 @MainActor
-final class InkStore {
+public final class DocumentStore {
     @ObservationIgnored private var notebooks: [UUID: InkNotebook] = [:]
     /// The last manifest read or written for each note.
     @ObservationIgnored private var manifests: [UUID: NoteManifest] = [:]
     @ObservationIgnored private let library: URL
 
-    init(library: URL = NotePackage.libraryURL) {
+    public init(library: URL = NotePackage.libraryURL) {
         self.library = library
     }
 
@@ -24,7 +25,7 @@ final class InkStore {
 
     /// The note's notebook, built on first use from its manifest. A note without one (an older or sample
     /// note) gets `pageCount` pages of the locale's default size on its paper.
-    func notebook(for note: Note) -> InkNotebook {
+    public func notebook(for note: Note) -> InkNotebook {
         if let notebook = notebooks[note.id] {
             return notebook
         }
@@ -36,12 +37,12 @@ final class InkStore {
     }
 
     /// The note's notebook if it has been opened this session, without creating one.
-    func existingNotebook(for noteID: UUID) -> InkNotebook? {
+    public func existingNotebook(for noteID: UUID) -> InkNotebook? {
         notebooks[noteID]
     }
 
     /// The paper the note's page `pageID` is drawn on.
-    func paper(ofPage pageID: UUID, in note: Note) -> PaperStyle {
+    public func paper(ofPage pageID: UUID, in note: Note) -> PaperStyle {
         manifest(for: note).pages.first { $0.id == pageID }?.paper ?? note.paper
     }
 
@@ -50,7 +51,7 @@ final class InkStore {
     /// Writes the open notebook's page order, sizes and papers to the note's manifest and mirrors its page
     /// count, cover paper and modification date onto `note`. The note counts as modified when its pages
     /// changed or `inkChanged` is set; otherwise nothing is written.
-    func save(_ note: Note, inkChanged: Bool = false) {
+    public func save(_ note: Note, inkChanged: Bool = false) {
         guard let notebook = notebooks[note.id] else { return }
         let old = manifest(for: note)
         var new = old
@@ -67,7 +68,7 @@ final class InkStore {
     }
 
     /// Puts every page of the note on `paper`.
-    func setPaper(_ paper: PaperStyle, of note: Note) {
+    public func setPaper(_ paper: PaperStyle, of note: Note) {
         var manifest = manifest(for: note)
         guard manifest.pages.contains(where: { $0.paper != paper }) else {
             note.paper = paper
@@ -81,17 +82,17 @@ final class InkStore {
     }
 
     /// Starts a new note's package with one page of `size` on `paper`.
-    func create(_ note: Note, size: PageSize, paper: PaperStyle) {
+    public func create(_ note: Note, size: PageSize, paper: PaperStyle) {
         store(NoteManifest(size: size, paper: paper, createdAt: note.createdAt, modifiedAt: note.modifiedAt), for: note)
     }
 
     /// Gives `copy` the same pages, sizes and papers as `original`.
-    func duplicate(_ original: Note, as copy: Note) {
+    public func duplicate(_ original: Note, as copy: Note) {
         store(manifest(for: original).duplicated(at: copy.createdAt), for: copy)
     }
 
     /// Forgets the note's notebook and deletes its package, for a note deleted permanently.
-    func discard(noteID: UUID) {
+    public func discard(noteID: UUID) {
         notebooks[noteID] = nil
         manifests[noteID] = nil
         try? FileManager.default.removeItem(at: NotePackage.url(for: noteID, in: library))
@@ -102,7 +103,7 @@ final class InkStore {
     /// Brings every note's page count, paper and modification date in line with its manifest, and writes
     /// a manifest for any note that has none yet (sample notes, or notes from before manifests existed),
     /// so from then on the manifest is what the library shows. Reads files off the main actor.
-    func reconcile(_ notes: [Note]) async {
+    public func reconcile(_ notes: [Note]) async {
         let library = library
         let wanted = notes.map { note in
             (id: note.id, fallback: Self.fallbackManifest(for: note))
@@ -164,7 +165,7 @@ final class InkStore {
     }
 }
 
-extension PageSize {
+public extension PageSize {
     /// Letter where US paper sizes are used, A4 everywhere else.
     static var localeDefault: PageSize {
         Locale.current.measurementSystem == .us ? .letter : .a4

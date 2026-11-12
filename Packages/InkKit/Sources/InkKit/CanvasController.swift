@@ -1,4 +1,3 @@
-import NotaUI
 import SwiftUI
 
 /// Observable tool state shared by the SwiftUI shell and the UIKit canvas.
@@ -49,6 +48,8 @@ final class CanvasController: ObservableObject {
     static let defaultPageMargins = UIEdgeInsets(top: 24, left: 24, bottom: 76, right: 24)
 
     weak var canvas: CanvasView?
+    /// The editor's theme; its ink presets colour new strokes. Set by the canvas from the environment.
+    var theme = InkTheme.standard
     /// Called when the canvas is swiped sideways to turn the page. Set by the editor that owns the pages.
     var onSwipeToPage: ((PageSwipe) -> Void)?
     /// Whether there's a page to turn to in that direction (and no page turn already under way).
@@ -70,11 +71,6 @@ final class CanvasController: ObservableObject {
         case .eraser: 8 ... 100
         case .lasso: 1 ... 1
         }
-    }
-
-    /// The colour presets shown for `tool`. Highlighters get their own light, saturated set.
-    static func inks(for tool: Tool) -> [NotaInk] {
-        tool == .highlighter ? NotaInk.highlighterPresets : NotaInk.penPresets
     }
 
     /// Fine, medium and bold widths for `tool`, all inside `widthRange(for:)`.
@@ -173,7 +169,7 @@ final class CanvasController: ObservableObject {
     /// Brush snapshot for a new stroke. `viewScale` converts the eraser's on-screen size to canvas units.
     func strokeTemplate(viewScale: CGFloat) -> StrokeTemplate {
         let s = current
-        let inks = Self.inks(for: tool)
+        let inks = theme.inks(for: tool)
         let color = RGBA(inks[min(max(s.colorIndex, 0), inks.count - 1)])
         switch tool {
         case .pen, .highlighter, .lasso:

@@ -1,4 +1,3 @@
-import NotaUI
 import SwiftUI
 
 /// Full drawing surface: the raw-Pencil canvas showing one page on a desk, the Pen Case centered in the
@@ -23,6 +22,7 @@ public struct InkCanvasEditor: View {
     /// True while a swiped page is sliding in. Further swipes wait: starting a second slide mid-way can
     /// leave the page stuck part-way across the screen.
     @State private var isTurningPage = false
+    @Environment(\.inkTheme) private var theme
 
     /// A multi-page editor.
     public init(notebook: InkNotebook, title: Binding<String>? = nil, showsDebugHUD: Bool = false) {
@@ -51,7 +51,7 @@ public struct InkCanvasEditor: View {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 PageBar(notebook: notebook, allowsMultiplePages: showsPageControls)
-                    .padding(.bottom, NotaSpacing.s)
+                    .padding(.bottom, InkSpacing.s)
             }
 
             if controller.hudVisible {
@@ -67,7 +67,7 @@ public struct InkCanvasEditor: View {
                     .ignoresSafeArea()
             }
         }
-        .background(NotaColor.bgDesk)
+        .background(theme.color(\.desk))
         .toolbar { penCaseItem }
         .onAppear {
             controller.hudVisible = showsDebugHUD

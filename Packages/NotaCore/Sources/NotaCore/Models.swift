@@ -1,16 +1,15 @@
-import NotaUI
+import Foundation
 import SwiftData
-import SwiftUI
 
 // MARK: - Value types
 
-enum PaperStyle: String, Codable, CaseIterable, Identifiable {
+public enum PaperStyle: String, Codable, CaseIterable, Identifiable, Sendable {
     case plain, lined, dotted, grid
-    var id: String {
+    public var id: String {
         rawValue
     }
 
-    var title: String {
+    public var title: String {
         switch self {
         case .plain: "Blank"
         case .lined: "Lined"
@@ -20,110 +19,86 @@ enum PaperStyle: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum NoteKind: String, Codable {
+public enum NoteKind: String, Codable, Sendable {
     case notebook, pdf
 }
 
 /// A note's colour. Kept with the note, though thumbnails now show its real ink rather than a heading in it.
-enum NoteTint: String, Codable, CaseIterable, Identifiable {
+/// The app maps it to a design-system ink.
+public enum NoteTint: String, Codable, CaseIterable, Identifiable, Sendable {
     case indigo, teal, rust, violet, graphite
-    var id: String {
+    public var id: String {
         rawValue
-    }
-
-    /// The ink the thumbnail's heading is written in.
-    var ink: NotaInk {
-        switch self {
-        case .indigo: .blue
-        case .teal: .teal
-        case .rust: .orange
-        case .violet: .violet
-        case .graphite: .black
-        }
-    }
-
-    var color: Color {
-        ink.color
     }
 }
 
-enum FolderColor: String, Codable, CaseIterable, Identifiable {
+/// A folder's label colour. The app maps it to a design-system ink.
+public enum FolderColor: String, Codable, CaseIterable, Identifiable, Sendable {
     case blue, teal, orange, purple, pink, green
-    var id: String {
+    public var id: String {
         rawValue
-    }
-
-    var color: Color {
-        switch self {
-        case .blue: NotaInk.blue.color
-        case .teal: NotaInk.teal.color
-        case .orange: NotaInk.orange.color
-        case .purple: NotaInk.violet.color
-        case .pink: NotaInk.labelRose.color
-        case .green: NotaInk.labelGreen.color
-        }
     }
 }
 
 // MARK: - SwiftData models
 
 @Model
-final class Folder {
-    var name: String
-    var colorName: String
-    var sortIndex: Int
-    var createdAt: Date
+public final class Folder {
+    public var name: String
+    public var colorName: String
+    public var sortIndex: Int
+    public var createdAt: Date
 
     @Relationship(deleteRule: .nullify, inverse: \Note.folder)
-    var notes: [Note] = []
+    public var notes: [Note] = []
 
-    init(name: String, color: FolderColor, sortIndex: Int) {
+    public init(name: String, color: FolderColor, sortIndex: Int) {
         self.name = name
         colorName = color.rawValue
         self.sortIndex = sortIndex
         createdAt = .now
     }
 
-    var color: FolderColor {
+    public var color: FolderColor {
         get { FolderColor(rawValue: colorName) ?? .blue }
         set { colorName = newValue.rawValue }
     }
 
     /// Notes in this folder that are not in Recently Deleted.
-    var activeNoteCount: Int {
+    public var activeNoteCount: Int {
         notes.filter { $0.deletedAt == nil }.count
     }
 }
 
 @Model
-final class Note {
-    @Attribute(.unique) var id: UUID
-    var title: String
-    /// Mirrored from the note's manifest by `InkStore` on every save and at launch; the value a note is
+public final class Note {
+    @Attribute(.unique) public var id: UUID
+    public var title: String
+    /// Mirrored from the note's manifest by `DocumentStore` on every save and at launch; the value a note is
     /// created with only seeds the manifest of a note that has none.
-    var pageCount: Int
-    var createdAt: Date
+    public var pageCount: Int
+    public var createdAt: Date
     /// Mirrored from the note's manifest, like `pageCount`.
-    var modifiedAt: Date
+    public var modifiedAt: Date
     /// The first page's paper, mirrored from the manifest; each page's own paper is kept there.
-    var paperName: String
-    var tintName: String
-    var kindName: String
-    var isFavorite: Bool
-    var isShared: Bool
+    public var paperName: String
+    public var tintName: String
+    public var kindName: String
+    public var isFavorite: Bool
+    public var isShared: Bool
     /// Set when the note is moved to Recently Deleted.
-    var deletedAt: Date?
-    var folder: Folder?
+    public var deletedAt: Date?
+    public var folder: Folder?
 
-    init(title: String,
-         pageCount: Int = 1,
-         modifiedAt: Date = .now,
-         paper: PaperStyle = .lined,
-         tint: NoteTint = .indigo,
-         kind: NoteKind = .notebook,
-         isFavorite: Bool = false,
-         isShared: Bool = false,
-         folder: Folder? = nil) {
+    public init(title: String,
+                pageCount: Int = 1,
+                modifiedAt: Date = .now,
+                paper: PaperStyle = .lined,
+                tint: NoteTint = .indigo,
+                kind: NoteKind = .notebook,
+                isFavorite: Bool = false,
+                isShared: Bool = false,
+                folder: Folder? = nil) {
         id = UUID()
         self.title = title
         self.pageCount = pageCount
@@ -137,26 +112,26 @@ final class Note {
         self.folder = folder
     }
 
-    var paper: PaperStyle {
+    public var paper: PaperStyle {
         get { PaperStyle(rawValue: paperName) ?? .lined }
         set { paperName = newValue.rawValue }
     }
 
-    var tint: NoteTint {
+    public var tint: NoteTint {
         get { NoteTint(rawValue: tintName) ?? .indigo }
         set { tintName = newValue.rawValue }
     }
 
-    var kind: NoteKind {
+    public var kind: NoteKind {
         get { NoteKind(rawValue: kindName) ?? .notebook }
         set { kindName = newValue.rawValue }
     }
 
-    var isDeleted: Bool {
+    public var isDeleted: Bool {
         deletedAt != nil
     }
 
-    var subtitle: String {
+    public var subtitle: String {
         let pages = pageCount == 1 ? "1 page" : "\(pageCount) pages"
         return "\(pages) · \(modifiedAt.libraryLabel)"
     }
@@ -164,7 +139,7 @@ final class Note {
 
 // MARK: - Dates
 
-extension Date {
+public extension Date {
     /// "Today", "Yesterday", a weekday within the last week, otherwise "Nov 2" (plus the year if it isn't this one).
     var libraryLabel: String {
         let calendar = Calendar.current

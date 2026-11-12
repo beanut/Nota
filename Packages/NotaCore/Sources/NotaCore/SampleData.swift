@@ -3,10 +3,10 @@ import SwiftData
 
 /// Seeds the library with sample folders and notes the first time the app launches.
 @MainActor
-enum SampleData {
+public enum SampleData {
     private static let seededKey = "didSeedSampleLibrary"
 
-    static func seedIfNeeded(in context: ModelContext) {
+    public static func seedIfNeeded(in context: ModelContext) {
         guard !UserDefaults.standard.bool(forKey: seededKey) else { return }
         defer { UserDefaults.standard.set(true, forKey: seededKey) }
 
@@ -15,7 +15,7 @@ enum SampleData {
         seed(in: context)
     }
 
-    static func seed(in context: ModelContext) {
+    public static func seed(in context: ModelContext) {
         let courses = Folder(name: "Courses", color: .blue, sortIndex: 0)
         let work = Folder(name: "Work", color: .teal, sortIndex: 1)
         let personal = Folder(name: "Personal", color: .orange, sortIndex: 2)

@@ -1,34 +1,8 @@
 import Foundation
 import InkKit
-import NotaUI
+import NotaCore
 import Observation
 import UIKit
-
-/// Where a note's files live: one `<id>.nota` directory per note under Application Support.
-///
-/// Each holds `manifest.json` (the page layout, see `NoteManifest`) and `thumbs/`; NOT-6 adds page files
-/// alongside them.
-enum NotePackage {
-    static var libraryURL: URL {
-        URL.applicationSupportDirectory.appending(path: "Notes", directoryHint: .isDirectory)
-    }
-
-    static func url(for noteID: UUID, in library: URL = libraryURL) -> URL {
-        library.appending(path: "\(noteID.uuidString).nota", directoryHint: .isDirectory)
-    }
-
-    static func manifestURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
-        url(for: noteID, in: library).appending(path: "manifest.json")
-    }
-
-    static func thumbnailsURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
-        url(for: noteID, in: library).appending(path: "thumbs", directoryHint: .isDirectory)
-    }
-
-    static func coverURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
-        thumbnailsURL(for: noteID, in: library).appending(path: "cover.png")
-    }
-}
 
 /// Renders each note's cover page (paper template + ink) to an image, keeps it in the note package's
 /// `thumbs/` folder and serves it to library cards.
@@ -40,7 +14,7 @@ enum NotePackage {
 /// Paper and ink are the same in light and dark mode (see DESIGN.md), so one image serves both.
 @Observable
 @MainActor
-final class ThumbnailStore {
+public final class ThumbnailStore {
     /// Cards are at most 260 pt wide; 2× that keeps them sharp on iPad.
     nonisolated static let pixelWidth = 520
 
@@ -61,7 +35,7 @@ final class ThumbnailStore {
         let paper: PaperStyle
     }
 
-    init(library: URL = NotePackage.libraryURL) {
+    public init(library: URL = NotePackage.libraryURL) {
         self.library = library
         memory.countLimit = 150
         // Ink lives only in memory until NOT-6, so covers left by an earlier launch show ink that no longer
@@ -71,18 +45,18 @@ final class ThumbnailStore {
         }
     }
 
-    func generation(for noteID: UUID) -> Int {
+    public func generation(for noteID: UUID) -> Int {
         generations[noteID, default: 0]
     }
 
     /// The note's cover if it's already decoded in memory. Cheap enough to call from `body`.
-    func cachedImage(for noteID: UUID) -> UIImage? {
+    public func cachedImage(for noteID: UUID) -> UIImage? {
         memory.object(forKey: noteID as NSUUID)
     }
 
     /// The note's cover, loaded from its package and decoded off the main actor. Nil when the note has no
     /// ink yet.
-    func image(for noteID: UUID) async -> UIImage? {
+    public func image(for noteID: UUID) async -> UIImage? {
         if let image = cachedImage(for: noteID) {
             return image
         }
@@ -100,7 +74,7 @@ final class ThumbnailStore {
     }
 
     /// Re-renders the note's cover from `page` unless the cached cover already shows this revision.
-    func updateCover(of noteID: UUID, page: PageSnapshot, paper: PaperStyle) {
+    public func updateCover(of noteID: UUID, page: PageSnapshot, paper: PaperStyle) {
         let key = CoverKey(pageID: page.pageID, revision: page.revision, paper: paper)
         guard renderedFrom[noteID] != key else { return }
         renderedFrom[noteID] = key
@@ -125,7 +99,7 @@ final class ThumbnailStore {
     }
 
     /// Forgets the note's cover and deletes its thumbnails, for a note deleted permanently.
-    func remove(noteID: UUID) {
+    public func remove(noteID: UUID) {
         renders.removeValue(forKey: noteID)?.cancel()
         renderedFrom[noteID] = nil
         memory.removeObject(forKey: noteID as NSUUID)
@@ -162,60 +136,6 @@ final class ThumbnailStore {
         guard let packages = try? files.contentsOfDirectory(at: library, includingPropertiesForKeys: nil) else { return }
         for package in packages where package.pathExtension == "nota" {
             try? files.removeItem(at: package.appending(path: "thumbs", directoryHint: .isDirectory))
-        }
-    }
-}
-
-/// The paper and its ruling, drawn with Core Graphics so the SwiftUI placeholder and the rendered cover
-/// match exactly. Measurements follow Figma's 190 pt-wide Paper and scale with `size`.
-enum PaperTemplate {
-    private static let surface = NotaUIColor.paperSurface.cgColor
-    private static let rule = NotaUIColor.paperRule.cgColor
-
-    /// Fills `size` (origin top-left, y down) with paper and draws `paper`'s ruling over it.
-    static func draw(_ paper: PaperStyle, in ctx: CGContext, size: CGSize) {
-        let unit = size.width / 190
-        ctx.saveGState()
-        defer { ctx.restoreGState() }
-        ctx.setFillColor(surface)
-        ctx.fill(CGRect(origin: .zero, size: size))
-        ctx.setFillColor(rule)
-
-        switch paper {
-        case .plain:
-            break
-        case .lined:
-            // Figma Paper / Ruled: first rule at 36 pt, then one every 10 pt.
-            var y = 36 * unit
-            while y < size.height {
-                ctx.fill(CGRect(x: 0, y: y, width: size.width, height: max(0.5, 0.75 * unit)))
-                y += 10 * unit
-            }
-        case .dotted:
-            let step = 12 * unit
-            let r = max(0.6, 1 * unit)
-            var y = step
-            while y < size.height {
-                var x = step
-                while x < size.width {
-                    ctx.fillEllipse(in: CGRect(x: x - r, y: y - r, width: 2 * r, height: 2 * r))
-                    x += step
-                }
-                y += step
-            }
-        case .grid:
-            let step = 12 * unit
-            let line = max(0.5, 0.5 * unit)
-            var x = step
-            while x < size.width {
-                ctx.fill(CGRect(x: x, y: 0, width: line, height: size.height))
-                x += step
-            }
-            var y = step
-            while y < size.height {
-                ctx.fill(CGRect(x: 0, y: y, width: size.width, height: line))
-                y += step
-            }
         }
     }
 }

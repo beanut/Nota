@@ -1,4 +1,3 @@
-import NotaUI
 import SwiftUI
 
 /// Floating bar under the page: previous / next, the page number, adding pages and the page size.
@@ -8,30 +7,31 @@ struct PageBar: View {
 
     @State private var customSizeTarget: CustomSizeTarget?
     @State private var confirmDelete = false
+    @Environment(\.inkTheme) private var theme
 
     var body: some View {
-        HStack(spacing: NotaSpacing.xxxs) {
+        HStack(spacing: InkSpacing.xxxs) {
             if allowsMultiplePages {
-                Button { notebook.goToPreviousPage() } label: { NotaIconView(.chevronLeft) }
-                    .buttonStyle(.notaIcon)
+                Button { notebook.goToPreviousPage() } label: { InkIconView(.previousPage) }
+                    .buttonStyle(.inkIcon)
                     .disabled(!notebook.canGoToPreviousPage)
                     .accessibilityLabel("Previous page")
                 Text("Page \(notebook.currentPageIndex + 1) of \(notebook.pageCount)")
-                    .font(NotaFont.subheadlineEmph.monospacedDigit())
-                    .foregroundStyle(NotaColor.textPrimary)
-                Button { notebook.goToNextPage() } label: { NotaIconView(.chevronRight) }
-                    .buttonStyle(.notaIcon)
+                    .font(theme.bodyEmphasizedFont.monospacedDigit())
+                    .foregroundStyle(theme.color(\.textPrimary))
+                Button { notebook.goToNextPage() } label: { InkIconView(.nextPage) }
+                    .buttonStyle(.inkIcon)
                     .disabled(!notebook.canGoToNextPage)
                     .accessibilityLabel("Next page")
-                NotaBarDivider()
+                InkBarDivider()
                 addMenu
             }
             sizeMenu
         }
-        .padding(.leading, NotaSpacing.xxs)
-        .padding(.trailing, NotaSpacing.xs)
-        .padding(.vertical, NotaSpacing.xxs)
-        .notaFloatingBar(fill: NotaColor.bgRaised)
+        .padding(.leading, InkSpacing.xxs)
+        .padding(.trailing, InkSpacing.xs)
+        .padding(.vertical, InkSpacing.xxs)
+        .inkFloatingBar(fill: \.surfaceRaised)
         .sheet(item: $customSizeTarget) { target in
             CustomPageSizeSheet(initial: target.initial) { size in apply(size, to: target.kind) }
         }
@@ -66,12 +66,12 @@ struct PageBar: View {
             }
             .disabled(!notebook.canRemovePage)
         } label: {
-            NotaIconView(.plus)
+            InkIconView(.addPage)
         } primaryAction: {
             notebook.addPage()
         }
         .menuStyle(.button)
-        .buttonStyle(.notaIcon)
+        .buttonStyle(.inkIcon)
         .accessibilityLabel("Add page")
         .accessibilityHint("Touch and hold for more page options.")
     }
@@ -89,16 +89,16 @@ struct PageBar: View {
             }
         } label: {
             // Figma: the paper-size pill.
-            HStack(spacing: NotaSpacing.xxs) {
+            HStack(spacing: InkSpacing.xxs) {
                 Text(currentSize.displayName())
-                    .font(NotaFont.footnoteEmph)
-                NotaIconView(.chevronDown, size: 12)
+                    .font(theme.footnoteEmphasizedFont)
+                InkIconView(.disclosure, size: 12)
             }
-            .foregroundStyle(NotaColor.textPrimary)
-            .padding(.leading, NotaSpacing.sm)
-            .padding(.trailing, NotaSpacing.s)
+            .foregroundStyle(theme.color(\.textPrimary))
+            .padding(.leading, InkSpacing.sm)
+            .padding(.trailing, InkSpacing.s)
             .frame(height: 28)
-            .background(NotaColor.bgFill, in: Capsule())
+            .background(theme.color(\.surfaceFill), in: Capsule())
             .contentShape(Capsule())
         }
         .menuStyle(.button)
@@ -154,6 +154,7 @@ public struct CustomPageSizeSheet: View {
     }
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.inkTheme) private var theme
     @State private var unit = PageSize.Unit.localeDefault
     @State private var width: Double = 0
     @State private var height: Double = 0
@@ -209,7 +210,7 @@ public struct CustomPageSizeSheet: View {
                 TextField(title, value: value, format: .number.precision(.fractionLength(0 ... 2)))
                     .keyboardType(.decimalPad)
                     .multilineTextAlignment(.trailing)
-                Text(unit.symbol).foregroundStyle(NotaColor.textSecondary)
+                Text(unit.symbol).foregroundStyle(theme.color(\.textSecondary))
             }
         }
     }
