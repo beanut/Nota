@@ -12,6 +12,9 @@ let package = Package(
     ],
     targets: [
         .target(name: "InkKit"),
-        .testTarget(name: "InkKitTests", dependencies: ["InkKit"])
+        .testTarget(name: "InkKitTests", dependencies: ["InkKit"]),
+        // Performance benchmarks and latency budgets. Not part of the regular test run: CI skips them and
+        // a nightly job runs them in Release against a stored baseline (see README › Benchmarks).
+        .testTarget(name: "InkKitBenchmarks", dependencies: ["InkKit"], resources: [.copy("Fixtures")])
     ]
 )

@@ -67,10 +67,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Test InkKit and NotaCore packages on iPad simulator
+        # InkKit's benchmarks run nightly in Release instead (.github/workflows/benchmarks.yml).
         run: |
           for package in InkKit NotaCore; do
+            skip=""
+            [ "$package" = InkKit ] && skip="-skip-testing:InkKitBenchmarks"
             (cd "Packages/$package" && xcodebuild test \
               -scheme "$package" \
+              $skip \
               -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" \
               -skipPackagePluginValidation \
               CODE_SIGNING_ALLOWED=NO) || exit 1

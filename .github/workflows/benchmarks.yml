@@ -1,0 +1,77 @@
+name: Ink benchmarks
+
+# Nightly ink performance run (NOT-13). Runs InkKit's benchmarks in Release on an iPad simulator, keeps the
+# results as an artifact, and compares them with the stored baseline for this runner:
+# fails on a regression of more than 10%, or on a budget the baseline met and this run misses.
+#
+# Recording a baseline: run this workflow by hand with "record baseline" ticked, download the
+# `baseline` artifact and commit it as Packages/InkKit/Benchmarks/baselines/ci-macos-15.json.
+
+on:
+  # Nightly run temporarily disabled: page open misses its budget by ~70×, so turn it back on once that's
+  # being worked on and a CI baseline is committed. Manual and pull-request runs still work.
+  # schedule:
+  #   - cron: "17 3 * * *" # 03:17 UTC nightly
+  workflow_dispatch:
+    inputs:
+      record_baseline:
+        description: Also save this run as a baseline artifact to commit
+        type: boolean
+        default: false
+  pull_request:
+    # Changes to the benchmarks themselves get a run, so the harness is proven before it reaches nightly.
+    paths:
+      - Packages/InkKit/Tests/InkKitBenchmarks/**
+      - Packages/InkKit/Benchmarks/**
+      - scripts/run-benchmarks.sh
+      - scripts/bench-compare.py
+      - .github/workflows/benchmarks.yml
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASELINE: Packages/InkKit/Benchmarks/baselines/ci-macos-15.json
+
+jobs:
+  benchmarks:
+    name: Ink benchmarks
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Run benchmarks
+        run: scripts/run-benchmarks.sh bench-output
+
+      - name: Compare with baseline
+        run: |
+          scripts/bench-compare.py bench-output/results.json \
+            --baseline "$BASELINE" --threshold 0.10 --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Save as baseline
+        if: always() && inputs.record_baseline
+        run: scripts/bench-compare.py bench-output/results.json --write-baseline bench-output/baseline/ci-macos-15.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ink-benchmarks-${{ github.run_number }}
+          path: |
+            bench-output/results.json
+            bench-output/xcodebuild.log
+          retention-days: 90
+
+      - name: Upload baseline
+        if: always() && inputs.record_baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline
+          path: bench-output/baseline/ci-macos-15.json

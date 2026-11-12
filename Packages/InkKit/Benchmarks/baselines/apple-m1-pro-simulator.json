@@ -1,0 +1,71 @@
+{
+  "environment": {
+    "configuration": "release",
+    "corpus": "synthetic",
+    "device": "iPad17,4",
+    "host_cpu": "Apple M1 Pro",
+    "os": "iPadOS 27.2"
+  },
+  "metrics": {
+    "full_redraw.5k_ms": {
+      "unit": "ms",
+      "value": 10477.565
+    },
+    "live_event.long_stroke.first_quarter_p95_ms": {
+      "unit": "ms",
+      "value": 0.276
+    },
+    "live_event.long_stroke.last_quarter_p95_ms": {
+      "budget": 2,
+      "unit": "ms",
+      "value": 0.26
+    },
+    "live_event.p50_ms": {
+      "unit": "ms",
+      "value": 0.067
+    },
+    "live_event.p95_ms": {
+      "budget": 2,
+      "unit": "ms",
+      "value": 0.197
+    },
+    "live_event.p99_ms": {
+      "unit": "ms",
+      "value": 0.33
+    },
+    "memory.6x.geometry_mb": {
+      "unit": "MB",
+      "value": 94.875
+    },
+    "memory.6x.live_tiles_peak_mb": {
+      "unit": "MB",
+      "value": 15
+    },
+    "memory.6x.peak_mb": {
+      "unit": "MB",
+      "value": 114.547
+    },
+    "page_open.1k_ms": {
+      "unit": "ms",
+      "value": 2232.364
+    },
+    "page_open.20k_ms": {
+      "unit": "ms",
+      "value": 44621.794
+    },
+    "page_open.5k_ms": {
+      "budget": 150,
+      "unit": "ms",
+      "value": 10909.403
+    },
+    "stroke_geometry.corpus_ms": {
+      "unit": "ms",
+      "value": 12.122
+    },
+    "stroke_geometry.per_stroke_us": {
+      "unit": "us",
+      "value": 189.406
+    }
+  },
+  "schema": 1
+}

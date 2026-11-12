@@ -32,6 +32,8 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `PencilTexture.swift` | Graphite grain for the pencil |
 | `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes |
 | `Lasso.swift` | Freeform and rectangle lasso regions and hit-testing |
+| `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes, culling, drawing), shared by the canvas and the benchmarks |
+| `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
 | `PageRenderer.swift` | Renders a page snapshot to an image off the main actor (thumbnails) |
 | `Stroke.swift` | `Stroke`, `StrokePoint`, `BrushStyle`, tool enums, `RGBA` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit |
@@ -99,10 +101,64 @@ This is a toggleable overlay, throttled to about 30 Hz so SwiftUI never sits on 
 - Hover height (`zOffset`)
 - Samples/s and events/s, predicted-touch count, pending estimated updates, stroke count
 
+## Benchmarks
+
+`Tests/InkKitBenchmarks` holds XCTest performance benchmarks with latency budgets (Architecture §6), so
+later features (textured brushes, PDF, continuous scroll) can't quietly make ink feel worse. They time
+InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch screen (1032 × 1376 pt at 2×):
+
+| Metric | What it times | Budget |
+| --- | --- | --- |
+| `stroke_geometry.*` | Building every corpus stroke's outline (spline, nib hulls, runs) from scratch | – |
+| `live_event.p50/p95/p99_ms` | One touch event of a replayed stroke: appending its coalesced samples, finalizing segments, rebuilding the predicted tail, applying estimate updates, and drawing the dirty live-layer tiles | p95 < 2 ms |
+| `live_event.long_stroke.*` | The same for the longest stroke (a 4 s tilted shading scribble), first quarter vs last quarter: work mustn't grow with length | last-quarter p95 < 2 ms |
+| `page_open.{1,5,20}k_ms` | Opening a page of that many strokes: a fresh committed bitmap, every stroke's geometry built, the page drawn | 5k < 150 ms |
+| `full_redraw.5k_ms` | Re-rendering a 5k-stroke page with geometry cached (undo, erase, end of zoom) | – |
+| `memory.6x.*` | Physical footprint with a 5k page open at 6× zoom while the corpus is written on top: cached geometry, committed bitmap, live tiles | – |
+
+### Recorded input
+
+The benchmarks replay `*.inkrec.json` recordings from `Tests/InkKitBenchmarks/Fixtures` through
+`InputReplayer`, which feeds `LiveStroke` and a `LiveInkView` event by event exactly as the canvas does
+(coalesced batches, predicted tails, late force/tilt estimates). Pages for the page-level benchmarks are
+tiled from the same strokes.
+
+- **Record** on an iPad: More menu › *Record Pencil Input*, write, turn it off, then *Share Pencil Recording…*.
+  Drop the file into `Fixtures/` and record new baselines in the same change.
+- The fixture in the repository today, `handwriting.synthetic.inkrec.json`, is **synthetic**
+  (`SyntheticPencil`: 240 Hz samples on 120 Hz events, predictions, estimate updates, cursive-like words,
+  a highlighter pass and a shading scribble), because nothing has been recorded on a physical iPad yet.
+  Regenerate it with `TEST_RUNNER_INK_BENCH_WRITE_FIXTURE=<path>` and `-only-testing:InkKitBenchmarks/FixtureGeneration`;
+  `TEST_RUNNER_INK_BENCH_PREVIEW_DIR=<dir>` renders every fixture to a PNG.
+
+### Running them
+
+```bash
+scripts/run-benchmarks.sh bench-output          # Release, iPad Pro 13-inch simulator; ~5 min
+scripts/bench-compare.py bench-output/results.json --baseline Packages/InkKit/Benchmarks/baselines/apple-m1-pro-simulator.json
+```
+
+Run them in Release (`-configuration Release ENABLE_TESTABILITY=YES`, which the script does); a Debug build
+reports numbers but the compare script refuses them. In Xcode, each benchmark also shows its `measure` time.
+`TEST_RUNNER_INK_BENCH_ENFORCE_BUDGETS=1` makes the tests themselves fail on a missed budget.
+
+### Nightly job and baselines
+
+`.github/workflows/benchmarks.yml` runs the suite nightly (and on pull requests that change the benchmarks;
+the nightly schedule is temporarily commented out until a CI baseline is committed),
+uploads `results.json` as an artifact, and writes the comparison table to the job summary. It fails when a
+metric is more than 10% worse than `Benchmarks/baselines/ci-macos-15.json` (changes under a small noise
+floor are ignored), or when a budget the baseline met is missed. Budgets the baseline already misses are
+shown as known, so they don't keep the job red and hide new regressions.
+
+Baselines are per environment: numbers from a GitHub runner and from a laptop aren't comparable. To
+record one, run the workflow by hand with *record baseline* ticked and commit the `baseline` artifact,
+or locally `scripts/bench-compare.py results.json --write-baseline <path>`.
+
 ## Tests
 
 ```bash
-xcodebuild test -scheme InkKit -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
+xcodebuild test -scheme InkKit -skip-testing:InkKitBenchmarks -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
 ```
 
 A physical-iPad verification checklist (pressure, tilt, sample rate, eraser, lasso) lives in the InkCanvas README.
