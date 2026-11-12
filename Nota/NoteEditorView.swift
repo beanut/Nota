@@ -7,6 +7,7 @@ import SwiftUI
 struct NoteEditorView: View {
     @Bindable var note: Note
     @Environment(InkStore.self) private var inkStore
+    @Environment(ThumbnailStore.self) private var thumbnails
     @State private var inkOnOpen: [Int] = []
 
     var body: some View {
@@ -26,6 +27,8 @@ struct NoteEditorView: View {
                 if notebook.pages.map(\.strokeCount) != inkOnOpen {
                     note.modifiedAt = .now
                 }
+                // The first page is the cover; skipped if it hasn't changed since its last render.
+                thumbnails.updateCover(of: note.id, page: notebook.pages[0].snapshot(), paper: note.paper)
             }
     }
 }

@@ -21,6 +21,11 @@ final class InkStore {
         return notebook
     }
 
+    /// The note's notebook if it has been opened this session, without creating one.
+    func existingNotebook(for noteID: UUID) -> InkNotebook? {
+        notebooks[noteID]
+    }
+
     func discard(noteID: UUID) {
         notebooks[noteID] = nil
     }

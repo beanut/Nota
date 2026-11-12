@@ -24,7 +24,7 @@ enum NoteKind: String, Codable {
     case notebook, pdf
 }
 
-/// Cover colour of a note: the band across the top of its thumbnail.
+/// A note's colour. Kept with the note, though thumbnails now show its real ink rather than a heading in it.
 enum NoteTint: String, Codable, CaseIterable, Identifiable {
     case indigo, teal, rust, violet, graphite
     var id: String {

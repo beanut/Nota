@@ -11,6 +11,7 @@ public final class CanvasDocument: Identifiable {
     public var pageSize: PageSize {
         didSet {
             if pageSize != oldValue {
+                revision += 1
                 onPageSizeChange?()
             }
         }
@@ -32,6 +33,10 @@ public final class CanvasDocument: Identifiable {
     }
 
     var onPageSizeChange: (() -> Void)?
+
+    /// Goes up whenever the page's ink or size changes (each edit, undo and redo), so a cached rendering
+    /// of the page is current while its revision matches.
+    public private(set) var revision = 0
 
     /// Number of strokes on the page (including pixel-eraser strokes).
     public var strokeCount: Int {
@@ -123,6 +128,7 @@ public final class CanvasDocument: Identifiable {
         guard let s = strokes.lastIndex(where: { $0.id == strokeID }),
               strokes[s].points.indices.contains(index) else { return false }
         body(&strokes[s].points[index])
+        revision += 1
         return true
     }
 
@@ -149,6 +155,7 @@ public final class CanvasDocument: Identifiable {
             lastMovedIDs = ids
             redoStack.append(.move(ids, d))
         }
+        revision += 1
         onChange?()
         return true
     }
@@ -173,6 +180,7 @@ public final class CanvasDocument: Identifiable {
             lastMovedIDs = ids
             undoStack.append(.move(ids, d))
         }
+        revision += 1
         onChange?()
         return true
     }
@@ -203,6 +211,7 @@ public final class CanvasDocument: Identifiable {
     private func push(_ command: Command) {
         undoStack.append(command)
         redoStack.removeAll()
+        revision += 1
         onChange?()
     }
 }
