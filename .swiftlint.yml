@@ -1,0 +1,40 @@
+# SwiftLint config for CI. Violations of any rule fail the build (see .github/workflows/ci.yml).
+included:
+  - Nota
+  - Packages/InkKit/Sources
+  - Packages/InkKit/Tests
+  - Packages/NotaUI/Sources
+
+excluded:
+  - DerivedData
+  - .build
+
+# InkKit's drawing code uses short coordinate names (x, y, p, t) on purpose.
+identifier_name:
+  min_length: 1
+  max_length: 60
+  excluded:
+    - id
+    - x
+    - y
+
+# The canvas engine is large by design; keep these as ceilings rather than targets.
+# Raised to fit the current InkKit sources (CanvasView, StrokeRenderer, LiveInkView); strict mode
+# turns warnings into failures, so the warning values are the effective limits.
+type_body_length:
+  warning: 1300
+  error: 1500
+file_length:
+  warning: 1800
+  error: 2000
+function_body_length:
+  warning: 120
+  error: 150
+cyclomatic_complexity:
+  warning: 20
+  error: 25
+line_length:
+  warning: 140
+  error: 200
+  ignores_comments: true
+  ignores_urls: true

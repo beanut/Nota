@@ -1,9 +1,12 @@
+import NotaUI
 import SwiftData
 import SwiftUI
 
 enum LibraryFilter: String, CaseIterable, Identifiable {
     case recent, notebooks, pdfs
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 
     var title: String {
         switch self {
@@ -39,14 +42,16 @@ struct NotesBrowser: View {
     @State private var notePendingDeletion: Note?
     @State private var isConfirmingEmptyTrash = false
 
-    private let columns = [GridItem(.adaptive(minimum: 170, maximum: 260), spacing: 24, alignment: .top)]
+    private let columns = [GridItem(.adaptive(minimum: 170, maximum: 260), spacing: NotaSpacing.xxl, alignment: .top)]
 
     private var folder: Folder? {
-        guard case .folder(let id) = section else { return nil }
+        guard case let .folder(id) = section else { return nil }
         return folders.first { $0.persistentModelID == id }
     }
 
-    private var title: String { folder?.name ?? section.title }
+    private var title: String {
+        folder?.name ?? section.title
+    }
 
     private var visibleNotes: [Note] {
         let query = searchText.trimmingCharacters(in: .whitespaces)
@@ -60,22 +65,24 @@ struct NotesBrowser: View {
     var body: some View {
         let notes = visibleNotes
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: NotaSpacing.xl) {
                 filterBar
 
-                LazyVGrid(columns: columns, alignment: .leading, spacing: 28) {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: NotaSpacing.xxl) {
                     ForEach(notes) { note in
                         card(for: note)
                     }
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 32)
+            .padding(.horizontal, NotaSpacing.xxl)
+            .padding(.bottom, NotaSpacing.xxxl)
         }
         .scrollDismissesKeyboard(.immediately)
-        .background(Color(.systemGroupedBackground))
+        .background(NotaColor.bgApp)
         .overlay {
-            if notes.isEmpty { emptyState }
+            if notes.isEmpty {
+                emptyState
+            }
         }
         .navigationTitle(title)
         .searchable(text: $searchText, placement: .toolbar, prompt: "Search notes")
@@ -85,14 +92,18 @@ struct NotesBrowser: View {
             Button("Cancel", role: .cancel) {}
             Button("Rename") {
                 let name = renameText.trimmingCharacters(in: .whitespaces)
-                if !name.isEmpty { noteBeingRenamed?.title = name }
+                if !name.isEmpty {
+                    noteBeingRenamed?.title = name
+                }
             }
         }
         .confirmationDialog("Delete “\(notePendingDeletion?.title ?? "")” permanently?",
                             isPresented: isPresent($notePendingDeletion),
                             titleVisibility: .visible) {
             Button("Delete Note", role: .destructive) {
-                if let note = notePendingDeletion { purge([note]) }
+                if let note = notePendingDeletion {
+                    purge([note])
+                }
             }
         } message: {
             Text("This can’t be undone.")
@@ -111,22 +122,13 @@ struct NotesBrowser: View {
     // MARK: Pieces
 
     private var filterBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: NotaSpacing.s) {
             ForEach(LibraryFilter.allCases) { option in
-                if option == filter {
-                    Button(option.title) { filter = option }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Color(.label))
-                        .foregroundStyle(Color(.systemBackground))
-                } else {
-                    Button(option.title) { filter = option }
-                        .buttonStyle(.bordered)
-                        .tint(.primary)
-                }
+                Button(option.title) { filter = option }
+                    .buttonStyle(.notaChip(selected: option == filter))
+                    .accessibilityAddTraits(option == filter ? .isSelected : [])
             }
         }
-        .font(.subheadline.weight(.semibold))
-        .buttonBorderShape(.capsule)
         .animation(.snappy, value: filter)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Filter")
@@ -146,23 +148,42 @@ struct NotesBrowser: View {
         }
     }
 
+    /// Why the grid is empty, from the most specific reason to the least.
     @ViewBuilder
     private var emptyState: some View {
+        let inSection = allNotes.contains(where: section.contains)
         if !searchText.isEmpty {
-            ContentUnavailableView.search(text: searchText)
-        } else if section == .deleted {
-            ContentUnavailableView("No Recently Deleted Notes", systemImage: "trash",
-                                   description: Text("Deleted notes stay here until you remove them."))
+            NotaEmptyState(.search, title: "No Results", message: "No notes match “\(searchText)”.")
+        } else if inSection, filter == .pdfs {
+            NotaEmptyState(.filter, title: "No PDFs", message: "PDFs you import will appear here.")
+        } else if inSection, filter == .notebooks {
+            NotaEmptyState(.filter, title: "No Notebooks", message: "Only PDFs are in \(title).")
         } else {
-            ContentUnavailableView {
-                Label("No Notes", systemImage: "square.and.pencil")
-            } description: {
-                Text("Notes you create will appear here.")
-            } actions: {
-                Button("New Note", action: createNote)
-                    .buttonStyle(.borderedProminent)
+            switch section {
+            case .deleted:
+                NotaEmptyState(.trash, title: "Nothing in Recently Deleted",
+                               message: "Deleted notes stay here until you remove them.")
+            case .favorites:
+                NotaEmptyState(.star, title: "No Favorites", message: "Favorite a note from its menu to keep it here.")
+            case .recents:
+                NotaEmptyState(.clock, title: "No Recent Notes", message: "Notes you’ve edited in the last 7 days appear here.")
+            case .shared:
+                NotaEmptyState(.share, title: "No Shared Notes", message: "Notes you share appear here.")
+            case .folder:
+                NotaEmptyState(.folder, title: "This Folder Is Empty",
+                               message: "Create a note here, or move one in from its menu.") { newNoteButton(size: .large) }
+            case .all:
+                NotaEmptyState(.grid, title: "No Notes Yet",
+                               message: "Notes you create will appear here.") { newNoteButton(size: .large) }
             }
         }
+    }
+
+    private func newNoteButton(size: NotaButtonStyle.Size) -> some View {
+        Button(action: createNote) {
+            NotaButtonLabel("New Note", icon: .plus, size: size)
+        }
+        .buttonStyle(.nota(.primary, size: size))
     }
 
     @ToolbarContentBuilder
@@ -172,16 +193,8 @@ struct NotesBrowser: View {
                 Button("Delete All", role: .destructive) { isConfirmingEmptyTrash = true }
                     .disabled(!allNotes.contains(where: \.isDeleted))
             } else {
-                Button(action: createNote) {
-                    // Text with an inline symbol: toolbars collapse a `Label` to its icon.
-                    Text("\(Image(systemName: "plus")) New Note")
-                        .fontWeight(.semibold)
-                        .padding(.horizontal, 4)
-                }
-                .accessibilityLabel("New Note")
-                .buttonStyle(.borderedProminent)
-                .buttonBorderShape(.roundedRectangle(radius: 12))
-                .keyboardShortcut("n", modifiers: .command)
+                newNoteButton(size: .compact)
+                    .keyboardShortcut("n", modifiers: .command)
             }
         }
     }

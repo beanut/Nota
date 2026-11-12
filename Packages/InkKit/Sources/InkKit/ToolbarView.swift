@@ -1,116 +1,144 @@
+import NotaUI
 import SwiftUI
 
-struct ToolbarView: View {
+extension Tool {
+    var icon: NotaIcon {
+        switch self {
+        case .pen: .pen
+        case .pencil: .pencil
+        case .highlighter: .highlighter
+        case .eraser: .eraser
+        case .lasso: .lasso
+        }
+    }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .pen: "Pen"
+        case .pencil: "Pencil"
+        case .highlighter: "Highlighter"
+        case .eraser: "Eraser"
+        case .lasso: "Lasso"
+        }
+    }
+
+    /// Whether the tool draws in a colour picked from the Pen Case.
+    var usesInk: Bool {
+        switch self {
+        case .pen, .pencil, .highlighter: true
+        case .eraser, .lasso: false
+        }
+    }
+}
+
+/// The Pen Case: the one drawing toolbar. Tools · inks · undo/redo · more, placed in the navigation bar on
+/// the same row as the back button. The note's title and Rename live in the More menu. Tap the selected
+/// tool again for its options.
+struct PenCase: View {
     @ObservedObject var controller: CanvasController
+    var title: Binding<String>?
+
+    @State private var optionsTool: Tool?
     @State private var showSettings = false
     @State private var confirmClear = false
+    @State private var showRename = false
+    @State private var draftTitle = ""
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: NotaSpacing.xxxs) {
+            ViewThatFits(in: .horizontal) {
+                tools
+                ScrollView(.horizontal, showsIndicators: false) { tools }
+            }
+            NotaBarDivider(in: .horizontal)
+            InkRow(controller: controller, axis: .horizontal)
+            NotaBarDivider(in: .horizontal)
+            Button { controller.undo() } label: { NotaIconView(.undo) }
+                .buttonStyle(.notaIcon)
+                .disabled(!controller.canUndo)
+                .accessibilityLabel("Undo")
+            Button { controller.redo() } label: { NotaIconView(.redo) }
+                .buttonStyle(.notaIcon)
+                .disabled(!controller.canRedo)
+                .accessibilityLabel("Redo")
+            NotaBarDivider(in: .horizontal)
+            moreMenu
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Tools")
+    }
+
+    private var tools: some View {
+        HStack(spacing: NotaSpacing.xxxs) {
             ForEach(Tool.allCases) { tool in
-                ToolButton(tool: tool, selected: controller.tool == tool) { controller.select(tool) }
+                ToolButton(tool: tool, selected: controller.tool == tool) {
+                    if controller.tool == tool {
+                        optionsTool = tool
+                    } else {
+                        controller.select(tool)
+                    }
+                }
+                .popover(isPresented: optionsBinding(for: tool), arrowEdge: .top) {
+                    ToolOptionsView(controller: controller, tool: tool)
+                }
             }
+        }
+    }
 
-            divider
-
-            if controller.tool == .lasso {
-                Picker("Lasso", selection: $controller.lassoMode) {
-                    Text("Freeform").tag(LassoMode.freeform)
-                    Text("Square").tag(LassoMode.square)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 170)
-                iconButton("trash", "Delete selection", enabled: controller.hasSelection) {
-                    controller.deleteSelection()
-                }
-            } else if controller.tool == .eraser {
-                Picker("Eraser", selection: $controller.eraserMode) {
-                    Text("Stroke").tag(EraserMode.stroke)
-                    Text("Pixel").tag(EraserMode.pixel)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 150)
-            } else {
-                SwatchRow(selected: colorBinding)
+    private func optionsBinding(for tool: Tool) -> Binding<Bool> {
+        Binding(get: { optionsTool == tool }, set: {
+            if !$0 {
+                optionsTool = nil
             }
+        })
+    }
 
-            divider
-
-            if controller.tool != .lasso {
-                widthControl
-
-                divider
-            }
-
-            iconButton("arrow.uturn.backward", "Undo", enabled: controller.canUndo) { controller.undo() }
-            iconButton("arrow.uturn.forward", "Redo", enabled: controller.canRedo) { controller.redo() }
-            iconButton("trash", "Clear canvas", enabled: controller.canUndo || controller.canRedo) { confirmClear = true }
-                .confirmationDialog("Clear the canvas?", isPresented: $confirmClear) {
-                    Button("Clear", role: .destructive) { controller.clear() }
-                } message: {
-                    Text("You can undo this.")
+    private var moreMenu: some View {
+        Menu {
+            if let title {
+                Section(title.wrappedValue.isEmpty ? "Untitled" : title.wrappedValue) {
+                    Button {
+                        draftTitle = title.wrappedValue
+                        showRename = true
+                    } label: {
+                        Label("Rename…", systemImage: "pencil")
+                    }
                 }
-
-            divider
-
-            iconButton("slider.horizontal.3", "Pressure & tilt settings") { showSettings.toggle() }
-                .popover(isPresented: $showSettings) {
-                    CanvasSettingsView(controller: controller)
-                }
-            iconButton(controller.hudVisible ? "gauge.with.dots.needle.67percent" : "gauge.with.dots.needle.0percent",
-                       "Toggle debug HUD", tint: controller.hudVisible ? .accentColor : .primary) {
-                controller.hudVisible.toggle()
             }
             Button { controller.resetZoom() } label: {
-                Text("\(Int((controller.zoom * 100).rounded()))%")
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                    .frame(minWidth: 44, minHeight: 36)
+                Label("Fit Page · \(Int((controller.zoom * 100).rounded()))%", systemImage: "arrow.up.left.and.arrow.down.right")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Reset zoom")
+            Divider()
+            Button { showSettings = true } label: {
+                Label("Pressure & Tilt…", systemImage: "hand.draw")
+            }
+            Toggle(isOn: $controller.hudVisible) {
+                Label("Debug HUD", systemImage: "gauge.with.dots.needle.67percent")
+            }
+            Divider()
+            Button(role: .destructive) { confirmClear = true } label: {
+                Label("Clear Page", systemImage: "trash")
+            }
+            .disabled(!controller.canUndo && !controller.canRedo)
+        } label: {
+            NotaIconView(.ellipsis)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.black.opacity(0.08)))
-        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
-    }
-
-    private var divider: some View {
-        Rectangle().fill(.secondary.opacity(0.3)).frame(width: 1, height: 24)
-    }
-
-    private var colorBinding: Binding<Int> {
-        Binding(get: { controller.current.colorIndex }, set: { controller.current.colorIndex = $0 })
-    }
-
-    private var widthControl: some View {
-        let range = CanvasController.widthRange(for: controller.tool)
-        return HStack(spacing: 8) {
-            Slider(value: Binding(get: { controller.current.width }, set: { controller.current.width = $0 }),
-                   in: range)
-                .frame(width: 100)
-            Circle()
-                .fill(controller.tool == .eraser ? Color.secondary.opacity(0.4)
-                      : Color(cgColor: RGBA.swatches[controller.current.colorIndex].cgColor()))
-                .frame(width: max(4, min(controller.current.width, 28)), height: max(4, min(controller.current.width, 28)))
-                .frame(width: 28, height: 28)
+        .menuStyle(.button)
+        .buttonStyle(.notaIcon)
+        .accessibilityLabel("More")
+        .popover(isPresented: $showSettings, arrowEdge: .top) {
+            CanvasSettingsView(controller: controller)
         }
-        .accessibilityLabel("Width")
-    }
-
-    private func iconButton(_ symbol: String, _ label: String, enabled: Bool = true, tint: Color = .primary,
-                            action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(enabled ? tint : Color.secondary.opacity(0.4))
-                .frame(width: 34, height: 36)
-                .contentShape(Rectangle())
+        .confirmationDialog("Clear the page?", isPresented: $confirmClear) {
+            Button("Clear Page", role: .destructive) { controller.clear() }
+        } message: {
+            Text("You can undo this.")
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel(label)
+        .alert("Rename Note", isPresented: $showRename) {
+            TextField("Title", text: $draftTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") { title?.wrappedValue = draftTitle }
+        }
     }
 }
 
@@ -121,48 +149,128 @@ private struct ToolButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 18, weight: selected ? .semibold : .regular))
-                .foregroundStyle(selected ? Color.white : Color.primary)
-                .frame(width: 36, height: 36)
-                .background(selected ? Color.accentColor : .clear, in: Circle())
-                .contentShape(Circle())
+            NotaIconView(tool.icon)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(tool.rawValue.capitalized)
+        .buttonStyle(.notaIcon(selected: selected))
+        .accessibilityLabel(tool.title)
         .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    private var symbol: String {
-        switch tool {
-        case .pen: return "pencil.tip"
-        case .pencil: return "pencil"
-        case .highlighter: return "highlighter"
-        case .eraser: return "eraser"
-        case .lasso: return "lasso"
-        }
+        .accessibilityHint(selected ? "Shows options for this tool." : "")
     }
 }
 
-private struct SwatchRow: View {
-    @Binding var selected: Int
+/// The current tool's colour presets. Tools that don't draw in a colour keep showing the pen inks, dimmed,
+/// so the bar doesn't change length as you switch tools.
+private struct InkRow: View {
+    @ObservedObject var controller: CanvasController
+    let axis: Axis
+    var onPick: () -> Void = {}
 
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(RGBA.swatches.indices, id: \.self) { i in
-                Button { selected = i } label: {
+        let tool = controller.tool
+        let inks = CanvasController.inks(for: tool.usesInk ? tool : .pen)
+        let layout = axis == .horizontal
+            ? AnyLayout(HStackLayout(spacing: NotaSpacing.xxxs))
+            : AnyLayout(VStackLayout(spacing: NotaSpacing.xxxs))
+        layout {
+            ForEach(inks.indices, id: \.self) { i in
+                InkSwatch(inks[i], isSelected: tool.usesInk && controller.current.colorIndex == i) {
+                    controller.current.colorIndex = i
+                    onPick()
+                }
+            }
+        }
+        .padding(axis == .horizontal ? .horizontal : .vertical, NotaSpacing.xs)
+        .disabled(!tool.usesInk)
+        .opacity(tool.usesInk ? 1 : 0.35)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Colors")
+    }
+}
+
+/// Figma **Tool Options**: width presets and slider, eraser and lasso modes, delete selection. Opens when
+/// the selected tool is tapped again.
+struct ToolOptionsView: View {
+    @ObservedObject var controller: CanvasController
+    let tool: Tool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NotaSpacing.m) {
+            Text(tool.title)
+                .font(NotaFont.headline)
+                .foregroundStyle(NotaColor.textPrimary)
+                .padding(.top, NotaSpacing.s)
+
+            switch tool {
+            case .eraser:
+                Picker("Erase", selection: $controller.eraserMode) {
+                    Text("Whole Stroke").tag(EraserMode.stroke)
+                    Text("Pixel").tag(EraserMode.pixel)
+                }
+                .pickerStyle(.segmented)
+                widthControls
+            case .lasso:
+                Picker("Shape", selection: $controller.lassoMode) {
+                    Text("Freeform").tag(LassoMode.freeform)
+                    Text("Rectangle").tag(LassoMode.square)
+                }
+                .pickerStyle(.segmented)
+                Button {
+                    controller.deleteSelection()
+                } label: {
+                    NotaButtonLabel("Delete Selection", icon: .trash, size: .compact)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.nota(.secondary, size: .compact))
+                .disabled(!controller.hasSelection)
+            case .pen, .pencil, .highlighter:
+                widthControls
+            }
+        }
+        .padding(.horizontal, NotaSpacing.l)
+        .frame(width: 300)
+        .notaPopoverContent()
+    }
+
+    @ViewBuilder
+    private var widthControls: some View {
+        let presets = CanvasController.widthPresets(for: tool)
+        let range = CanvasController.widthRange(for: tool)
+        let width = Binding(get: { settings.width }, set: { setWidth($0) })
+        HStack(spacing: NotaSpacing.s) {
+            ForEach(presets.indices, id: \.self) { i in
+                let preset = presets[i]
+                Button { setWidth(preset) } label: {
                     Circle()
-                        .fill(Color(cgColor: RGBA.swatches[i].cgColor()))
-                        .frame(width: 20, height: 20)
-                        .padding(3)
-                        .overlay(Circle().strokeBorder(selected == i ? Color.accentColor : .clear, lineWidth: 2))
-                        .frame(width: 28, height: 36)
+                        .fill(dotColor)
+                        .frame(width: CGFloat(6 + 5 * i), height: CGFloat(6 + 5 * i))
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .background(abs(settings.width - preset) < 0.05 ? NotaColor.bgInkTint : NotaColor.bgFill,
+                                    in: RoundedRectangle(cornerRadius: NotaRadius.control, style: .continuous))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Color \(i + 1)")
+                .accessibilityLabel(["Fine", "Medium", "Bold"][min(i, 2)])
+                .accessibilityAddTraits(abs(settings.width - preset) < 0.05 ? .isSelected : [])
             }
         }
+        NotaSliderRow("Width", value: width, in: range,
+                      valueText: settings.width.formatted(.number.precision(.fractionLength(1))) + " pt")
+    }
+
+    private var settings: CanvasController.ToolSettings {
+        controller.settings[tool] ?? controller.current
+    }
+
+    private func setWidth(_ width: Double) {
+        var s = settings
+        s.width = width
+        controller.settings[tool] = s
+    }
+
+    private var dotColor: Color {
+        guard tool.usesInk else { return NotaColor.textSecondary }
+        let inks = CanvasController.inks(for: tool)
+        return inks[min(max(settings.colorIndex, 0), inks.count - 1)].color
     }
 }
 
@@ -171,37 +279,45 @@ struct CanvasSettingsView: View {
     @ObservedObject var controller: CanvasController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Pressure & tilt").font(.headline)
+        VStack(alignment: .leading, spacing: NotaSpacing.l) {
+            Text("Pressure & Tilt")
+                .font(NotaFont.headline)
+                .foregroundStyle(NotaColor.textPrimary)
+                .padding(.top, NotaSpacing.s)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Minimum width: \(Int(controller.minWidthRatio * 100))% of max")
-                Slider(value: $controller.minWidthRatio, in: 0.02...1)
-            }
+            NotaSliderRow("Minimum width", value: $controller.minWidthRatio, in: 0.02 ... 1,
+                          valueText: "\(Int(controller.minWidthRatio * 100))% of max")
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(String(format: "Response curve: γ = %.2f", controller.pressureGamma))
-                Slider(value: $controller.pressureGamma, in: 0.25...3)
+            VStack(alignment: .leading, spacing: NotaSpacing.xxs) {
+                NotaSliderRow("Response curve", value: $controller.pressureGamma, in: 0.25 ... 3,
+                              valueText: String(format: "γ = %.2f", controller.pressureGamma))
                 CurvePreview(gamma: controller.pressureGamma, minRatio: controller.minWidthRatio)
                     .frame(height: 80)
                 Text("γ < 1 boosts light pressure, γ > 1 needs a firmer press.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(NotaFont.footnote)
+                    .foregroundStyle(NotaColor.textSecondary)
             }
 
             Toggle("Tilt shading (wider + lighter when tilted)", isOn: $controller.tiltEnabled)
             Toggle("Debug HUD", isOn: $controller.hudVisible)
 
             #if targetEnvironment(simulator)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Simulated altitude: \(Int(controller.simulatedAltitudeDegrees))°")
-                Slider(value: $controller.simulatedAltitudeDegrees, in: 5...90)
-                Text("Simulator only. Lower it to try tilt shading without a Pencil.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+                VStack(alignment: .leading, spacing: NotaSpacing.xxs) {
+                    NotaSliderRow("Simulated altitude", value: $controller.simulatedAltitudeDegrees, in: 5 ... 90,
+                                  valueText: "\(Int(controller.simulatedAltitudeDegrees))°")
+                    Text("Simulator only. Lower it to try tilt shading without a Pencil.")
+                        .font(NotaFont.footnote)
+                        .foregroundStyle(NotaColor.textSecondary)
+                }
             #endif
         }
-        .padding(20)
+        .font(NotaFont.subheadline)
+        .foregroundStyle(NotaColor.textPrimary)
+        .tint(NotaColor.accentInk)
+        .padding(.horizontal, NotaSpacing.xl)
+        .padding(.bottom, NotaSpacing.s)
         .frame(width: 340)
+        .notaPopoverContent()
     }
 }
 
@@ -214,43 +330,44 @@ private struct CurvePreview: View {
         Canvas { ctx, size in
             var frame = Path()
             frame.addRect(CGRect(origin: .zero, size: size))
-            ctx.stroke(frame, with: .color(.secondary.opacity(0.3)))
+            ctx.stroke(frame, with: .color(NotaColor.borderSeparator))
             var curve = Path()
-            for i in 0...60 {
+            for i in 0 ... 60 {
                 let x = Double(i) / 60
                 let y = minRatio + (1 - minRatio) * pow(x, gamma)
                 let p = CGPoint(x: x * size.width, y: (1 - y) * size.height)
-                if i == 0 { curve.move(to: p) } else { curve.addLine(to: p) }
+                if i == 0 {
+                    curve.move(to: p)
+                } else {
+                    curve.addLine(to: p)
+                }
             }
-            ctx.stroke(curve, with: .color(.accentColor), lineWidth: 2)
+            ctx.stroke(curve, with: .color(NotaColor.accentInk), lineWidth: 2)
         }
     }
 }
 
-/// Pencil Pro squeeze palette, shown at the hover location.
+/// Pencil Pro squeeze palette, shown at the hover location: tools and inks only.
 struct QuickPaletteView: View {
     @ObservedObject var controller: CanvasController
     let location: CGPoint
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.001)   // tap anywhere to dismiss
+            Color.black.opacity(0.001) // tap anywhere to dismiss
                 .onTapGesture { controller.quickPaletteLocation = nil }
-            HStack(spacing: 8) {
+            HStack(spacing: NotaSpacing.xxxs) {
                 ForEach(Tool.allCases) { tool in
                     ToolButton(tool: tool, selected: controller.tool == tool) {
                         controller.select(tool)
                         controller.quickPaletteLocation = nil
                     }
                 }
-                Rectangle().fill(.secondary.opacity(0.3)).frame(width: 1, height: 24)
-                SwatchRow(selected: Binding(get: { controller.current.colorIndex },
-                                            set: { controller.current.colorIndex = $0
-                                                   controller.quickPaletteLocation = nil }))
+                NotaBarDivider()
+                InkRow(controller: controller, axis: .horizontal) { controller.quickPaletteLocation = nil }
             }
-            .padding(8)
-            .background(.regularMaterial, in: Capsule())
-            .shadow(color: .black.opacity(0.2), radius: 14, y: 4)
+            .padding(NotaSpacing.xxs)
+            .notaFloatingBar()
             .position(x: location.x, y: max(40, location.y - 60))
         }
     }

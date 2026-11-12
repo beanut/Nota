@@ -1,3 +1,4 @@
+import NotaUI
 import SwiftData
 import SwiftUI
 
@@ -5,7 +6,9 @@ import SwiftUI
 
 enum PaperStyle: String, Codable, CaseIterable, Identifiable {
     case plain, lined, dotted, grid
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 
     var title: String {
         switch self {
@@ -24,31 +27,40 @@ enum NoteKind: String, Codable {
 /// Cover colour of a note: the band across the top of its thumbnail.
 enum NoteTint: String, Codable, CaseIterable, Identifiable {
     case indigo, teal, rust, violet, graphite
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
+
+    /// The ink the thumbnail's heading is written in.
+    var ink: NotaInk {
+        switch self {
+        case .indigo: .blue
+        case .teal: .teal
+        case .rust: .orange
+        case .violet: .violet
+        case .graphite: .black
+        }
+    }
 
     var color: Color {
-        switch self {
-        case .indigo: Color(red: 0.20, green: 0.27, blue: 0.78)
-        case .teal: Color(red: 0.07, green: 0.47, blue: 0.42)
-        case .rust: Color(red: 0.75, green: 0.27, blue: 0.10)
-        case .violet: Color(red: 0.49, green: 0.23, blue: 0.93)
-        case .graphite: Color(red: 0.27, green: 0.28, blue: 0.31)
-        }
+        ink.color
     }
 }
 
 enum FolderColor: String, Codable, CaseIterable, Identifiable {
     case blue, teal, orange, purple, pink, green
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 
     var color: Color {
         switch self {
-        case .blue: Color(red: 0.20, green: 0.27, blue: 0.85)
-        case .teal: Color(red: 0.07, green: 0.47, blue: 0.42)
-        case .orange: Color(red: 0.80, green: 0.30, blue: 0.10)
-        case .purple: .purple
-        case .pink: .pink
-        case .green: .green
+        case .blue: NotaInk.blue.color
+        case .teal: NotaInk.teal.color
+        case .orange: NotaInk.orange.color
+        case .purple: NotaInk.violet.color
+        case .pink: NotaInk.labelRose.color
+        case .green: NotaInk.labelGreen.color
         }
     }
 }
@@ -67,9 +79,9 @@ final class Folder {
 
     init(name: String, color: FolderColor, sortIndex: Int) {
         self.name = name
-        self.colorName = color.rawValue
+        colorName = color.rawValue
         self.sortIndex = sortIndex
-        self.createdAt = .now
+        createdAt = .now
     }
 
     var color: FolderColor {
@@ -78,7 +90,9 @@ final class Folder {
     }
 
     /// Notes in this folder that are not in Recently Deleted.
-    var activeNoteCount: Int { notes.filter { $0.deletedAt == nil }.count }
+    var activeNoteCount: Int {
+        notes.filter { $0.deletedAt == nil }.count
+    }
 }
 
 @Model
@@ -106,14 +120,14 @@ final class Note {
          isFavorite: Bool = false,
          isShared: Bool = false,
          folder: Folder? = nil) {
-        self.id = UUID()
+        id = UUID()
         self.title = title
         self.pageCount = pageCount
-        self.createdAt = modifiedAt
+        createdAt = modifiedAt
         self.modifiedAt = modifiedAt
-        self.paperName = paper.rawValue
-        self.tintName = tint.rawValue
-        self.kindName = kind.rawValue
+        paperName = paper.rawValue
+        tintName = tint.rawValue
+        kindName = kind.rawValue
         self.isFavorite = isFavorite
         self.isShared = isShared
         self.folder = folder
@@ -134,7 +148,9 @@ final class Note {
         set { kindName = newValue.rawValue }
     }
 
-    var isDeleted: Bool { deletedAt != nil }
+    var isDeleted: Bool {
+        deletedAt != nil
+    }
 
     var subtitle: String {
         let pages = pageCount == 1 ? "1 page" : "\(pageCount) pages"
@@ -148,8 +164,12 @@ extension Date {
     /// "Today", "Yesterday", a weekday within the last week, otherwise "Nov 2" (plus the year if it isn't this one).
     var libraryLabel: String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(self) { return String(localized: "Today") }
-        if calendar.isDateInYesterday(self) { return String(localized: "Yesterday") }
+        if calendar.isDateInToday(self) {
+            return String(localized: "Today")
+        }
+        if calendar.isDateInYesterday(self) {
+            return String(localized: "Yesterday")
+        }
         let startOfToday = calendar.startOfDay(for: .now)
         if let weekAgo = calendar.date(byAdding: .day, value: -6, to: startOfToday), self >= weekAgo {
             return formatted(.dateTime.weekday(.wide))

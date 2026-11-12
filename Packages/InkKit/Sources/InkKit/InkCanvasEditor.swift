@@ -1,36 +1,58 @@
+import NotaUI
 import SwiftUI
 
-/// Full drawing surface: the raw-Pencil canvas, its floating tool palette, the debug HUD and the
-/// Pencil Pro quick palette.
+/// Full drawing surface: the raw-Pencil canvas showing one page on a desk, the Pen Case centered in the
+/// navigation bar (the note's title lives in its More menu), a page bar for moving between, adding and
+/// resizing pages, the debug HUD and the Pencil Pro quick palette.
 ///
-/// Pass the same `CanvasDocument` again to reopen a page with its strokes and undo history intact.
+/// Pass the same `InkNotebook` again to reopen it with every page's strokes and undo history intact.
 ///
 /// ```swift
-/// InkCanvasEditor(document: page.document)
-///     .navigationTitle(page.title)
+/// InkCanvasEditor(notebook: note.notebook, title: $note.title)
 /// ```
 public struct InkCanvasEditor: View {
-    private let document: CanvasDocument
+    @ObservedObject private var notebook: InkNotebook
     private let showsDebugHUD: Bool
+    private let showsPageControls: Bool
+    private let title: Binding<String>?
 
     @StateObject private var controller = CanvasController()
     @StateObject private var telemetry = PencilTelemetry()
+    /// The side the next page slides in from when the canvas is swiped.
+    @State private var pageTransitionEdge: Edge = .trailing
+    /// True while a swiped page is sliding in. Further swipes wait: starting a second slide mid-way can
+    /// leave the page stuck part-way across the screen.
+    @State private var isTurningPage = false
 
-    public init(document: CanvasDocument, showsDebugHUD: Bool = false) {
-        self.document = document
+    /// A multi-page editor.
+    public init(notebook: InkNotebook, title: Binding<String>? = nil, showsDebugHUD: Bool = false) {
+        self.notebook = notebook
+        self.title = title
         self.showsDebugHUD = showsDebugHUD
+        showsPageControls = true
+    }
+
+    /// A single-page editor: the page can be resized but no pages can be added.
+    public init(document: CanvasDocument, title: Binding<String>? = nil, showsDebugHUD: Bool = false) {
+        self.title = title
+        notebook = InkNotebook(pages: [document], defaultPageSize: document.pageSize)
+        self.showsDebugHUD = showsDebugHUD
+        showsPageControls = false
     }
 
     public var body: some View {
         ZStack {
-            CanvasRepresentable(controller: controller, telemetry: telemetry, document: document)
+            // A fresh canvas view per page: each CanvasView is bound to one document.
+            CanvasRepresentable(controller: controller, telemetry: telemetry, document: notebook.currentPage)
+                .id(notebook.currentPage.id)
+                .transition(.push(from: pageTransitionEdge))
                 .ignoresSafeArea()
 
-            VStack {
-                ToolbarView(controller: controller)
-                Spacer()
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                PageBar(notebook: notebook, allowsMultiplePages: showsPageControls)
+                    .padding(.bottom, NotaSpacing.s)
             }
-            .padding(.top, 8)
 
             if controller.hudVisible {
                 PencilHUD(telemetry: telemetry)
@@ -45,10 +67,45 @@ public struct InkCanvasEditor: View {
                     .ignoresSafeArea()
             }
         }
-        .onAppear { controller.hudVisible = showsDebugHUD }
+        .background(NotaColor.bgDesk)
+        .toolbar { penCaseItem }
+        .onAppear {
+            controller.hudVisible = showsDebugHUD
+            controller.onSwipeToPage = { [notebook] swipe in turnPage(swipe, in: notebook) }
+            controller.canSwipeToPage = { [notebook] swipe in canTurnPage(swipe, in: notebook) }
+        }
+    }
+
+    /// The Pen Case centered on the navigation bar's row. Drawn flat, without the bar's shared glass background.
+    @ToolbarContentBuilder
+    private var penCaseItem: some ToolbarContent {
+        if #available(iOS 26, *) {
+            ToolbarItem(placement: .principal) { PenCase(controller: controller, title: title) }
+                .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .principal) { PenCase(controller: controller, title: title) }
+        }
+    }
+
+    /// Swiping left shows the next page and swiping right the previous one, sliding the new page in
+    /// from the side the finger came from. Swiping past the first or last page does nothing.
+    private func canTurnPage(_ swipe: PageSwipe, in notebook: InkNotebook) -> Bool {
+        !isTurningPage && (swipe == .next ? notebook.canGoToNextPage : notebook.canGoToPreviousPage)
+    }
+
+    private func turnPage(_ swipe: PageSwipe, in notebook: InkNotebook) {
+        guard canTurnPage(swipe, in: notebook) else { return }
+        let next = swipe == .next
+        pageTransitionEdge = next ? .trailing : .leading
+        isTurningPage = true
+        withAnimation(.snappy(duration: 0.3), completionCriteria: .removed) {
+            next ? notebook.goToNextPage() : notebook.goToPreviousPage()
+        } completion: {
+            isTurningPage = false
+        }
     }
 }
 
 #Preview {
-    InkCanvasEditor(document: CanvasDocument(), showsDebugHUD: true)
+    InkCanvasEditor(notebook: InkNotebook(pageCount: 3), showsDebugHUD: true)
 }

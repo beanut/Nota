@@ -1,22 +1,31 @@
 import InkKit
+import NotaUI
 import SwiftUI
 
-/// A note opened for writing: the InkKit canvas under a navigation bar with an editable title.
+/// A note opened for writing: the InkKit canvas under a navigation bar. The title is shown and renamed
+/// from the Pen Case's More menu rather than in the bar.
 struct NoteEditorView: View {
     @Bindable var note: Note
     @Environment(InkStore.self) private var inkStore
-    @State private var strokeCountOnOpen = 0
+    @State private var inkOnOpen: [Int] = []
 
     var body: some View {
-        let document = inkStore.document(for: note.id)
-        InkCanvasEditor(document: document)
-            .navigationTitle($note.title)
+        let notebook = inkStore.notebook(for: note.id, pageCount: note.pageCount)
+        InkCanvasEditor(notebook: notebook, title: $note.title)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarRole(.editor)
+            .toolbarBackground(NotaColor.bgApp, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
-            .onAppear { strokeCountOnOpen = document.strokeCount }
+            .onAppear { inkOnOpen = notebook.pages.map(\.strokeCount) }
+            .onReceive(notebook.$pages) { pages in
+                if note.pageCount != pages.count {
+                    note.pageCount = pages.count
+                    note.modifiedAt = .now
+                }
+            }
             .onDisappear {
-                if document.strokeCount != strokeCountOnOpen { note.modifiedAt = .now }
+                if notebook.pages.map(\.strokeCount) != inkOnOpen {
+                    note.modifiedAt = .now
+                }
             }
     }
 }

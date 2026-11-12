@@ -1,6 +1,6 @@
+import NotaUI
 import SwiftUI
 import UIKit
-import UIKit.UIGestureRecognizerSubclass
 
 /// Canvas → view mapping: uniform scale then translation, no rotation.
 /// Because there's no rotation, angles (azimuth) are the same in both spaces.
@@ -11,10 +11,81 @@ struct ViewTransform: Equatable {
     var affine: CGAffineTransform {
         CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: offset.x, ty: offset.y)
     }
-    func toView(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * scale + offset.x, y: p.y * scale + offset.y) }
-    func toCanvas(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - offset.x) / scale, y: (p.y - offset.y) / scale) }
-    func toView(_ r: CGRect) -> CGRect { r.isNull ? r : r.applying(affine) }
-    func toCanvas(_ r: CGRect) -> CGRect { r.isNull ? r : r.applying(affine.inverted()) }
+
+    func toView(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: p.x * scale + offset.x, y: p.y * scale + offset.y)
+    }
+
+    func toCanvas(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: (p.x - offset.x) / scale, y: (p.y - offset.y) / scale)
+    }
+
+    func toView(_ r: CGRect) -> CGRect {
+        r.isNull ? r : r.applying(affine)
+    }
+
+    func toCanvas(_ r: CGRect) -> CGRect {
+        r.isNull ? r : r.applying(affine.inverted())
+    }
+
+    /// The transform that shows all of `page` (canvas space) as large as possible inside `bounds` minus
+    /// `insets`, centred. Scale is clamped to `scaleRange`. Empty inputs give the identity.
+    static func fitting(page: CGRect, in bounds: CGRect, insets: UIEdgeInsets = .zero,
+                        scaleRange: ClosedRange<CGFloat> = 0.25 ... 8) -> ViewTransform {
+        // Not `bounds.inset(by:)`: a rect inset past empty is standardized to a positive size.
+        let available = CGRect(x: bounds.minX + insets.left, y: bounds.minY + insets.top,
+                               width: bounds.width - insets.left - insets.right,
+                               height: bounds.height - insets.top - insets.bottom)
+        guard page.width > 0, page.height > 0, available.size.width > 0, available.size.height > 0 else {
+            return ViewTransform()
+        }
+        let fit = min(available.width / page.width, available.height / page.height)
+        let scale = min(max(fit, scaleRange.lowerBound), scaleRange.upperBound)
+        return ViewTransform(scale: scale,
+                             offset: CGPoint(x: available.midX - page.midX * scale,
+                                             y: available.midY - page.midY * scale))
+    }
+
+    /// The most a page can be zoomed in, as a multiple of the scale that fits the whole page in view.
+    static let maxZoomFactor: CGFloat = 6
+    /// The scales a page can be zoomed to, given `fitScale`, the scale that shows the whole page.
+    /// Zooming out stops at the whole page. Zooming in stops at `maxZoomFactor` × the fitted scale, or
+    /// `maxZoomFactor` × actual size if that's larger, so a very large page can still be zoomed in to write on.
+    static func zoomRange(fitScale: CGFloat) -> ClosedRange<CGFloat> {
+        guard fitScale > 0, fitScale.isFinite else { return 1 ... maxZoomFactor }
+        return fitScale ... max(fitScale, 1) * maxZoomFactor
+    }
+
+    /// How far (0–1) to move the page towards its centred, fitted position when a pinch zooms from `old`
+    /// to `new`. Within 25% of `fitScale`, zooming out closes the gap in step with the scale, so the page
+    /// arrives centred exactly as it reaches the zoom-out limit. Zooming in, or above that band, gives 0.
+    static func recentringAmount(from old: CGFloat, to new: CGFloat, fitScale: CGFloat) -> CGFloat {
+        guard fitScale > 0 else { return 0 }
+        if new <= fitScale {
+            return 1
+        }
+        let start = min(old, fitScale * 1.25)
+        guard new < start else { return 0 }
+        return (start - new) / (start - fitScale)
+    }
+}
+
+/// A horizontal swipe that turns the page.
+enum PageSwipe: Equatable {
+    case next, previous
+
+    /// The page turn a finished pan asks for, if any. `translation` is the pan's total movement and
+    /// `velocity` its speed when the fingers lifted, both in view points. A swipe has to be mostly
+    /// sideways and either travel a quarter of `viewWidth` or be a quick flick. Swiping left (the page
+    /// moving left) shows the next page.
+    static func detect(translation: CGPoint, velocity: CGPoint, viewWidth: CGFloat) -> PageSwipe? {
+        let dx = translation.x, dy = translation.y
+        guard viewWidth > 0, abs(dx) > abs(dy) * 1.5 else { return nil }
+        let farEnough = abs(dx) > viewWidth * 0.25
+        let flicked = abs(dx) > 40 && abs(velocity.x) > 600 && velocity.x.sign == dx.sign
+        guard farEnough || flicked else { return nil }
+        return dx < 0 ? .next : .previous
+    }
 }
 
 /// Raw-touch drawing surface.
@@ -25,23 +96,41 @@ struct ViewTransform: Equatable {
 ///  2. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
 final class CanvasView: UIView {
-    static let paperColor = UIColor(red: 0.988, green: 0.984, blue: 0.97, alpha: 1)
+    static let paperColor = NotaUIColor.paperSurface
+    /// The surface around the page.
+    static let deskColor = NotaUIColor.bgDesk
 
     let document: CanvasDocument
     weak var controller: CanvasController?
     weak var telemetry: PencilTelemetry?
 
     private(set) var viewTransform = ViewTransform()
-    private var bitmapTransform = ViewTransform()     // transform the bitmap is / will be rendered at once queued jobs run; pending strokes draw with this
-    private var displayedTransform = ViewTransform()  // transform of the image currently in committedLayer.contents
+    private var bitmapTransform =
+        ViewTransform() // transform the bitmap is / will be rendered at once queued jobs run; pending strokes draw with this
+    private var displayedTransform = ViewTransform() // transform of the image currently in committedLayer.contents
     private var fullRenderInFlight = false
     private var fullRenderRequested = false
     private var modifiedSinceSnapshot = Set<UUID>()
     private var gestureStartTransform = ViewTransform()
     private var activeGestureCount = 0
     private var didTransformInTouchSequence = false
+    /// Most fingers down at once since the last time none were; a three-finger swipe is undo/redo, not a page turn.
+    private var maxDirectTouchesInSequence = 0
+    private var didPinchInSequence = false
+    /// Total movement of the current pan, for page swipes (the recognizer's translation is reset every frame).
+    private var panTranslation = CGPoint.zero
+    /// Drives the short slide back to the fitted page after a swipe that didn't turn the page.
+    private var settleLink: CADisplayLink?
+    private var settleFrom = ViewTransform()
+    private var settleTo = ViewTransform()
+    private var settleStart: CFTimeInterval = 0
     private var isCancellingGesture = false
 
+    private let pageLayer = CALayer()
+    /// Holds the ink layers; masked to the page so strokes running off the edge are clipped.
+    private let inkClipView = UIView()
+    private let inkMask = CAShapeLayer()
+    private var fittedBoundsSize = CGSize.zero
     private let committedLayer = CALayer()
     private let liveView = LiveInkView()
     private let renderQueue = DispatchQueue(label: "InkCanvas.render", qos: .userInteractive)
@@ -62,11 +151,12 @@ final class CanvasView: UIView {
         init(live: LiveStroke, geometry: StrokeGeometry, deadline: CFTimeInterval, submitted: Bool = false) {
             self.live = live
             self.geometry = geometry
-            self.bounds = geometry.bounds
+            bounds = geometry.bounds
             self.deadline = deadline
             self.submitted = submitted
         }
     }
+
     private var pending: [PendingStroke] = []
     private var isCommitScheduled = false
 
@@ -78,15 +168,17 @@ final class CanvasView: UIView {
         var removals: [CanvasDocument.Removal] = []
         var last: CGPoint?
     }
-    // Lasso state
+
+    /// Lasso state
     private enum LassoSession {
-        case drawing([CGPoint])                       // canvas-space gesture path
-        case moving(last: CGPoint, total: CGPoint)    // dragging the current selection
+        case drawing([CGPoint]) // canvas-space gesture path
+        case moving(last: CGPoint, total: CGPoint) // dragging the current selection
     }
-    private var lassoPending = false                  // lasso touch began, first sample not yet seen
+
+    private var lassoPending = false // lasso touch began, first sample not yet seen
     private var lassoSession: LassoSession?
     private var selection = Set<UUID>()
-    private var selectionBounds = CGRect.null         // canvas space
+    private var selectionBounds = CGRect.null // canvas space
     private let lassoOverlayView = LassoOverlayView()
     private struct PointRef { let strokeID: UUID; let index: Int }
     private var pendingEstimates: [NSNumber: PointRef] = [:]
@@ -99,7 +191,13 @@ final class CanvasView: UIView {
     private var eventRate = RateCounter()
 
     #if targetEnvironment(simulator)
-    private var simPrevious: (location: CGPoint, time: TimeInterval, force: CGFloat)?
+        private struct SimSample {
+            let location: CGPoint
+            let time: TimeInterval
+            let force: CGFloat
+        }
+
+        private var simPrevious: SimSample?
     #endif
 
     private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
@@ -108,15 +206,27 @@ final class CanvasView: UIView {
     init(frame: CGRect, document: CanvasDocument) {
         self.document = document
         super.init(frame: frame)
-        backgroundColor = Self.paperColor
+        backgroundColor = Self.deskColor
         isMultipleTouchEnabled = true
 
+        pageLayer.backgroundColor = Self.paperColor.cgColor
+        pageLayer.shadowColor = NotaUIColor.shadow.cgColor
+        pageLayer.shadowOpacity = 0.18
+        pageLayer.shadowRadius = 6
+        pageLayer.shadowOffset = CGSize(width: 0, height: 2)
+        layer.addSublayer(pageLayer)
+
+        inkClipView.isUserInteractionEnabled = false
+        inkClipView.backgroundColor = .clear
+        inkClipView.layer.mask = inkMask
+        addSubview(inkClipView)
+
         committedLayer.anchorPoint = .zero
-        layer.addSublayer(committedLayer)
+        inkClipView.layer.addSublayer(committedLayer)
 
         liveView.paperColor = Self.paperColor.cgColor
         liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
-        addSubview(liveView)
+        inkClipView.addSubview(liveView)
 
         lassoOverlayView.canvas = self
         addSubview(lassoOverlayView)
@@ -128,16 +238,24 @@ final class CanvasView: UIView {
 
         document.onChange = { [weak self] in
             guard let self else { return }
-            self.controller?.documentDidChange(canUndo: self.document.canUndo, canRedo: self.document.canRedo)
+            controller?.documentDidChange(canUndo: self.document.canUndo, canRedo: self.document.canRedo)
         }
+        document.onPageSizeChange = { [weak self] in self?.resetView() }
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
-    // Disable the system's three-finger undo/redo/copy gestures; we drive undo ourselves.
-    override var canBecomeFirstResponder: Bool { true }
-    override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
+    /// Disable the system's three-finger undo/redo/copy gestures; we drive undo ourselves.
+    override var canBecomeFirstResponder: Bool {
+        true
+    }
+
+    override var editingInteractionConfiguration: UIEditingInteractionConfiguration {
+        .none
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -147,8 +265,18 @@ final class CanvasView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        inkClipView.frame = bounds
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
+        if bounds.size != fittedBoundsSize, bounds.width > 0, bounds.height > 0 {
+            // First layout or a rotation / split-view resize: show the whole page again.
+            fittedBoundsSize = bounds.size
+            viewTransform = fittedTransform()
+            liveView.settle(at: viewTransform)
+            updateCommittedLayerTransform()
+            controller?.zoomDidChange(viewTransform.scale)
+        }
+        updatePageChrome()
         let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
         let pixels = CGSize(width: (bounds.width * scale).rounded(.up), height: (bounds.height * scale).rounded(.up))
         guard pixels != bitmapPixelSize || scale != bitmapScale else { return }
@@ -188,7 +316,9 @@ final class CanvasView: UIView {
     }
 
     private func geometry(for stroke: Stroke) -> StrokeGeometry {
-        if let g = geometryCache[stroke.id] { return g }
+        if let g = geometryCache[stroke.id] {
+            return g
+        }
         let g = StrokeRenderer.geometry(for: stroke)
         geometryCache[stroke.id] = g
         return g
@@ -220,7 +350,7 @@ final class CanvasView: UIView {
         let currentBounds = bounds
         let targetTransform = bitmapTransform
 
-        let unsubmittedIDs = Set(pending.filter { !$0.submitted }.map { $0.live.stroke.id })
+        let unsubmittedIDs = Set(pending.filter { !$0.submitted }.map(\.live.stroke.id))
         var itemsToRender: [RenderSnapshotItem] = []
         for stroke in document.strokes {
             guard !unsubmittedIDs.contains(stroke.id) else { continue }
@@ -243,7 +373,7 @@ final class CanvasView: UIView {
             }
         }
 
-        let coveredPending = pending.filter { $0.submitted }
+        let coveredPending = pending.filter(\.submitted)
 
         renderQueue.async { [weak self] in
             guard let self else { return }
@@ -281,7 +411,7 @@ final class CanvasView: UIView {
             }
 
             var image: CGImage?
-            if let ctx = self.bitmap {
+            if let ctx = bitmap {
                 ctx.clear(currentBounds)
                 ctx.saveGState()
                 ctx.concatenate(targetTransform.affine)
@@ -296,27 +426,27 @@ final class CanvasView: UIView {
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if self.generation == currentGeneration {
+                if generation == currentGeneration {
                     if let image {
-                        self.publish(image: image, transform: targetTransform)
+                        publish(image: image, transform: targetTransform)
                     }
                     for (id, geom) in computedGeometries {
-                        if self.geometryCache[id] == nil && !self.modifiedSinceSnapshot.contains(id) {
-                            self.geometryCache[id] = geom
+                        if geometryCache[id] == nil, !modifiedSinceSnapshot.contains(id) {
+                            geometryCache[id] = geom
                         }
                     }
                     for item in coveredPending {
-                        if let idx = self.pending.firstIndex(where: { $0 === item }) {
-                            self.pending.remove(at: idx)
+                        if let idx = pending.firstIndex(where: { $0 === item }) {
+                            pending.remove(at: idx)
                         }
-                        self.invalidateLive(canvasRect: item.bounds)
+                        invalidateLive(canvasRect: item.bounds)
                     }
-                    self.liveView.invalidateAll()
+                    liveView.invalidateAll()
                 }
-                self.fullRenderInFlight = false
-                if self.fullRenderRequested {
-                    self.fullRenderRequested = false
-                    self.startFullRender()
+                fullRenderInFlight = false
+                if fullRenderRequested {
+                    fullRenderRequested = false
+                    startFullRender()
                 }
             }
         }
@@ -362,8 +492,7 @@ final class CanvasView: UIView {
         let currentGeneration = generation
 
         renderQueue.async { [weak self] in
-            guard let self else { return }
-            guard let ctx = self.bitmap else { return }
+            guard let self, let ctx = bitmap else { return }
             ctx.saveGState()
             ctx.concatenate(targetTransform.affine)
             if tool == .pencil {
@@ -375,16 +504,14 @@ final class CanvasView: UIView {
             let image = ctx.makeImage()
 
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                guard self.generation == currentGeneration else { return }
-                guard let image else { return }
+                guard let self, generation == currentGeneration, let image else { return }
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
-                self.publish(image: image, transform: targetTransform)
-                if let idx = self.pending.firstIndex(where: { $0 === item }) {
-                    self.pending.remove(at: idx)
+                publish(image: image, transform: targetTransform)
+                if let idx = pending.firstIndex(where: { $0 === item }) {
+                    pending.remove(at: idx)
                 }
-                self.invalidateLive(canvasRect: bounds)
+                invalidateLive(canvasRect: bounds)
                 CATransaction.commit()
             }
         }
@@ -408,12 +535,12 @@ final class CanvasView: UIView {
             }
         }
 
-        if hasWaiting && !isCommitScheduled {
+        if hasWaiting, !isCommitScheduled {
             isCommitScheduled = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
                 guard let self else { return }
-                self.isCommitScheduled = false
-                self.schedulePendingCommit()
+                isCommitScheduled = false
+                schedulePendingCommit()
             }
         }
     }
@@ -448,13 +575,14 @@ final class CanvasView: UIView {
         for stroke in pending.map(\.live) + (live.map { [$0] } ?? []) {
             entries.append(LiveInkView.Entry(
                 stroke: stroke,
-                previewFill: stroke.stroke.tool == .pixelEraser ? Self.paperColor.cgColor : nil))
+                previewFill: stroke.stroke.tool == .pixelEraser ? Self.paperColor.cgColor : nil
+            ))
         }
         return entries
     }
 
     fileprivate func drawLassoOverlay(in ctx: CGContext) {
-        let accent = UIColor.systemBlue
+        let accent = NotaUIColor.accentInk
         if !selection.isEmpty, !selectionBounds.isNull {
             let r = viewTransform.toView(selectionBounds).insetBy(dx: -6, dy: -6)
             ctx.setFillColor(accent.withAlphaComponent(0.08).cgColor)
@@ -465,9 +593,9 @@ final class CanvasView: UIView {
             ctx.stroke(r)
             ctx.setLineDash(phase: 0, lengths: [])
         }
-        if case .drawing(let pts)? = lassoSession,
+        if case let .drawing(pts)? = lassoSession,
            let polygon = LassoGeometry.region(mode: controller?.lassoMode ?? .freeform, points: pts)
-            ?? (pts.count >= 2 ? pts : nil) {
+           ?? (pts.count >= 2 ? pts : nil) {
             let path = CGMutablePath()
             path.addLines(between: polygon, transform: viewTransform.affine)
             path.closeSubpath()
@@ -503,7 +631,7 @@ final class CanvasView: UIView {
             let c = viewTransform.toView(canvasPoint)
             path.addEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
         } else {
-            let (_, _, style) = controller.strokeTemplate(viewScale: viewTransform.scale)
+            let style = controller.strokeTemplate(viewScale: viewTransform.scale).style
             let sample = StrokePoint(location: canvasPoint, force: 1, altitude: altitude, azimuth: azimuth, timestamp: 0)
             let poly = StrokeRenderer.polygon(for: StrokeRenderer.tip(for: sample, style: style))
             path.addLines(between: poly, transform: viewTransform.affine)
@@ -542,11 +670,53 @@ final class CanvasView: UIView {
     }
 
     func resetView() {
-        viewTransform = ViewTransform()
+        viewTransform = fittedTransform()
         liveView.settle(at: viewTransform)
+        updateCommittedLayerTransform()
+        updatePageChrome()
         updateLassoOverlay()
         requestFullRender()
         controller?.zoomDidChange(viewTransform.scale)
+    }
+
+    // MARK: - Page
+
+    /// The transform that fits the whole page between the margins.
+    func fittedTransform() -> ViewTransform {
+        let s = safeAreaInsets, m = controller?.pageMargins ?? CanvasController.defaultPageMargins
+        let insets = UIEdgeInsets(top: s.top + m.top, left: s.left + m.left,
+                                  bottom: s.bottom + m.bottom, right: s.right + m.right)
+        return ViewTransform.fitting(page: document.pageBounds, in: bounds, insets: insets,
+                                     scaleRange: .leastNonzeroMagnitude ... .greatestFiniteMagnitude)
+    }
+
+    /// The page rectangle in view coordinates at the current pan/zoom.
+    var pageFrameInView: CGRect {
+        viewTransform.toView(document.pageBounds)
+    }
+
+    /// Moves the paper and the ink clip to follow the page.
+    private func updatePageChrome() {
+        let frame = pageFrameInView
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pageLayer.frame = frame
+        pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
+        inkMask.frame = inkClipView.bounds
+        inkMask.path = CGPath(rect: frame, transform: nil)
+        CATransaction.commit()
+    }
+
+    /// Refits the page after the editor moved its floating chrome.
+    func pageMarginsDidChange() {
+        fittedBoundsSize = .zero
+        setNeedsLayout()
+    }
+
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        fittedBoundsSize = .zero // refit with the new insets on the next layout
+        setNeedsLayout()
     }
 
     // MARK: - Lasso
@@ -589,7 +759,7 @@ final class CanvasView: UIView {
             modifiedSinceSnapshot.insert(id)
         }
         document.recordErase(document.remove(ids: ids))
-        dropOrphanedPendingStrokes()   // also prunes the selection
+        dropOrphanedPendingStrokes() // also prunes the selection
         requestFullRender()
     }
 
@@ -607,20 +777,24 @@ final class CanvasView: UIView {
                 lassoSession = .drawing([p])
             }
             lassoPending = false
-        case .drawing(var pts)?:
+        case var .drawing(pts)?:
             switch controller.lassoMode {
             case .freeform:
-                if let last = pts.last, last.distance(to: p) * viewTransform.scale < 1.5 { return }
+                if let last = pts.last, last.distance(to: p) * viewTransform.scale < 1.5 {
+                    return
+                }
                 pts.append(p)
             case .square:
                 pts = [pts[0], p]
             }
             lassoSession = .drawing(pts)
             updateLassoOverlay()
-        case .moving(let last, let total)?:
+        case let .moving(last, total)?:
             let d = p - last
             guard d != .zero else { return }
-            for id in selection { geometryCache[id] = nil; modifiedSinceSnapshot.insert(id) }
+            for id in selection {
+                geometryCache[id] = nil; modifiedSinceSnapshot.insert(id)
+            }
             document.translate(ids: selection, by: d)
             selectionBounds = selectionBounds.offsetBy(dx: d.x, dy: d.y)
             lassoSession = .moving(last: p, total: total + d)
@@ -632,7 +806,7 @@ final class CanvasView: UIView {
     private func finishLasso(commit: Bool) {
         defer { lassoSession = nil; lassoPending = false; updateLassoOverlay() }
         switch lassoSession {
-        case .drawing(let pts)?:
+        case let .drawing(pts)?:
             guard commit, let controller,
                   let polygon = LassoGeometry.region(mode: controller.lassoMode, points: pts) else { return }
             let pb = LassoGeometry.bounds(of: polygon)
@@ -647,12 +821,14 @@ final class CanvasView: UIView {
             }
             selection = hit
             updateSelectionBounds()
-        case .moving(_, let total)?:
+        case let .moving(_, total)?:
             if commit {
                 document.recordMove(ids: selection, by: total)
             } else if total != .zero {
                 document.translate(ids: selection, by: CGPoint(x: -total.x, y: -total.y))
-                for id in selection { geometryCache[id] = nil; modifiedSinceSnapshot.insert(id) }
+                for id in selection {
+                    geometryCache[id] = nil; modifiedSinceSnapshot.insert(id)
+                }
                 requestFullRender()
             }
             updateSelectionBounds()
@@ -664,29 +840,41 @@ final class CanvasView: UIView {
     // MARK: - Touch input
 
     private func isDrawingTouch(_ touch: UITouch, event: UIEvent?) -> Bool {
-        if touch.type == .pencil { return true }
+        if touch.type == .pencil {
+            return true
+        }
         #if targetEnvironment(simulator)
-        // No Pencil in the simulator: a lone mouse-driven touch stands in for it.
-        return touch.type == .direct && (event?.allTouches?.count ?? 1) == 1
+            // No Pencil in the simulator: a lone mouse-driven touch stands in for it.
+            return touch.type == .direct && (event?.allTouches?.count ?? 1) == 1
         #else
-        return false
+            return false
         #endif
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if !isFirstResponder { _ = becomeFirstResponder() }
+        if !isFirstResponder {
+            _ = becomeFirstResponder()
+        }
         let priorDirectTouches = event?.allTouches?.filter {
             $0.type == .direct && !touches.contains($0) && $0.phase != .ended && $0.phase != .cancelled
         }.count ?? 0
-        if priorDirectTouches == 0 && activeGestureCount == 0 && touches.contains(where: { $0.type == .direct }) {
+        if priorDirectTouches == 0, activeGestureCount == 0, touches.contains(where: { $0.type == .direct }) {
             gestureStartTransform = viewTransform
             didTransformInTouchSequence = false
         }
+        if settleLink != nil {
+            finishSettling()
+        } // never draw on a page that's still sliding
+        if priorDirectTouches == 0 {
+            maxDirectTouchesInSequence = 0
+            didPinchInSequence = false
+        }
+        let directTouches = priorDirectTouches + touches.filter { $0.type == .direct }.count
+        maxDirectTouchesInSequence = max(maxDirectTouchesInSequence, directTouches)
         for touch in touches {
-            guard isDrawingTouch(touch, event: event) else { continue }
-            guard activeTouch == nil, activeGestureCount == 0 else { continue }
+            guard isDrawingTouch(touch, event: event), activeTouch == nil, activeGestureCount == 0 else { continue }
             activeTouch = touch
-            beginStroke()
+            beginStroke(at: viewTransform.toCanvas(touch.preciseLocation(in: self)))
             ingest(touch, event: event, final: false)
         }
         updateFingerState(event)
@@ -785,25 +973,30 @@ final class CanvasView: UIView {
         schedulePendingCommit()
     }
 
-    private func beginStroke() {
+    /// `start` is the touch-down point in canvas space. Ink only starts on the page; erasing and the
+    /// lasso work from anywhere, since they may need to reach strokes hanging off the edge.
+    private func beginStroke(at start: CGPoint) {
         guard let controller else { return }
         if pendingEstimates.count > 1024 {
             pendingEstimates.removeAll()
             outstandingEstimates.removeAll()
         }
         #if targetEnvironment(simulator)
-        simPrevious = nil
+            simPrevious = nil
         #endif
         liveView.settle(at: viewTransform)
         if controller.tool == .lasso {
             lassoPending = true
         } else if controller.tool == .eraser && controller.eraserMode == .stroke {
             eraseSession = EraseSession()
-        } else {
-            let (kind, color, style) = controller.strokeTemplate(viewScale: viewTransform.scale)
-            live = LiveStroke(stroke: Stroke(id: UUID(), tool: kind, color: color, style: style, points: []))
+        } else if controller.tool == .eraser || document.contains(start) {
+            let template = controller.strokeTemplate(viewScale: viewTransform.scale)
+            live = LiveStroke(stroke: Stroke(id: UUID(), tool: template.kind, color: template.color,
+                                             style: template.style, points: []))
         }
-        if hoverActive { setCursor(nil) }
+        if hoverActive {
+            setCursor(nil)
+        }
     }
 
     /// Feeds every coalesced sample since the last event (up to 240 Hz on Pencil, vs. the 120 Hz
@@ -811,7 +1004,9 @@ final class CanvasView: UIView {
     private func ingest(_ touch: UITouch, event: UIEvent?, final: Bool) {
         eventRate.record(touch.timestamp)
         let samples = event?.coalescedTouches(for: touch) ?? [touch]
-        for sample in samples { appendSample(sample) }
+        for sample in samples {
+            appendSample(sample)
+        }
 
         if let live {
             // Predicted touches are never stored: the tail is rebuilt (and they're dropped) on the next real event.
@@ -860,10 +1055,16 @@ final class CanvasView: UIView {
         }
     }
 
-    private func sampleValues(_ touch: UITouch) -> (force: CGFloat, altitude: CGFloat, azimuth: CGFloat) {
+    private struct TouchValues {
+        let force: CGFloat
+        let altitude: CGFloat
+        let azimuth: CGFloat
+    }
+
+    private func sampleValues(_ touch: UITouch) -> TouchValues {
         let maxForce = touch.maximumPossibleForce
         let force = maxForce > 0 ? min(touch.force / maxForce, 1) : 0.5
-        return (force, touch.altitudeAngle, touch.azimuthAngle(in: self))
+        return TouchValues(force: force, altitude: touch.altitudeAngle, azimuth: touch.azimuthAngle(in: self))
     }
 
     /// `preciseLocation` is in this view's coordinate space; strokes are stored in canvas space.
@@ -871,9 +1072,9 @@ final class CanvasView: UIView {
         let viewLocation = touch.preciseLocation(in: self)
         let location = viewTransform.toCanvas(viewLocation)
         #if targetEnvironment(simulator)
-        if touch.type != .pencil {
-            return simulatedPoint(touch, viewLocation: viewLocation, canvasLocation: location, predicted: predicted)
-        }
+            if touch.type != .pencil {
+                return simulatedPoint(touch, viewLocation: viewLocation, canvasLocation: location, predicted: predicted)
+            }
         #endif
         let v = sampleValues(touch)
         return StrokePoint(location: location, force: v.force, altitude: v.altitude, azimuth: v.azimuth,
@@ -881,29 +1082,33 @@ final class CanvasView: UIView {
     }
 
     #if targetEnvironment(simulator)
-    /// Fake pressure from drag speed: slow = heavy, fast = light, low-passed so width changes smoothly.
-    private func simulatedPoint(_ touch: UITouch, viewLocation: CGPoint, canvasLocation: CGPoint,
-                                predicted: Bool) -> StrokePoint {
-        var force: CGFloat = 0.6
-        if let prev = simPrevious {
-            force = prev.force
-            let dt = touch.timestamp - prev.time
-            if dt > 0 {
-                let speed = viewLocation.distance(to: prev.location) / CGFloat(dt)   // points per second
-                let target = min(max(1 - speed / 2200, 0.1), 1)
-                force = prev.force + (target - prev.force) * 0.2
+        /// Fake pressure from drag speed: slow = heavy, fast = light, low-passed so width changes smoothly.
+        private func simulatedPoint(_ touch: UITouch, viewLocation: CGPoint, canvasLocation: CGPoint,
+                                    predicted: Bool) -> StrokePoint {
+            var force: CGFloat = 0.6
+            if let prev = simPrevious {
+                force = prev.force
+                let dt = touch.timestamp - prev.time
+                if dt > 0 {
+                    let speed = viewLocation.distance(to: prev.location) / CGFloat(dt) // points per second
+                    let target = min(max(1 - speed / 2200, 0.1), 1)
+                    force = prev.force + (target - prev.force) * 0.2
+                }
             }
+            if !predicted {
+                simPrevious = SimSample(location: viewLocation, time: touch.timestamp, force: force)
+            }
+            return StrokePoint(location: canvasLocation, force: force,
+                               altitude: controller?.simulatedAltitude ?? .pi / 2,
+                               azimuth: -.pi / 4, timestamp: touch.timestamp)
         }
-        if !predicted { simPrevious = (viewLocation, touch.timestamp, force) }
-        return StrokePoint(location: canvasLocation, force: force,
-                           altitude: controller?.simulatedAltitude ?? .pi / 2,
-                           azimuth: -.pi / 4, timestamp: touch.timestamp)
-    }
     #endif
 
     private func endStroke(commit: Bool) {
         activeTouch = nil
-        if lassoPending || lassoSession != nil { finishLasso(commit: commit) }
+        if lassoPending || lassoSession != nil {
+            finishLasso(commit: commit)
+        }
         if let session = eraseSession {
             document.recordErase(session.removals)
             eraseSession = nil
@@ -911,7 +1116,7 @@ final class CanvasView: UIView {
         }
         if let live {
             self.live = nil
-            if commit && !live.stroke.points.isEmpty {
+            if commit, !live.stroke.points.isEmpty {
                 let geom = live.geometry()
                 geometryCache[live.stroke.id] = geom
                 let splits = live.stroke.tool == .pixelEraser
@@ -921,7 +1126,7 @@ final class CanvasView: UIView {
                 pending.append(PendingStroke(live: live, geometry: geom, deadline: deadline))
                 schedulePendingCommit()
             } else {
-                liveView.invalidateAll()   // clears the live layer
+                liveView.invalidateAll() // clears the live layer
             }
         }
         hud.state = .idle
@@ -941,7 +1146,9 @@ final class CanvasView: UIView {
         let strokes = document.strokes
         var eraserHulls: [UUID: [Hull]] = [eraser.id: eraserOwnHulls]
         func hulls(of e: Stroke) -> [Hull] {
-            if let h = eraserHulls[e.id] { return h }
+            if let h = eraserHulls[e.id] {
+                return h
+            }
             let h = StrokeRenderer.hulls(for: e.points, style: e.style)
             eraserHulls[e.id] = h
             return h
@@ -981,7 +1188,7 @@ final class CanvasView: UIView {
         for stroke in document.strokes where stroke.tool != .pixelEraser {
             let bounds = geometry(for: stroke).bounds
             guard bounds.intersects(sweep) else { continue }
-            for k in 0...steps {
+            for k in 0 ... steps {
                 let t = CGFloat(k) / CGFloat(steps)
                 if StrokeRenderer.hitTest(stroke, bounds: bounds, point: from + (point - from) * t, radius: radius) {
                     hits.insert(stroke.id)
@@ -1018,7 +1225,7 @@ final class CanvasView: UIView {
 
     private func publishHUD(force: Bool) {
         guard let telemetry, controller?.hudVisible == true else { return }
-        let now = ProcessInfo.processInfo.systemUptime   // same clock as UITouch.timestamp
+        let now = ProcessInfo.processInfo.systemUptime // same clock as UITouch.timestamp
         hud.samplesPerSecond = sampleRate.rate(at: now)
         hud.eventsPerSecond = eventRate.rate(at: now)
         hud.pendingEstimates = pendingEstimates.count
@@ -1031,11 +1238,11 @@ final class CanvasView: UIView {
     private func setUpGestures() {
         let direct = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
 
-        pan.allowedTouchTypes = direct   // the Pencil never pans
+        pan.allowedTouchTypes = direct // the Pencil never pans
         #if targetEnvironment(simulator)
-        pan.minimumNumberOfTouches = 2   // one simulated touch draws
+            pan.minimumNumberOfTouches = 2 // one simulated touch draws
         #else
-        pan.minimumNumberOfTouches = 1
+            pan.minimumNumberOfTouches = 1
         #endif
         pan.maximumNumberOfTouches = 2
         pan.delegate = self
@@ -1070,7 +1277,8 @@ final class CanvasView: UIView {
     }
 
     private func gestureBegan() {
-        if activeGestureCount == 0 && !didTransformInTouchSequence {
+        finishSettling()
+        if activeGestureCount == 0, !didTransformInTouchSequence {
             gestureStartTransform = viewTransform
         }
         activeGestureCount += 1
@@ -1079,8 +1287,10 @@ final class CanvasView: UIView {
     private func gestureEnded() {
         activeGestureCount = max(0, activeGestureCount - 1)
         guard !isCancellingGesture else { return }
-        if activeGestureCount == 0 { liveView.settle(at: viewTransform) }
-        if activeGestureCount == 0 && (bitmapTransform != viewTransform || displayedTransform != viewTransform) {
+        if activeGestureCount == 0 {
+            liveView.settle(at: viewTransform)
+        }
+        if activeGestureCount == 0, bitmapTransform != viewTransform || displayedTransform != viewTransform {
             requestFullRender()
         }
     }
@@ -1088,6 +1298,7 @@ final class CanvasView: UIView {
     private func transformDidChange() {
         didTransformInTouchSequence = true
         updateCommittedLayerTransform()
+        updatePageChrome()
         liveView.follow(viewTransform)
         updateLassoOverlay()
         requestFullRender()
@@ -1097,13 +1308,23 @@ final class CanvasView: UIView {
     @objc private func handlePan(_ g: UIPanGestureRecognizer) {
         switch g.state {
         case .began, .changed:
-            if g.state == .began { gestureBegan() }
+            if g.state == .began {
+                gestureBegan()
+                panTranslation = .zero
+            }
             let t = g.translation(in: self)
             viewTransform.offset.x += t.x
             viewTransform.offset.y += t.y
+            panTranslation.x += t.x
+            panTranslation.y += t.y
             g.setTranslation(.zero, in: self)
             transformDidChange()
-        case .ended, .cancelled, .failed:
+        case .ended:
+            gestureEnded()
+            if !turnPageIfSwiped(velocity: g.velocity(in: self)) {
+                settleIfFitted()
+            }
+        case .cancelled, .failed:
             gestureEnded()
         default:
             break
@@ -1113,14 +1334,29 @@ final class CanvasView: UIView {
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
         switch g.state {
         case .began, .changed:
-            if g.state == .began { gestureBegan() }
+            if g.state == .began {
+                gestureBegan()
+            }
             let focus = g.location(in: self)
-            let newScale = min(max(viewTransform.scale * g.scale, 0.25), 8)
-            let k = newScale / viewTransform.scale
+            let fitted = fittedTransform()
+            let range = ViewTransform.zoomRange(fitScale: fitted.scale)
+            let newScale = min(max(viewTransform.scale * g.scale, range.lowerBound), range.upperBound)
+            let oldScale = viewTransform.scale
+            if abs(g.scale - 1) > 0.01 {
+                didPinchInSequence = true
+            }
+            let k = newScale / oldScale
             // Zoom about the pinch centroid: keep the canvas point under it fixed.
             viewTransform.offset = CGPoint(x: focus.x - (focus.x - viewTransform.offset.x) * k,
                                            y: focus.y - (focus.y - viewTransform.offset.y) * k)
             viewTransform.scale = newScale
+            // Near the zoom-out limit, ease the page back to the centre so it lands exactly on the fitted
+            // view rather than stopping wherever the pinch left it.
+            let pull = ViewTransform.recentringAmount(from: oldScale, to: newScale, fitScale: fitted.scale)
+            if pull > 0 {
+                viewTransform.offset = CGPoint(x: viewTransform.offset.x + (fitted.offset.x - viewTransform.offset.x) * pull,
+                                               y: viewTransform.offset.y + (fitted.offset.y - viewTransform.offset.y) * pull)
+            }
             g.scale = 1
             transformDidChange()
         case .ended, .cancelled, .failed:
@@ -1128,6 +1364,68 @@ final class CanvasView: UIView {
         default:
             break
         }
+    }
+
+    /// Turns the page after a sideways swipe, but only while the whole page is in view: zoomed in, a pan
+    /// scrolls around the page instead. Pinches and three-finger swipes (undo/redo) never turn the page.
+    /// Returns whether the swipe was handed on to turn the page.
+    private func turnPageIfSwiped(velocity: CGPoint) -> Bool {
+        guard maxDirectTouchesInSequence <= 2, !didPinchInSequence, isAtFittedZoom,
+              let swipe = PageSwipe.detect(translation: panTranslation, velocity: velocity, viewWidth: bounds.width),
+              let controller, controller.canSwipe(swipe)
+        else { return false }
+        controller.swipeToPage(swipe)
+        return true
+    }
+
+    private var isAtFittedZoom: Bool {
+        viewTransform.scale <= fittedTransform().scale * 1.02
+    }
+
+    /// While the whole page is in view there's nothing to pan to, so a drag that didn't turn the page
+    /// (too short, or past the first or last page) slides the page back to the centre.
+    private func settleIfFitted() {
+        guard isAtFittedZoom, activeGestureCount == 0 else { return }
+        let target = fittedTransform()
+        guard target != viewTransform else { return }
+        settleLink?.invalidate()
+        settleFrom = viewTransform
+        settleTo = target
+        settleStart = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(stepSettling(_:)))
+        link.add(to: .main, forMode: .common)
+        settleLink = link
+    }
+
+    @objc private func stepSettling(_: CADisplayLink) {
+        let t = min((CACurrentMediaTime() - settleStart) / 0.25, 1)
+        let e = 1 - pow(1 - t, 3) // ease out
+        viewTransform = ViewTransform(
+            scale: settleFrom.scale + (settleTo.scale - settleFrom.scale) * e,
+            offset: CGPoint(x: settleFrom.offset.x + (settleTo.offset.x - settleFrom.offset.x) * e,
+                            y: settleFrom.offset.y + (settleTo.offset.y - settleFrom.offset.y) * e)
+        )
+        updateCommittedLayerTransform()
+        updatePageChrome()
+        liveView.follow(viewTransform)
+        updateLassoOverlay()
+        if t >= 1 {
+            finishSettling()
+        }
+    }
+
+    /// Jumps to the end of the slide back, if one is running.
+    private func finishSettling() {
+        guard let link = settleLink else { return }
+        link.invalidate()
+        settleLink = nil
+        viewTransform = settleTo
+        updateCommittedLayerTransform()
+        updatePageChrome()
+        liveView.settle(at: viewTransform)
+        updateLassoOverlay()
+        requestFullRender()
+        controller?.zoomDidChange(viewTransform.scale)
     }
 
     /// Cancels any incidental pan/pinch from multi-finger taps or swipes and restores `gestureStartTransform`.
@@ -1145,6 +1443,7 @@ final class CanvasView: UIView {
         viewTransform = gestureStartTransform
         generation &+= 1
         updateCommittedLayerTransform()
+        updatePageChrome()
         liveView.settle(at: viewTransform)
         controller?.zoomDidChange(viewTransform.scale)
         return bitmapTransform != viewTransform || displayedTransform != viewTransform
@@ -1153,19 +1452,25 @@ final class CanvasView: UIView {
     @objc private func handleSwipe(_ g: UISwipeGestureRecognizer) {
         let needsRender = cancelIncidentalPanZoom()
         let changed = g.direction == .left ? undo() : redo()
-        if needsRender && !changed { requestFullRender() }
+        if needsRender, !changed {
+            requestFullRender()
+        }
     }
 
     @objc private func handleTwoFingerTap(_ g: MultiFingerTapRecognizer) {
         guard g.state == .ended else { return }
         let needsRender = cancelIncidentalPanZoom()
-        if !undo() && needsRender { requestFullRender() }
+        if !undo(), needsRender {
+            requestFullRender()
+        }
     }
 
     @objc private func handleThreeFingerTap(_ g: MultiFingerTapRecognizer) {
         guard g.state == .ended else { return }
         let needsRender = cancelIncidentalPanZoom()
-        if !redo() && needsRender { requestFullRender() }
+        if !redo(), needsRender {
+            requestFullRender()
+        }
     }
 
     @objc private func handleHover(_ g: UIHoverGestureRecognizer) {
@@ -1198,21 +1503,33 @@ final class CanvasView: UIView {
 
 extension CanvasView: UIGestureRecognizerDelegate {
     override func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
-        if g is UIHoverGestureRecognizer { return true }
-        if activeTouch != nil { return false }   // palm rejection: no panning while the Pencil is down
-        if g === pinch { return g.numberOfTouches == 2 }
+        if g is UIHoverGestureRecognizer {
+            return true
+        }
+        if activeTouch != nil {
+            return false
+        } // palm rejection: no panning while the Pencil is down
+        if g === pinch {
+            return g.numberOfTouches == 2
+        }
         return true
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        if g is MultiFingerTapRecognizer && other is UISwipeGestureRecognizer { return false }
-        if g is UISwipeGestureRecognizer && other is MultiFingerTapRecognizer { return false }
+        if g is MultiFingerTapRecognizer, other is UISwipeGestureRecognizer {
+            return false
+        }
+        if g is UISwipeGestureRecognizer, other is MultiFingerTapRecognizer {
+            return false
+        }
         return true
     }
 
-    func gestureRecognizer(_ g: UIGestureRecognizer,
-                           shouldRequireFailureOf other: UIGestureRecognizer) -> Bool { false }
+    func gestureRecognizer(_: UIGestureRecognizer,
+                           shouldRequireFailureOf _: UIGestureRecognizer) -> Bool {
+        false
+    }
 }
 
 // MARK: - Multi-finger tap recognizer
@@ -1231,7 +1548,7 @@ private final class MultiFingerTapRecognizer: UIGestureRecognizer {
     private var startTime: TimeInterval = 0
 
     init(touchesRequired: Int, target: Any?, action: Selector?) {
-        self.numberOfTouchesRequired = touchesRequired
+        numberOfTouchesRequired = touchesRequired
         super.init(target: target, action: action)
         allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
         cancelsTouchesInView = false
@@ -1318,9 +1635,11 @@ private final class LassoOverlayView: UIView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
-    override func draw(_ rect: CGRect) {
+    override func draw(_: CGRect) {
         guard let canvas, let ctx = UIGraphicsGetCurrentContext() else { return }
         canvas.drawLassoOverlay(in: ctx)
     }
@@ -1330,18 +1649,18 @@ private final class LassoOverlayView: UIView {
 
 extension CanvasView: UIPencilInteractionDelegate {
     @available(iOS 17.5, *)
-    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+    func pencilInteraction(_: UIPencilInteraction, didReceiveTap _: UIPencilInteraction.Tap) {
         handlePencilTap()
     }
 
     /// Pre-17.5 path (2nd-gen Pencil double-tap).
-    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+    func pencilInteractionDidTap(_: UIPencilInteraction) {
         handlePencilTap()
     }
 
     /// Pencil Pro squeeze: show a quick tool palette at the hover position.
     @available(iOS 17.5, *)
-    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+    func pencilInteraction(_: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
         guard squeeze.phase == .ended, UIPencilInteraction.preferredSqueezeAction != .ignore else { return }
         let location = squeeze.hoverPose?.location ?? CGPoint(x: bounds.midX, y: bounds.midY)
         controller?.quickPaletteLocation = controller?.quickPaletteLocation == nil ? location : nil
@@ -1351,7 +1670,7 @@ extension CanvasView: UIPencilInteractionDelegate {
         switch UIPencilInteraction.preferredTapAction {
         case .ignore: return
         case .switchPrevious: controller?.switchToPrevious()
-        default: controller?.toggleEraser()   // .switchEraser and palette actions
+        default: controller?.toggleEraser() // .switchEraser and palette actions
         }
     }
 }
@@ -1363,13 +1682,16 @@ struct CanvasRepresentable: UIViewRepresentable {
     let telemetry: PencilTelemetry
     let document: CanvasDocument
 
-    func makeUIView(context: Context) -> CanvasView {
+    func makeUIView(context _: Context) -> CanvasView {
         let view = CanvasView(frame: .zero, document: document)
         view.controller = controller
         view.telemetry = telemetry
         controller.canvas = view
+        // A new page: the tool palette's undo and selection state must describe this document.
+        controller.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
+        controller.selectionDidChange(false)
         return view
     }
 
-    func updateUIView(_ uiView: CanvasView, context: Context) {}
+    func updateUIView(_: CanvasView, context _: Context) {}
 }

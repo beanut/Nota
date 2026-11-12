@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		1A0000000000000000000010 /* InkKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000012 /* InkKit */; };
+		1A0000000000000000000013 /* NotaUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000015 /* NotaUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A0000000000000000000010 /* InkKit in Frameworks */,
+				1A0000000000000000000013 /* NotaUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +73,7 @@
 			name = Nota;
 			packageProductDependencies = (
 				1A0000000000000000000012 /* InkKit */,
+				1A0000000000000000000015 /* NotaUI */,
 			);
 			productName = Nota;
 			productReference = 1A0000000000000000000003 /* Nota.app */;
@@ -102,6 +105,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				1A0000000000000000000011 /* XCLocalSwiftPackageReference "Packages/InkKit" */,
+				1A0000000000000000000014 /* XCLocalSwiftPackageReference "Packages/NotaUI" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1A0000000000000000000006 /* Products */;
@@ -276,12 +280,20 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/InkKit;
 		};
+		1A0000000000000000000014 /* XCLocalSwiftPackageReference "Packages/NotaUI" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/NotaUI;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		1A0000000000000000000012 /* InkKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = InkKit;
+		};
+		1A0000000000000000000015 /* NotaUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = NotaUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

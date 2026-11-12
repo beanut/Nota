@@ -1,3 +1,4 @@
+import NotaUI
 import SwiftData
 import SwiftUI
 
@@ -19,14 +20,14 @@ enum LibrarySection: Hashable {
         }
     }
 
-    var systemImage: String {
+    var icon: NotaIcon {
         switch self {
-        case .all: "doc.text"
-        case .recents: "clock"
-        case .favorites: "star"
-        case .shared: "person.2"
-        case .deleted: "trash"
-        case .folder: "folder"
+        case .all: .grid
+        case .recents: .clock
+        case .favorites: .star
+        case .shared: .share
+        case .deleted: .trash
+        case .folder: .folder
         }
     }
 
@@ -42,7 +43,7 @@ enum LibrarySection: Hashable {
             return note.modifiedAt >= cutoff
         case .favorites: return note.isFavorite
         case .shared: return note.isShared
-        case .folder(let id): return note.folder?.persistentModelID == id
+        case let .folder(id): return note.folder?.persistentModelID == id
         }
     }
 }
@@ -59,6 +60,8 @@ struct LibraryView: View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selection: $selection)
                 .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 320)
+                // No sidebar button while a note is open: the editor's bar is for drawing.
+                .toolbar(removing: path.isEmpty ? nil : .sidebarToggle)
         } detail: {
             NavigationStack(path: $path) {
                 NotesBrowser(section: selection ?? .all, path: $path)

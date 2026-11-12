@@ -1,33 +1,30 @@
+import NotaUI
 import SwiftUI
 
-/// A note in the library grid: a paper thumbnail with its cover colour, then title and page count.
+/// Figma **Note Card**: a paper thumbnail on the desk, then title and detail.
 struct NoteCard: View {
     let note: Note
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: NotaSpacing.sm) {
+            let shape = RoundedRectangle(cornerRadius: NotaRadius.paper, style: .continuous)
             PaperThumbnail(paper: note.paper, tint: note.tint.color, seed: note.title)
-                .aspectRatio(0.97, contentMode: .fit)
-                .clipShape(.rect(cornerRadius: 12, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(.black.opacity(0.06))
-                }
+                .aspectRatio(PaperThumbnail.aspectRatio, contentMode: .fit)
+                .clipShape(shape)
                 .overlay(alignment: .bottomTrailing) { badges }
-                .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
-                .contentShape(.contextMenuPreview, .rect(cornerRadius: 12, style: .continuous))
+                .notaElevation(.paper)
+                .contentShape(.contextMenuPreview, shape)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: NotaSpacing.xxxs) {
                 Text(note.title)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
+                    .font(NotaFont.subheadlineEmph)
+                    .foregroundStyle(NotaColor.textPrimary)
                     .lineLimit(1)
                 Text(note.subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(NotaFont.footnote)
+                    .foregroundStyle(NotaColor.textSecondary)
                     .lineLimit(1)
             }
-            .padding(.horizontal, 4)
         }
         .contentShape(.rect)
         .accessibilityElement(children: .combine)
@@ -37,84 +34,90 @@ struct NoteCard: View {
 
     @ViewBuilder
     private var badges: some View {
-        let symbols = [
-            note.kind == .pdf ? "doc.richtext" : nil,
-            note.isShared ? "person.2.fill" : nil,
-            note.isFavorite ? "star.fill" : nil,
-        ].compactMap { $0 }
-        if !symbols.isEmpty {
-            HStack(spacing: 6) {
-                ForEach(symbols, id: \.self) { Image(systemName: $0) }
+        if note.kind == .pdf || note.isShared || note.isFavorite {
+            NotaTag {
+                HStack(spacing: NotaSpacing.xxs) {
+                    if note.kind == .pdf {
+                        Text("PDF")
+                    }
+                    if note.isShared {
+                        NotaIconView(.share, size: 12)
+                    }
+                    if note.isFavorite {
+                        NotaIconView(.star, size: 12)
+                    }
+                }
             }
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(.ultraThinMaterial, in: .capsule)
-            .padding(8)
+            .padding(NotaSpacing.s)
             .accessibilityHidden(true)
         }
     }
 }
 
-/// Miniature page: coloured cover band, paper pattern, and placeholder "handwriting" bars in the cover
-/// colour. Bar lengths derive from `seed`, so each note keeps the same thumbnail between launches.
+/// Figma **Paper** in miniature: warm paper with its ruling, a heading in the note's ink and placeholder
+/// "handwriting" in black ink. Bar lengths derive from `seed`, so each note keeps the same thumbnail
+/// between launches.
 struct PaperThumbnail: View {
     let paper: PaperStyle
     let tint: Color
     let seed: String
 
+    /// US Letter, as in Figma (190 × 246).
+    static let aspectRatio: CGFloat = 190.0 / 246.0
+
     var body: some View {
         Canvas { context, size in
-            let unit = size.width / 190   // design reference width
-            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.white))
+            let unit = size.width / 190 // design reference width
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(NotaColor.paperSurface))
 
-            let rule = Color(red: 0.86, green: 0.87, blue: 0.91)
+            let rule = NotaColor.paperRule
             switch paper {
             case .plain:
                 break
             case .lined:
-                var y = 28 * unit
+                // Figma Paper / Ruled: first rule at 14% of the height, then one every 10 pt.
+                var y = 36 * unit
                 while y < size.height {
                     context.fill(Path(CGRect(x: 0, y: y, width: size.width, height: max(0.5, 0.75 * unit))),
                                  with: .color(rule))
-                    y += 26 * unit
+                    y += 10 * unit
                 }
             case .dotted:
-                let step = 17 * unit
+                let step = 12 * unit
                 let r = max(0.6, 1 * unit)
                 var y = step
                 while y < size.height {
                     var x = step
                     while x < size.width {
                         context.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: 2 * r, height: 2 * r)),
-                                     with: .color(rule.opacity(1.1)))
+                                     with: .color(rule))
                         x += step
                     }
                     y += step
                 }
             case .grid:
-                let step = 17 * unit
+                let step = 12 * unit
                 var path = Path()
                 var v = step
-                while v < size.width { path.addRect(CGRect(x: v, y: 0, width: 0.5, height: size.height)); v += step }
+                while v < size.width {
+                    path.addRect(CGRect(x: v, y: 0, width: 0.5, height: size.height)); v += step
+                }
                 var h = step
-                while h < size.height { path.addRect(CGRect(x: 0, y: h, width: size.width, height: 0.5)); h += step }
-                context.fill(path, with: .color(rule.opacity(0.8)))
+                while h < size.height {
+                    path.addRect(CGRect(x: 0, y: h, width: size.width, height: 0.5)); h += step
+                }
+                context.fill(path, with: .color(rule))
             }
-
-            // Cover band
-            context.fill(Path(CGRect(x: 0, y: 0, width: size.width, height: 6 * unit)), with: .color(tint))
 
             // Placeholder handwriting
             let widths = barWidths
             let inset = 18 * unit
             let usable = size.width - 2 * inset
-            let heading = CGRect(x: inset, y: 34 * unit, width: usable * widths[0], height: 8 * unit)
-            context.fill(Path(roundedRect: heading, cornerRadius: 4 * unit), with: .color(tint.opacity(0.85)))
+            let heading = CGRect(x: inset, y: 20 * unit, width: usable * widths[0], height: 8 * unit)
+            context.fill(Path(roundedRect: heading, cornerRadius: 4 * unit), with: .color(tint))
             for (i, fraction) in widths.dropFirst().enumerated() {
-                let bar = CGRect(x: inset, y: (68 + CGFloat(i) * 16) * unit, width: usable * fraction, height: 6 * unit)
-                context.fill(Path(roundedRect: bar, cornerRadius: 3 * unit), with: .color(tint.opacity(0.5)))
+                let bar = CGRect(x: inset, y: (60 + CGFloat(i) * 20) * unit, width: usable * fraction, height: 6 * unit)
+                context.fill(Path(roundedRect: bar, cornerRadius: 3 * unit), with: .color(NotaInk.black.color.opacity(0.75)))
             }
         }
         .accessibilityHidden(true)
@@ -133,7 +136,7 @@ struct PaperThumbnail: View {
     HStack(spacing: 24) {
         ForEach(PaperStyle.allCases) { paper in
             PaperThumbnail(paper: paper, tint: NoteTint.teal.color, seed: paper.rawValue)
-                .aspectRatio(0.97, contentMode: .fit)
+                .aspectRatio(PaperThumbnail.aspectRatio, contentMode: .fit)
                 .frame(width: 190)
         }
     }

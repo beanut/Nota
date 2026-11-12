@@ -1,13 +1,42 @@
 import CoreGraphics
 import Foundation
 
-/// Stroke list plus an undo/redo command stack.
+/// One page: its paper size, stroke list and undo/redo command stack.
 @MainActor
-public final class CanvasDocument {
-    public init() {}
+public final class CanvasDocument: Identifiable {
+    public let id: UUID
+
+    /// Paper size of the page. Strokes are kept where they are when it changes, so ink beyond the new
+    /// edge is hidden rather than deleted and comes back if the page grows again.
+    public var pageSize: PageSize {
+        didSet {
+            if pageSize != oldValue {
+                onPageSizeChange?()
+            }
+        }
+    }
+
+    /// The page in canvas space: `(0, 0)` to `(width, height)`.
+    public var pageBounds: CGRect {
+        pageSize.bounds
+    }
+
+    public init(pageSize: PageSize = .default, id: UUID = UUID()) {
+        self.id = id
+        self.pageSize = pageSize
+    }
+
+    /// True when `point` (canvas space) is on the page.
+    public func contains(_ point: CGPoint) -> Bool {
+        pageBounds.contains(point)
+    }
+
+    var onPageSizeChange: (() -> Void)?
 
     /// Number of strokes on the page (including pixel-eraser strokes).
-    public var strokeCount: Int { strokes.count }
+    public var strokeCount: Int {
+        strokes.count
+    }
 
     struct Removal {
         let index: Int
@@ -23,10 +52,10 @@ public final class CanvasDocument {
     }
 
     enum Command {
-        case add(Stroke, splits: [Split])   // splits: strokes the added pixel-eraser stroke cut apart
-        case erase([Removal])   // in removal order; undo re-inserts in reverse
+        case add(Stroke, splits: [Split]) // splits: strokes the added pixel-eraser stroke cut apart
+        case erase([Removal]) // in removal order; undo re-inserts in reverse
         case clear([Stroke])
-        case move(Set<UUID>, CGPoint)   // translate strokes by a canvas-space delta
+        case move(Set<UUID>, CGPoint) // translate strokes by a canvas-space delta
     }
 
     private(set) var strokes: [Stroke] = []
@@ -36,8 +65,13 @@ public final class CanvasDocument {
     var onChange: (() -> Void)?
     /// Strokes moved by the most recent undo/redo, so the view can invalidate their cached geometry.
     private(set) var lastMovedIDs: Set<UUID> = []
-    var canUndo: Bool { !undoStack.isEmpty }
-    var canRedo: Bool { !redoStack.isEmpty }
+    var canUndo: Bool {
+        !undoStack.isEmpty
+    }
+
+    var canRedo: Bool {
+        !redoStack.isEmpty
+    }
 
     /// Appends a stroke. For a pixel-eraser stroke, `splits` replaces each stroke it cut through with
     /// its pieces in the same undoable command, so undo restores the original in one step.
@@ -97,20 +131,20 @@ public final class CanvasDocument {
         guard let command = undoStack.popLast() else { return false }
         lastMovedIDs = []
         switch command {
-        case .add(let stroke, let splits):
+        case let .add(stroke, splits):
             if let i = strokes.lastIndex(where: { $0.id == stroke.id }) {
                 redoStack.append(.add(strokes.remove(at: i), splits: splits))
                 revert(splits)
             }
-        case .erase(let removals):
+        case let .erase(removals):
             for r in removals.reversed() {
                 strokes.insert(r.stroke, at: min(r.index, strokes.count))
             }
             redoStack.append(.erase(removals))
-        case .clear(let saved):
+        case let .clear(saved):
             strokes = saved
             redoStack.append(.clear(saved))
-        case .move(let ids, let d):
+        case let .move(ids, d):
             translate(ids: ids, by: CGPoint(x: -d.x, y: -d.y))
             lastMovedIDs = ids
             redoStack.append(.move(ids, d))
@@ -124,17 +158,17 @@ public final class CanvasDocument {
         guard let command = redoStack.popLast() else { return false }
         lastMovedIDs = []
         switch command {
-        case .add(let stroke, let splits):
+        case let .add(stroke, splits):
             apply(splits)
             strokes.append(stroke)
             undoStack.append(.add(stroke, splits: splits))
-        case .erase(let removals):
+        case let .erase(removals):
             let again = remove(ids: Set(removals.map(\.stroke.id)))
             undoStack.append(.erase(again))
         case .clear:
             undoStack.append(.clear(strokes))
             strokes.removeAll()
-        case .move(let ids, let d):
+        case let .move(ids, d):
             translate(ids: ids, by: d)
             lastMovedIDs = ids
             undoStack.append(.move(ids, d))
@@ -149,16 +183,17 @@ public final class CanvasDocument {
             guard strokes.indices.contains(split.index), strokes[split.index].id == split.original.id else {
                 assertionFailure("split target moved"); continue
             }
-            strokes.replaceSubrange(split.index...split.index, with: split.pieces)
+            strokes.replaceSubrange(split.index ... split.index, with: split.pieces)
         }
     }
 
     /// Lowest index first: once the earlier splits are reverted, each one's pieces start at its `index`.
     private func revert(_ splits: [Split]) {
         for split in splits.sorted(by: { $0.index < $1.index }) {
-            let range = split.index..<(split.index + split.pieces.count)
+            let range = split.index ..< (split.index + split.pieces.count)
             guard range.upperBound <= strokes.count,
-                  zip(strokes[range], split.pieces).allSatisfy({ $0.id == $1.id }) else {
+                  zip(strokes[range], split.pieces).allSatisfy({ $0.id == $1.id })
+            else {
                 assertionFailure("split pieces moved"); continue
             }
             strokes.replaceSubrange(range, with: [split.original])

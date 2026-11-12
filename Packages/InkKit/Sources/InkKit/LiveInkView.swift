@@ -1,3 +1,4 @@
+import NotaUI
 import UIKit
 
 /// The live ink layer: the stroke under the Pencil, plus finished strokes still waiting for their
@@ -26,10 +27,12 @@ final class LiveInkView: UIView {
 
     /// Strokes to show, bottom to top. Pulled at draw time so the view never holds stale state.
     var entries: () -> [Entry] = { [] }
-    var paperColor: CGColor = UIColor.white.cgColor
+    var paperColor: CGColor = NotaUIColor.paperSurface.cgColor
     /// The committed image. Multiply ink needs the real backdrop to preview what will be committed.
     var underlay: CGImage? {
-        didSet { for tile in tiles.values where tile.drewBackdrop { tile.setNeedsDisplay() } }
+        didSet { for tile in tiles.values where tile.drewBackdrop {
+            tile.setNeedsDisplay()
+        } }
     }
 
     /// Canvas → view transform the tiles are rasterized at.
@@ -51,10 +54,14 @@ final class LiveInkView: UIView {
         /// Snapshot of `context`, made on demand and dropped whenever the context is drawn into.
         private var snapshot: CGImage?
 
-        func invalidateImage() { snapshot = nil }
+        func invalidateImage() {
+            snapshot = nil
+        }
 
         var image: CGImage? {
-            if snapshot == nil { snapshot = context?.makeImage() }
+            if snapshot == nil {
+                snapshot = context?.makeImage()
+            }
             return snapshot
         }
     }
@@ -64,9 +71,14 @@ final class LiveInkView: UIView {
         var key = TileKey(col: 0, row: 0)
         var drewBackdrop = false
 
-        override func draw(in ctx: CGContext) { owner?.draw(self, in: ctx) }
-        // Standalone layers animate `contents` by default; live ink must never cross-fade.
-        override func action(forKey event: String) -> CAAction? { nil }
+        override func draw(in ctx: CGContext) {
+            owner?.draw(self, in: ctx)
+        }
+
+        /// Standalone layers animate `contents` by default; live ink must never cross-fade.
+        override func action(forKey _: String) -> CAAction? {
+            nil
+        }
     }
 
     override init(frame: CGRect) {
@@ -78,8 +90,10 @@ final class LiveInkView: UIView {
         tileHost.anchorPoint = .zero
         tileHost.actions = ["sublayers": NSNull(), "transform": NSNull()]
         layer.addSublayer(tileHost)
-        for (shape, width, color) in [(cursorHalo, 2.5, UIColor.white.withAlphaComponent(0.9)),
-                                      (cursorLine, 1.0, UIColor.darkGray)] {
+        // The hover cursor sits on paper, which is light in both appearances.
+        let onPaper = UITraitCollection(userInterfaceStyle: .light)
+        for (shape, width, color) in [(cursorHalo, 2.5, NotaUIColor.paperSurface.withAlphaComponent(0.9)),
+                                      (cursorLine, 1.0, NotaUIColor.textSecondary.resolvedColor(with: onPaper))] {
             shape.fillColor = nil
             shape.lineWidth = width
             shape.strokeColor = color.cgColor
@@ -89,7 +103,9 @@ final class LiveInkView: UIView {
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -112,9 +128,13 @@ final class LiveInkView: UIView {
     /// Call when strokes were added or removed wholesale. Redraws every tile any stroke reaches.
     func invalidateAll() {
         guard prune() else { return }
-        for tile in tiles.values { tile.setNeedsDisplay() }
+        for tile in tiles.values {
+            tile.setNeedsDisplay()
+        }
         for entry in entries() {
-            for rect in entry.stroke.pieceBounds { markTiles(under: rect) }
+            for rect in entry.stroke.pieceBounds {
+                markTiles(under: rect)
+            }
         }
     }
 
@@ -123,8 +143,8 @@ final class LiveInkView: UIView {
         let rect = bakeTransform.toView(canvasRect).insetBy(dx: -3, dy: -3).intersection(bounds)
         guard !rect.isNull, !rect.isEmpty else { return }
         let size = Self.tileSize
-        for row in Int(rect.minY / size)...Int((rect.maxY - 0.001) / size) {
-            for col in Int(rect.minX / size)...Int((rect.maxX - 0.001) / size) {
+        for row in Int(rect.minY / size) ... Int((rect.maxY - 0.001) / size) {
+            for col in Int(rect.minX / size) ... Int((rect.maxX - 0.001) / size) {
                 // Only the part of the tile under the new ink: Core Animation keeps the rest of the
                 // tile's pixels and clips the redraw to this rect.
                 let tile = tile(at: TileKey(col: col, row: row))
@@ -181,7 +201,9 @@ final class LiveInkView: UIView {
     }
 
     private func tile(at key: TileKey) -> Tile {
-        if let tile = tiles[key] { return tile }
+        if let tile = tiles[key] {
+            return tile
+        }
         let tile = Tile()
         tile.owner = self
         tile.key = key
@@ -194,7 +216,9 @@ final class LiveInkView: UIView {
     }
 
     private func removeAllTiles() {
-        for tile in tiles.values { tile.removeFromSuperlayer() }
+        for tile in tiles.values {
+            tile.removeFromSuperlayer()
+        }
         tiles.removeAll()
         rasters.removeAll()
         tileHost.setAffineTransform(.identity)
@@ -205,7 +229,9 @@ final class LiveInkView: UIView {
     private func prune() -> Bool {
         let current = entries()
         if current.isEmpty {
-            if !tiles.isEmpty || !rasters.isEmpty { removeAllTiles() }
+            if !tiles.isEmpty || !rasters.isEmpty {
+                removeAllTiles()
+            }
             return false
         }
         if !rasters.isEmpty {
@@ -218,7 +244,9 @@ final class LiveInkView: UIView {
     // MARK: Drawing
 
     private func makeBakeContext(_ baked: BakedTile, for tileFrame: CGRect) -> CGContext? {
-        if let ctx = baked.context { return ctx }
+        if let ctx = baked.context {
+            return ctx
+        }
         let pixels = Int((Self.tileSize * scale).rounded(.up))
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: pixels, height: pixels, bitsPerComponent: 8, bytesPerRow: 0,
@@ -250,7 +278,7 @@ final class LiveInkView: UIView {
             baked = fresh
         }
         guard let baked else { return nil }
-        for chunk in baked.bakedThrough..<limit where stroke.chunkBounds(chunk).intersects(clip) {
+        for chunk in baked.bakedThrough ..< limit where stroke.chunkBounds(chunk).intersects(clip) {
             guard let ctx = makeBakeContext(baked, for: tileFrame) else { break }
             let kind = stroke.stroke.tool
             let color = stroke.stroke.color
@@ -293,12 +321,14 @@ final class LiveInkView: UIView {
             }
         }
 
-        ctx.translateBy(x: -tileFrame.minX, y: -tileFrame.minY)   // now in view space
+        ctx.translateBy(x: -tileFrame.minX, y: -tileFrame.minY) // now in view space
         ctx.interpolationQuality = .none
 
         // Multiply needs the real backdrop to preview exactly what will be committed. Paper first so the
         // underlay is an opaque replica; otherwise translucent ink would double up over the committed layer.
-        if dirty.contains(tileFrame) { tile.drewBackdrop = false }
+        if dirty.contains(tileFrame) {
+            tile.drewBackdrop = false
+        }
         if let underlay, items.contains(where: { $0.entry.stroke.stroke.tool == .highlighter }) {
             tile.drewBackdrop = true
             ctx.setFillColor(paperColor)
@@ -315,11 +345,17 @@ final class LiveInkView: UIView {
             let direct = blend == .normal && (preview != nil || item.hot.allSatisfy { $0.alpha >= 0.999 })
             ctx.saveGState()
             ctx.setBlendMode(blend)
-            if !direct { ctx.beginTransparencyLayer(auxiliaryInfo: nil) }
-            if let baked = item.baked { drawImage(baked, in: tileFrame, ctx: ctx) }
+            if !direct {
+                ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+            }
+            if let baked = item.baked {
+                drawImage(baked, in: tileFrame, ctx: ctx)
+            }
             if !item.hot.isEmpty {
                 ctx.concatenate(bakeTransform.affine)
-                if !direct { ctx.setBlendMode(.copy) }
+                if !direct {
+                    ctx.setBlendMode(.copy)
+                }
                 if stroke.tool == .pencil {
                     PencilTexture.prepareContext(ctx, phase: CGPoint(x: bakeTransform.offset.x - tileFrame.minX,
                                                                      y: bakeTransform.offset.y - tileFrame.minY))
@@ -333,7 +369,9 @@ final class LiveInkView: UIView {
                     ctx.fillPath(using: .winding)
                 }
             }
-            if !direct { ctx.endTransparencyLayer() }
+            if !direct {
+                ctx.endTransparencyLayer()
+            }
             ctx.restoreGState()
         }
     }
