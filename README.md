@@ -63,7 +63,7 @@ Colour, type, spacing, radius and elevation tokens, the icon set and shared cont
 
 ## InkKit
 
-The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / eraser / lasso, undo/redo, pan and zoom, pages, and a debug HUD.
+The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / eraser / lasso, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
 
 ```swift
 import InkKit
