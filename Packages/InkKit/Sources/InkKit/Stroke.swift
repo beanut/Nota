@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import NotaUI
 
 /// Tools the user can pick in the toolbar.
 enum Tool: String, CaseIterable, Identifiable {
@@ -31,13 +32,20 @@ struct RGBA: Equatable, Hashable {
         CGColor(srgbRed: r, green: g, blue: b, alpha: a * alpha)
     }
 
-    static let swatches: [RGBA] = [
-        RGBA(r: 0.11, g: 0.11, b: 0.12), // ink black
-        RGBA(r: 0.12, g: 0.37, b: 0.82), // blue
-        RGBA(r: 0.85, g: 0.19, b: 0.15), // red
-        RGBA(r: 0.09, g: 0.50, b: 0.22), // green
-        RGBA(r: 0.98, g: 0.72, b: 0.05) // amber (classic highlighter)
-    ]
+    init(r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat = 1) {
+        self.r = r
+        self.g = g
+        self.b = b
+        self.a = a
+    }
+
+    /// The ink's sRGB value. Inks are fixed colours: they don't change with dark mode.
+    init(_ ink: NotaInk) {
+        self.init(r: CGFloat(ink.red), g: CGFloat(ink.green), b: CGFloat(ink.blue))
+    }
+
+    /// Pen and pencil inks, in Pen Case order.
+    static let swatches: [RGBA] = NotaInk.penPresets.map(RGBA.init)
 }
 
 /// One raw Pencil sample. `location` is in canvas space (independent of pan/zoom).

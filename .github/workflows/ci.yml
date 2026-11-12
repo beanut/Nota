@@ -51,7 +51,7 @@ jobs:
           path: |
             ~/Library/Developer/Xcode/DerivedData
             Packages/InkKit/.build
-          key: deriv-${{ runner.os }}-${{ hashFiles('Nota.xcodeproj/project.pbxproj', 'Packages/InkKit/Package.swift', 'Packages/InkKit/Package.resolved') }}
+          key: deriv-${{ runner.os }}-${{ hashFiles('Nota.xcodeproj/project.pbxproj', 'Packages/InkKit/Package.swift', 'Packages/InkKit/Package.resolved', 'Packages/NotaUI/Package.swift') }}
           restore-keys: |
             deriv-${{ runner.os }}-
 

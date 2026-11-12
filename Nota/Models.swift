@@ -1,3 +1,4 @@
+import NotaUI
 import SwiftData
 import SwiftUI
 
@@ -30,14 +31,19 @@ enum NoteTint: String, Codable, CaseIterable, Identifiable {
         rawValue
     }
 
-    var color: Color {
+    /// The ink the thumbnail's heading is written in.
+    var ink: NotaInk {
         switch self {
-        case .indigo: Color(red: 0.20, green: 0.27, blue: 0.78)
-        case .teal: Color(red: 0.07, green: 0.47, blue: 0.42)
-        case .rust: Color(red: 0.75, green: 0.27, blue: 0.10)
-        case .violet: Color(red: 0.49, green: 0.23, blue: 0.93)
-        case .graphite: Color(red: 0.27, green: 0.28, blue: 0.31)
+        case .indigo: .blue
+        case .teal: .teal
+        case .rust: .orange
+        case .violet: .violet
+        case .graphite: .black
         }
+    }
+
+    var color: Color {
+        ink.color
     }
 }
 
@@ -49,12 +55,12 @@ enum FolderColor: String, Codable, CaseIterable, Identifiable {
 
     var color: Color {
         switch self {
-        case .blue: Color(red: 0.20, green: 0.27, blue: 0.85)
-        case .teal: Color(red: 0.07, green: 0.47, blue: 0.42)
-        case .orange: Color(red: 0.80, green: 0.30, blue: 0.10)
-        case .purple: .purple
-        case .pink: .pink
-        case .green: .green
+        case .blue: NotaInk.blue.color
+        case .teal: NotaInk.teal.color
+        case .orange: NotaInk.orange.color
+        case .purple: NotaInk.violet.color
+        case .pink: NotaInk.labelRose.color
+        case .green: NotaInk.labelGreen.color
         }
     }
 }

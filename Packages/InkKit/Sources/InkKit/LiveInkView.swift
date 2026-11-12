@@ -1,3 +1,4 @@
+import NotaUI
 import UIKit
 
 /// The live ink layer: the stroke under the Pencil, plus finished strokes still waiting for their
@@ -26,7 +27,7 @@ final class LiveInkView: UIView {
 
     /// Strokes to show, bottom to top. Pulled at draw time so the view never holds stale state.
     var entries: () -> [Entry] = { [] }
-    var paperColor: CGColor = UIColor.white.cgColor
+    var paperColor: CGColor = NotaUIColor.paperSurface.cgColor
     /// The committed image. Multiply ink needs the real backdrop to preview what will be committed.
     var underlay: CGImage? {
         didSet { for tile in tiles.values where tile.drewBackdrop {
@@ -89,8 +90,10 @@ final class LiveInkView: UIView {
         tileHost.anchorPoint = .zero
         tileHost.actions = ["sublayers": NSNull(), "transform": NSNull()]
         layer.addSublayer(tileHost)
-        for (shape, width, color) in [(cursorHalo, 2.5, UIColor.white.withAlphaComponent(0.9)),
-                                      (cursorLine, 1.0, UIColor.darkGray)] {
+        // The hover cursor sits on paper, which is light in both appearances.
+        let onPaper = UITraitCollection(userInterfaceStyle: .light)
+        for (shape, width, color) in [(cursorHalo, 2.5, NotaUIColor.paperSurface.withAlphaComponent(0.9)),
+                                      (cursorLine, 1.0, NotaUIColor.textSecondary.resolvedColor(with: onPaper))] {
             shape.fillColor = nil
             shape.lineWidth = width
             shape.strokeColor = color.cgColor

@@ -1,3 +1,4 @@
+import NotaUI
 import SwiftUI
 
 /// Observable tool state shared by the SwiftUI shell and the UIKit canvas.
@@ -16,7 +17,7 @@ final class CanvasController: ObservableObject {
     @Published var settings: [Tool: ToolSettings] = [
         .pen: ToolSettings(colorIndex: 0, width: 4),
         .pencil: ToolSettings(colorIndex: 0, width: 3),
-        .highlighter: ToolSettings(colorIndex: 4, width: 22),
+        .highlighter: ToolSettings(colorIndex: 0, width: 22),
         .eraser: ToolSettings(colorIndex: 0, width: 30),
         .lasso: ToolSettings(colorIndex: 0, width: 4)
     ]
@@ -34,6 +35,17 @@ final class CanvasController: ObservableObject {
     @Published private(set) var zoom: CGFloat = 1
     /// Set by a Pencil Pro squeeze; location is in canvas-view (= full-screen) coordinates.
     @Published var quickPaletteLocation: CGPoint?
+    /// Space kept around the page when it's fitted to the view, on top of the safe area: room for the
+    /// floating Pen Case and page bar. Set by the editor when the Pen Case moves to another edge.
+    @Published var pageMargins = CanvasController.defaultPageMargins {
+        didSet {
+            if pageMargins != oldValue {
+                canvas?.pageMarginsDidChange()
+            }
+        }
+    }
+
+    static let defaultPageMargins = UIEdgeInsets(top: 76, left: 24, bottom: 76, right: 24)
 
     weak var canvas: CanvasView?
     /// Called when the canvas is swiped sideways to turn the page. Set by the editor that owns the pages.
@@ -56,6 +68,22 @@ final class CanvasController: ObservableObject {
         case .highlighter: 8 ... 48
         case .eraser: 8 ... 100
         case .lasso: 1 ... 1
+        }
+    }
+
+    /// The colour presets shown for `tool`. Highlighters get their own light, saturated set.
+    static func inks(for tool: Tool) -> [NotaInk] {
+        tool == .highlighter ? NotaInk.highlighterPresets : NotaInk.penPresets
+    }
+
+    /// Fine, medium and bold widths for `tool`, all inside `widthRange(for:)`.
+    static func widthPresets(for tool: Tool) -> [Double] {
+        switch tool {
+        case .pen: [2, 4, 8]
+        case .pencil: [2, 3, 6]
+        case .highlighter: [14, 22, 34]
+        case .eraser: [16, 30, 60]
+        case .lasso: []
         }
     }
 
@@ -144,7 +172,8 @@ final class CanvasController: ObservableObject {
     /// Brush snapshot for a new stroke. `viewScale` converts the eraser's on-screen size to canvas units.
     func strokeTemplate(viewScale: CGFloat) -> StrokeTemplate {
         let s = current
-        let color = RGBA.swatches[min(max(s.colorIndex, 0), RGBA.swatches.count - 1)]
+        let inks = Self.inks(for: tool)
+        let color = RGBA(inks[min(max(s.colorIndex, 0), inks.count - 1)])
         switch tool {
         case .pen, .highlighter, .lasso:
             let style = BrushStyle(width: CGFloat(s.width),

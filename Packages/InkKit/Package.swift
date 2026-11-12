@@ -7,8 +7,11 @@ let package = Package(
     products: [
         .library(name: "InkKit", targets: ["InkKit"])
     ],
+    dependencies: [
+        .package(path: "../NotaUI")
+    ],
     targets: [
-        .target(name: "InkKit"),
+        .target(name: "InkKit", dependencies: ["NotaUI"]),
         .testTarget(name: "InkKitTests", dependencies: ["InkKit"])
     ]
 )

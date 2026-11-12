@@ -3,6 +3,7 @@ included:
   - Nota
   - Packages/InkKit/Sources
   - Packages/InkKit/Tests
+  - Packages/NotaUI/Sources
 
 excluded:
   - DerivedData

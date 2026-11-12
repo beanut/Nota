@@ -1,3 +1,4 @@
+import NotaUI
 import SwiftUI
 
 /// Floating bar under the page: previous / next, the page number, adding pages and the page size.
@@ -9,41 +10,37 @@ struct PageBar: View {
     @State private var confirmDelete = false
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: NotaSpacing.xxxs) {
             if allowsMultiplePages {
-                iconButton("chevron.left", "Previous page", enabled: notebook.canGoToPreviousPage) {
-                    notebook.goToPreviousPage()
-                }
-                Text("\(notebook.currentPageIndex + 1) of \(notebook.pageCount)")
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                    .frame(minWidth: 64)
-                    .accessibilityLabel("Page \(notebook.currentPageIndex + 1) of \(notebook.pageCount)")
-                iconButton("chevron.right", "Next page", enabled: notebook.canGoToNextPage) {
-                    notebook.goToNextPage()
-                }
-                divider
+                Button { notebook.goToPreviousPage() } label: { NotaIconView(.chevronLeft) }
+                    .buttonStyle(.notaIcon)
+                    .disabled(!notebook.canGoToPreviousPage)
+                    .accessibilityLabel("Previous page")
+                Text("Page \(notebook.currentPageIndex + 1) of \(notebook.pageCount)")
+                    .font(NotaFont.subheadlineEmph.monospacedDigit())
+                    .foregroundStyle(NotaColor.textPrimary)
+                Button { notebook.goToNextPage() } label: { NotaIconView(.chevronRight) }
+                    .buttonStyle(.notaIcon)
+                    .disabled(!notebook.canGoToNextPage)
+                    .accessibilityLabel("Next page")
+                NotaBarDivider()
                 addMenu
-                divider
             }
             sizeMenu
-            if allowsMultiplePages {
-                iconButton("trash", "Delete page", enabled: notebook.canRemovePage) { confirmDelete = true }
-                    .confirmationDialog("Delete page \(notebook.currentPageIndex + 1)?", isPresented: $confirmDelete) {
-                        Button("Delete Page", role: .destructive) {
-                            notebook.removePage(at: notebook.currentPageIndex)
-                        }
-                    } message: {
-                        Text("Its ink is deleted too. This can't be undone.")
-                    }
-            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.black.opacity(0.08)))
-        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        .padding(.leading, NotaSpacing.xxs)
+        .padding(.trailing, NotaSpacing.xs)
+        .padding(.vertical, NotaSpacing.xxs)
+        .notaFloatingBar(fill: NotaColor.bgRaised)
         .sheet(item: $customSizeTarget) { target in
             CustomPageSizeSheet(initial: target.initial) { size in apply(size, to: target.kind) }
+        }
+        .confirmationDialog("Delete page \(notebook.currentPageIndex + 1)?", isPresented: $confirmDelete) {
+            Button("Delete Page", role: .destructive) {
+                notebook.removePage(at: notebook.currentPageIndex)
+            }
+        } message: {
+            Text("Its ink is deleted too. This can't be undone.")
         }
     }
 
@@ -63,13 +60,20 @@ struct PageBar: View {
                 sizeButtons { notebook.addPage(size: $0) }
                 Button("Custom…") { customSizeTarget = CustomSizeTarget(kind: .newPage, initial: currentSize) }
             }
+            Divider()
+            Button(role: .destructive) { confirmDelete = true } label: {
+                Label("Delete Page", systemImage: "trash")
+            }
+            .disabled(!notebook.canRemovePage)
         } label: {
-            menuLabel("plus", "Add page")
+            NotaIconView(.plus)
         } primaryAction: {
             notebook.addPage()
         }
         .menuStyle(.button)
-        .buttonStyle(.plain)
+        .buttonStyle(.notaIcon)
+        .accessibilityLabel("Add page")
+        .accessibilityHint("Touch and hold for more page options.")
     }
 
     private var sizeMenu: some View {
@@ -84,10 +88,22 @@ struct PageBar: View {
                 }
             }
         } label: {
-            menuLabel("doc.badge.gearshape", "Page size")
+            // Figma: the paper-size pill.
+            HStack(spacing: NotaSpacing.xxs) {
+                Text(currentSize.displayName())
+                    .font(NotaFont.footnoteEmph)
+                NotaIconView(.chevronDown, size: 12)
+            }
+            .foregroundStyle(NotaColor.textPrimary)
+            .padding(.leading, NotaSpacing.sm)
+            .padding(.trailing, NotaSpacing.s)
+            .frame(height: 28)
+            .background(NotaColor.bgFill, in: Capsule())
+            .contentShape(Capsule())
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
+        .accessibilityLabel("Page size, \(currentSize.displayName())")
     }
 
     /// Every preset in portrait and landscape, with the current size checked.
@@ -114,33 +130,6 @@ struct PageBar: View {
         case .currentPage: notebook.setPageSize(size, forPageAt: notebook.currentPageIndex)
         case .newPage: notebook.addPage(size: size)
         }
-    }
-
-    private var divider: some View {
-        Rectangle().fill(.secondary.opacity(0.3)).frame(width: 1, height: 24)
-    }
-
-    private func menuLabel(_ symbol: String, _ label: String) -> some View {
-        Image(systemName: symbol)
-            .font(.system(size: 17, weight: .medium))
-            .foregroundStyle(Color.primary)
-            .frame(width: 34, height: 36)
-            .contentShape(Rectangle())
-            .accessibilityLabel(label)
-    }
-
-    private func iconButton(_ symbol: String, _ label: String, enabled: Bool = true,
-                            action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(enabled ? Color.primary : Color.secondary.opacity(0.4))
-                .frame(width: 34, height: 36)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel(label)
     }
 }
 
@@ -214,7 +203,7 @@ struct CustomPageSizeSheet: View {
                 TextField(title, value: value, format: .number.precision(.fractionLength(0 ... 2)))
                     .keyboardType(.decimalPad)
                     .multilineTextAlignment(.trailing)
-                Text(unit.symbol).foregroundStyle(.secondary)
+                Text(unit.symbol).foregroundStyle(NotaColor.textSecondary)
             }
         }
     }

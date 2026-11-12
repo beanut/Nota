@@ -9,7 +9,7 @@ An iPad note-taking app. The **Library** organises notebooks into smart collecti
 | Platform | iPadOS 17.5+, iPad only |
 | Language | Swift 5 mode, SwiftUI + SwiftData |
 | Bundle ID | `com.bernard.nota` |
-| Dependencies | `InkKit` (local package in `Packages/InkKit`), no third-party dependencies |
+| Dependencies | `InkKit` and `NotaUI` (local packages in `Packages/`), no third-party dependencies |
 | Tested on | iPad Pro 11-inch and 13-inch (M5) simulators only; not yet run on a physical iPad |
 
 ## Build & run
@@ -35,8 +35,13 @@ Nota/
 │   ├── InkStore.swift        Per-note CanvasDocument cache
 │   ├── Models.swift          Note, Folder, enums
 │   └── SampleData.swift      First-launch seed
-└── Packages/InkKit/          Drawing engine (Swift package)
+├── Packages/InkKit/          Drawing engine (Swift package)
+└── Packages/NotaUI/          Design system: tokens, icons, shared controls (Swift package)
 ```
+
+## Design system
+
+Colour, type, spacing, radius and elevation tokens, the icon set and shared controls live in **NotaUI**; the app and InkKit use tokens only. See [DESIGN.md](DESIGN.md).
 
 ## InkKit
 

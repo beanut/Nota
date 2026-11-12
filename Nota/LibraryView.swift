@@ -1,3 +1,4 @@
+import NotaUI
 import SwiftData
 import SwiftUI
 
@@ -19,14 +20,14 @@ enum LibrarySection: Hashable {
         }
     }
 
-    var systemImage: String {
+    var icon: NotaIcon {
         switch self {
-        case .all: "doc.text"
-        case .recents: "clock"
-        case .favorites: "star"
-        case .shared: "person.2"
-        case .deleted: "trash"
-        case .folder: "folder"
+        case .all: .grid
+        case .recents: .clock
+        case .favorites: .star
+        case .shared: .share
+        case .deleted: .trash
+        case .folder: .folder
         }
     }
 

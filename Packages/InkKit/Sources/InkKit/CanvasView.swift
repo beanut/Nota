@@ -1,3 +1,4 @@
+import NotaUI
 import SwiftUI
 import UIKit
 
@@ -95,15 +96,9 @@ enum PageSwipe: Equatable {
 ///  2. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
 final class CanvasView: UIView {
-    static let paperColor = UIColor(red: 0.988, green: 0.984, blue: 0.97, alpha: 1)
+    static let paperColor = NotaUIColor.paperSurface
     /// The surface around the page.
-    static let deskColor = UIColor { $0.userInterfaceStyle == .dark
-        ? UIColor(white: 0.16, alpha: 1) : UIColor(red: 0.90, green: 0.90, blue: 0.91, alpha: 1)
-    }
-
-    /// Space kept around the page when it's fitted to the view, on top of the safe area. The top and bottom
-    /// leave room for the floating tool palette and page bar.
-    static let pageMargins = UIEdgeInsets(top: 76, left: 24, bottom: 76, right: 24)
+    static let deskColor = NotaUIColor.bgDesk
 
     let document: CanvasDocument
     weak var controller: CanvasController?
@@ -215,7 +210,7 @@ final class CanvasView: UIView {
         isMultipleTouchEnabled = true
 
         pageLayer.backgroundColor = Self.paperColor.cgColor
-        pageLayer.shadowColor = UIColor.black.cgColor
+        pageLayer.shadowColor = NotaUIColor.shadow.cgColor
         pageLayer.shadowOpacity = 0.18
         pageLayer.shadowRadius = 6
         pageLayer.shadowOffset = CGSize(width: 0, height: 2)
@@ -587,7 +582,7 @@ final class CanvasView: UIView {
     }
 
     fileprivate func drawLassoOverlay(in ctx: CGContext) {
-        let accent = UIColor.systemBlue
+        let accent = NotaUIColor.accentInk
         if !selection.isEmpty, !selectionBounds.isNull {
             let r = viewTransform.toView(selectionBounds).insetBy(dx: -6, dy: -6)
             ctx.setFillColor(accent.withAlphaComponent(0.08).cgColor)
@@ -688,7 +683,7 @@ final class CanvasView: UIView {
 
     /// The transform that fits the whole page between the margins.
     func fittedTransform() -> ViewTransform {
-        let s = safeAreaInsets, m = Self.pageMargins
+        let s = safeAreaInsets, m = controller?.pageMargins ?? CanvasController.defaultPageMargins
         let insets = UIEdgeInsets(top: s.top + m.top, left: s.left + m.left,
                                   bottom: s.bottom + m.bottom, right: s.right + m.right)
         return ViewTransform.fitting(page: document.pageBounds, in: bounds, insets: insets,
@@ -710,6 +705,12 @@ final class CanvasView: UIView {
         inkMask.frame = inkClipView.bounds
         inkMask.path = CGPath(rect: frame, transform: nil)
         CATransaction.commit()
+    }
+
+    /// Refits the page after the editor moved its floating chrome.
+    func pageMarginsDidChange() {
+        fittedBoundsSize = .zero
+        setNeedsLayout()
     }
 
     override func safeAreaInsetsDidChange() {

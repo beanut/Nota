@@ -1,6 +1,8 @@
+import NotaUI
 import SwiftUI
 
-/// Full drawing surface: the raw-Pencil canvas showing one page on a desk, its floating tool palette,
+/// Full drawing surface: the raw-Pencil canvas showing one page on a desk, the floating Pen Case (docked to
+/// any edge; the choice is remembered),
 /// a page bar for moving between, adding and resizing pages, the debug HUD and the Pencil Pro quick palette.
 ///
 /// Pass the same `InkNotebook` again to reopen it with every page's strokes and undo history intact.
@@ -21,6 +23,8 @@ public struct InkCanvasEditor: View {
     /// True while a swiped page is sliding in. Further swipes wait: starting a second slide mid-way can
     /// leave the page stuck part-way across the screen.
     @State private var isTurningPage = false
+    /// The edge the Pen Case is docked to, remembered across launches.
+    @AppStorage("InkKit.toolbarDock") private var dock: ToolbarDock = .top
 
     /// A multi-page editor.
     public init(notebook: InkNotebook, showsDebugHUD: Bool = false) {
@@ -44,12 +48,21 @@ public struct InkCanvasEditor: View {
                 .transition(.push(from: pageTransitionEdge))
                 .ignoresSafeArea()
 
-            VStack {
-                ToolbarView(controller: controller)
-                Spacer()
-                PageBar(notebook: notebook, allowsMultiplePages: showsPageControls)
+            GeometryReader { proxy in
+                ZStack(alignment: dock.alignment) {
+                    Color.clear
+                    PenCase(controller: controller, dock: dock, onDock: setDock) { drop in
+                        setDock(ToolbarDock.nearest(to: drop, in: proxy.size))
+                    }
+                    .padding(penCaseInsets)
+                }
+                ZStack(alignment: .bottom) {
+                    Color.clear
+                    PageBar(notebook: notebook, allowsMultiplePages: showsPageControls)
+                        .padding(.bottom, NotaSpacing.s)
+                }
             }
-            .padding(.vertical, 8)
+            .coordinateSpace(name: PenCase.coordinateSpace)
 
             if controller.hudVisible {
                 PencilHUD(telemetry: telemetry)
@@ -64,10 +77,38 @@ public struct InkCanvasEditor: View {
                     .ignoresSafeArea()
             }
         }
+        .background(NotaColor.bgDesk)
+        .onChange(of: dock, initial: true) { _, dock in controller.pageMargins = Self.pageMargins(for: dock) }
         .onAppear {
             controller.hudVisible = showsDebugHUD
             controller.onSwipeToPage = { [notebook] swipe in turnPage(swipe, in: notebook) }
             controller.canSwipeToPage = { [notebook] swipe in canTurnPage(swipe, in: notebook) }
+        }
+    }
+
+    private func setDock(_ newDock: ToolbarDock) {
+        withAnimation(.snappy) { dock = newDock }
+    }
+
+    /// Keeps the Pen Case off the screen edge and, docked at the bottom, above the page bar.
+    private var penCaseInsets: EdgeInsets {
+        switch dock {
+        case .top: EdgeInsets(top: NotaSpacing.s, leading: 0, bottom: 0, trailing: 0)
+        case .bottom: EdgeInsets(top: 0, leading: 0, bottom: NotaSpacing.s * 2 + NotaSize.bar, trailing: 0)
+        case .leading: EdgeInsets(top: 0, leading: NotaSpacing.m, bottom: 0, trailing: 0)
+        case .trailing: EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: NotaSpacing.m)
+        }
+    }
+
+    /// Room around the fitted page for the Pen Case on `dock` and the page bar at the bottom.
+    static func pageMargins(for dock: ToolbarDock) -> UIEdgeInsets {
+        let bar: CGFloat = 76 // a 44 pt bar, its inset from the edge and a gap before the page
+        let side: CGFloat = 24
+        switch dock {
+        case .top: return UIEdgeInsets(top: bar, left: side, bottom: bar, right: side)
+        case .bottom: return UIEdgeInsets(top: side, left: side, bottom: bar + NotaSize.bar + NotaSpacing.s, right: side)
+        case .leading: return UIEdgeInsets(top: side, left: bar, bottom: bar, right: side)
+        case .trailing: return UIEdgeInsets(top: side, left: side, bottom: bar, right: bar)
         }
     }
 

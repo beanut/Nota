@@ -1,4 +1,5 @@
 import InkKit
+import NotaUI
 import SwiftUI
 
 /// A note opened for writing: the InkKit canvas under a navigation bar with an editable title.
@@ -13,6 +14,7 @@ struct NoteEditorView: View {
             .navigationTitle($note.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarRole(.editor)
+            .toolbarBackground(NotaColor.bgApp, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .onAppear { inkOnOpen = notebook.pages.map(\.strokeCount) }
             .onReceive(notebook.$pages) { pages in

@@ -1,3 +1,4 @@
+import NotaUI
 import SwiftData
 import SwiftUI
 
@@ -15,25 +16,21 @@ struct SidebarView: View {
     @State private var folderPendingDeletion: Folder?
 
     var body: some View {
-        List(selection: $selection) {
+        List {
             Section {
                 ForEach(LibrarySection.smart, id: \.self) { section in
-                    Label(section.title, systemImage: section.systemImage)
-                        .badge(section == .all ? notes.filter { !$0.isDeleted }.count : 0)
-                        .tag(section)
+                    row(for: section, title: section.title,
+                        count: section == .all ? notes.filter { !$0.isDeleted }.count : nil) {
+                            NotaIconView(section.icon).foregroundStyle(NotaColor.textInk)
+                        }
                 }
             }
 
             Section("Folders", isExpanded: $foldersExpanded) {
                 ForEach(folders) { folder in
-                    Label {
-                        Text(folder.name)
-                    } icon: {
-                        Image(systemName: "folder.fill")
-                            .foregroundStyle(folder.color.color)
+                    row(for: .folder(folder.persistentModelID), title: folder.name, count: folder.activeNoteCount) {
+                        NotaIconView(.folder).foregroundStyle(folder.color.color)
                     }
-                    .badge(folder.activeNoteCount)
-                    .tag(LibrarySection.folder(folder.persistentModelID))
                     .contextMenu { folderMenu(for: folder) }
                 }
                 .onMove(perform: moveFolders)
@@ -45,12 +42,22 @@ struct SidebarView: View {
                     folderName = ""
                     isCreatingFolder = true
                 } label: {
-                    Label("New Folder", systemImage: "folder.badge.plus")
+                    HStack(spacing: NotaSpacing.m) {
+                        NotaIconView(.plus)
+                        Text("New Folder").font(NotaFont.calloutEmph)
+                    }
+                    .foregroundStyle(NotaColor.textInk)
+                    .padding(.horizontal, NotaSpacing.m)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .foregroundStyle(.tint)
+                .buttonStyle(.plain)
+                .sidebarRowChrome()
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(NotaColor.bgApp)
         .navigationTitle("Library")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { EditButton() }
@@ -84,6 +91,17 @@ struct SidebarView: View {
         } message: {
             Text("Notes in this folder stay in All Notes.")
         }
+    }
+
+    private func row(for section: LibrarySection, title: String, count: Int?,
+                     @ViewBuilder icon: () -> some View) -> some View {
+        Button {
+            selection = section
+        } label: {
+            SidebarRow(title: title, count: count, isSelected: selection == section, icon: icon())
+        }
+        .buttonStyle(.plain)
+        .sidebarRowChrome()
     }
 
     @ViewBuilder
@@ -134,6 +152,47 @@ struct SidebarView: View {
         for (index, folder) in reordered.enumerated() {
             folder.sortIndex = index
         }
+    }
+}
+
+/// Figma **Sidebar Row**: 44 pt, icon · title · count. Selected = ink tint.
+private struct SidebarRow<Icon: View>: View {
+    let title: String
+    let count: Int?
+    let isSelected: Bool
+    let icon: Icon
+
+    var body: some View {
+        HStack(spacing: NotaSpacing.m) {
+            icon
+            Text(title)
+                .font(isSelected ? NotaFont.calloutEmph : NotaFont.callout)
+                .foregroundStyle(isSelected ? NotaColor.textInk : NotaColor.textPrimary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if let count {
+                Text("\(count)")
+                    .font(NotaFont.subheadline)
+                    .foregroundStyle(NotaColor.textSecondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, NotaSpacing.m)
+        .frame(minHeight: 44)
+        .background(isSelected ? NotaColor.bgInkTint : .clear,
+                    in: RoundedRectangle(cornerRadius: NotaRadius.control, style: .continuous))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
+    }
+}
+
+private extension View {
+    /// Rows draw their own selection, so the list's background, separators and insets step aside.
+    func sidebarRowChrome() -> some View {
+        listRowInsets(EdgeInsets(top: 0, leading: NotaSpacing.s, bottom: 0, trailing: NotaSpacing.s))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
     }
 }
 
