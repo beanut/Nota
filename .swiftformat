@@ -3,3 +3,8 @@
 --indent 4
 --maxwidth 140
 --exclude DerivedData,.build
+# SwiftLint's opening_brace and trailing_comma rules conflict with two SwiftFormat defaults.
+# Keep `{` on the signature line after a wrapped declaration (no Allman-style braces)...
+--disable wrapMultilineStatementBraces
+# ...and no trailing commas in collection literals.
+--trailingcommas never

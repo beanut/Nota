@@ -1,7 +1,7 @@
-import Foundation
 import CoreGraphics
-import Testing
+import Foundation
 @testable import InkKit
+import Testing
 
 @MainActor
 @Suite("CanvasDocument page")
@@ -42,7 +42,7 @@ struct CanvasDocumentPageTests {
     @Test func resizingKeepsInkAndUndoHistory() {
         let doc = CanvasDocument()
         doc.add(makeStroke(at: CGPoint(x: 600, y: 780)))
-        doc.pageSize = .a5   // smaller: the stroke is now off the page but must survive
+        doc.pageSize = .a5 // smaller: the stroke is now off the page but must survive
         #expect(doc.strokeCount == 1)
         #expect(doc.canUndo)
         doc.pageSize = .letter
@@ -200,11 +200,11 @@ struct InkNotebookTests {
         #expect(notebook.currentPage.id == ids[1])
         #expect(notebook.currentPageIndex == 0)
 
-        notebook.movePage(from: 0, to: 99)   // clamped to the end
+        notebook.movePage(from: 0, to: 99) // clamped to the end
         #expect(notebook.pages.last?.id == ids[1])
         #expect(notebook.currentPageIndex == 3)
 
-        notebook.movePage(from: 9, to: 0)    // invalid source: no change
+        notebook.movePage(from: 9, to: 0) // invalid source: no change
         #expect(notebook.pages.last?.id == ids[1])
     }
 
@@ -213,7 +213,7 @@ struct InkNotebookTests {
         notebook.setPageSize(.a4.landscape, forPageAt: 1)
         #expect(notebook.pages[0].pageSize == .letter)
         #expect(notebook.pages[1].pageSize == .a4.landscape)
-        notebook.setPageSize(.a3, forPageAt: 7)   // ignored
+        notebook.setPageSize(.a3, forPageAt: 7) // ignored
         #expect(notebook.pages.map(\.pageSize) == [.letter, .a4.landscape])
     }
 

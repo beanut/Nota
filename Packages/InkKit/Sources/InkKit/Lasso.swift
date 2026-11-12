@@ -3,7 +3,9 @@ import Foundation
 
 enum LassoMode: String, CaseIterable, Identifiable {
     case freeform, square
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 }
 
 /// Pure geometry for lasso selection. A stroke is selected as a whole if any part of its
@@ -60,16 +62,20 @@ enum LassoGeometry {
     /// True if any part of the stroke path lies in the region.
     static func stroke(_ path: [CGPoint], touches polygon: [CGPoint], polygonBounds: CGRect) -> Bool {
         guard !path.isEmpty, polygon.count >= 3 else { return false }
-        for p in path where polygonBounds.contains(p) && contains(polygon, p) { return true }
+        for p in path where polygonBounds.contains(p) && contains(polygon, p) {
+            return true
+        }
         guard path.count >= 2 else { return false }
-        for i in 1..<path.count {
+        for i in 1 ..< path.count {
             let a = path[i - 1], b = path[i]
             let segBounds = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),
                                    width: abs(a.x - b.x), height: abs(a.y - b.y))
             guard segBounds.intersects(polygonBounds) else { continue }
             var j = polygon.count - 1
             for k in polygon.indices {
-                if segmentsIntersect(a, b, polygon[j], polygon[k]) { return true }
+                if segmentsIntersect(a, b, polygon[j], polygon[k]) {
+                    return true
+                }
                 j = k
             }
         }

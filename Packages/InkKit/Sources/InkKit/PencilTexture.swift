@@ -27,23 +27,27 @@ enum PencilTexture {
             var dx = abs(x1 - x2)
             var dy = abs(y1 - y2)
             let wf = Float(w), hf = Float(h)
-            if dx > wf * 0.5 { dx = wf - dx }
-            if dy > hf * 0.5 { dy = hf - dy }
+            if dx > wf * 0.5 {
+                dx = wf - dx
+            }
+            if dy > hf * 0.5 {
+                dy = hf - dy
+            }
             return dx * dx + dy * dy
         }
 
         // Deterministic pseudo-random number generator for consistent paper tooth across launches
         var seed: UInt64 = 42
         func nextRandom() -> Float {
-            seed = seed &* 6364136223846793005 &+ 1442695040888963407
-            return Float((seed >> 32) & 0x7FFFFFFF) / Float(0x7FFFFFFF)
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Float((seed >> 32) & 0x7FFF_FFFF) / Float(0x7FFF_FFFF)
         }
 
         // Primary paper fiber cells
         let primaryCount = 48
         var primaryCells = [(x: Float, y: Float)]()
         primaryCells.reserveCapacity(primaryCount)
-        for _ in 0..<primaryCount {
+        for _ in 0 ..< primaryCount {
             primaryCells.append((nextRandom() * Float(w), nextRandom() * Float(h)))
         }
 
@@ -51,32 +55,36 @@ enum PencilTexture {
         let fineCount = 120
         var fineCells = [(x: Float, y: Float)]()
         fineCells.reserveCapacity(fineCount)
-        for _ in 0..<fineCount {
+        for _ in 0 ..< fineCount {
             fineCells.append((nextRandom() * Float(w), nextRandom() * Float(h)))
         }
 
-        for y in 0..<h {
+        for y in 0 ..< h {
             let yf = Float(y)
-            for x in 0..<w {
+            for x in 0 ..< w {
                 let xf = Float(x)
 
                 var minPrimarySq = Float.greatestFiniteMagnitude
                 for c in primaryCells {
                     let d = periodicDistSq(xf, yf, c.x, c.y)
-                    if d < minPrimarySq { minPrimarySq = d }
+                    if d < minPrimarySq {
+                        minPrimarySq = d
+                    }
                 }
                 let tooth1 = exp(-minPrimarySq / (2.0 * 3.5 * 3.5))
 
                 var minFineSq = Float.greatestFiniteMagnitude
                 for c in fineCells {
                     let d = periodicDistSq(xf, yf, c.x, c.y)
-                    if d < minFineSq { minFineSq = d }
+                    if d < minFineSq {
+                        minFineSq = d
+                    }
                 }
                 let tooth2 = exp(-minFineSq / (2.0 * 2.0 * 2.0))
 
                 // High-frequency graphite micro-flecks via integer hash
-                var n = UInt32(x) &* 374761393 &+ UInt32(y) &* 668265263
-                n = (n ^ (n >> 13)) &* 1274126177
+                var n = UInt32(x) &* 374_761_393 &+ UInt32(y) &* 668_265_263
+                n = (n ^ (n >> 13)) &* 1_274_126_177
                 let fleck = Float((n ^ (n >> 16)) & 0xFFFF) / 65535.0
 
                 let combined = 0.45 * tooth1 + 0.35 * tooth2 + 0.20 * fleck
@@ -129,14 +137,14 @@ enum PencilTexture {
         // as alpha increases, graphite fills more of the tooth.
         let expFactor = 1.4 - 0.6 * a
 
-        for i in 0..<(w * h) {
+        for i in 0 ..< (w * h) {
             let heightVal = heightMap[i]
             let tooth = pow(heightVal, expFactor)
             let pixelAlpha = a * (0.15 + 0.85 * tooth)
 
             // Premultiplied RGBA byte order
             let offset = i * 4
-            pixelBytes[offset]     = UInt8(round(min(max(r * pixelAlpha * 255.0, 0), 255)))
+            pixelBytes[offset] = UInt8(round(min(max(r * pixelAlpha * 255.0, 0), 255)))
             pixelBytes[offset + 1] = UInt8(round(min(max(g * pixelAlpha * 255.0, 0), 255)))
             pixelBytes[offset + 2] = UInt8(round(min(max(b * pixelAlpha * 255.0, 0), 255)))
             pixelBytes[offset + 3] = UInt8(round(min(max(pixelAlpha * 255.0, 0), 255)))

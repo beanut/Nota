@@ -22,7 +22,9 @@ struct NoteEditorView: View {
                 }
             }
             .onDisappear {
-                if notebook.pages.map(\.strokeCount) != inkOnOpen { note.modifiedAt = .now }
+                if notebook.pages.map(\.strokeCount) != inkOnOpen {
+                    note.modifiedAt = .now
+                }
             }
     }
 }

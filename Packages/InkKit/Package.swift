@@ -5,10 +5,10 @@ let package = Package(
     name: "InkKit",
     platforms: [.iOS("17.5")],
     products: [
-        .library(name: "InkKit", targets: ["InkKit"]),
+        .library(name: "InkKit", targets: ["InkKit"])
     ],
     targets: [
         .target(name: "InkKit"),
-        .testTarget(name: "InkKitTests", dependencies: ["InkKit"]),
+        .testTarget(name: "InkKitTests", dependencies: ["InkKit"])
     ]
 )

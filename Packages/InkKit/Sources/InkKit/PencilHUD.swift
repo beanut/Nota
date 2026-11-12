@@ -16,7 +16,9 @@ struct RateCounter {
 
     private mutating func trim(_ now: TimeInterval) {
         if let first = stamps.firstIndex(where: { $0 >= now - 1 }) {
-            if first > 0 { stamps.removeFirst(first) }
+            if first > 0 {
+                stamps.removeFirst(first)
+            }
         } else {
             stamps.removeAll()
         }
@@ -26,22 +28,22 @@ struct RateCounter {
 /// Live input values for the HUD, throttled to ~30 Hz so SwiftUI never sits on the 240 Hz input path.
 @MainActor
 final class PencilTelemetry: ObservableObject {
-    struct Snapshot: Equatable {
-        enum InputState: Equatable {
-            case idle, pencilDown, simulatedPencil, hovering
-            case finger(Int)
+    enum InputState: Equatable {
+        case idle, pencilDown, simulatedPencil, hovering
+        case finger(Int)
 
-            var label: String {
-                switch self {
-                case .idle: return "idle"
-                case .pencilDown: return "pencil ✎"
-                case .simulatedPencil: return "sim pencil (fake force)"
-                case .hovering: return "pencil hover"
-                case .finger(let n): return "finger ×\(n)"
-                }
+        var label: String {
+            switch self {
+            case .idle: "idle"
+            case .pencilDown: "pencil ✎"
+            case .simulatedPencil: "sim pencil (fake force)"
+            case .hovering: "pencil hover"
+            case let .finger(n): "finger ×\(n)"
             }
         }
+    }
 
+    struct Snapshot: Equatable {
         var state: InputState = .idle
         var force: CGFloat = 0
         var maxForce: CGFloat = 0
@@ -74,15 +76,19 @@ final class PencilTelemetry: ObservableObject {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 34_000_000)
             guard let self else { return }
-            self.flushScheduled = false
-            if let p = self.pending { self.publish(p, at: CACurrentMediaTime()) }
+            flushScheduled = false
+            if let p = pending {
+                publish(p, at: CACurrentMediaTime())
+            }
         }
     }
 
     private func publish(_ s: Snapshot, at time: CFTimeInterval) {
         pending = nil
         lastPublish = time
-        if snapshot != s { snapshot = s }
+        if snapshot != s {
+            snapshot = s
+        }
     }
 }
 
@@ -123,7 +129,9 @@ struct PencilHUD: View {
         }
     }
 
-    private func degrees(_ r: CGFloat) -> Double { Double(r) * 180 / .pi }
+    private func degrees(_ r: CGFloat) -> Double {
+        Double(r) * 180 / .pi
+    }
 }
 
 private struct ForceBar: View {

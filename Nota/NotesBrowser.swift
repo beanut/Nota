@@ -3,7 +3,9 @@ import SwiftUI
 
 enum LibraryFilter: String, CaseIterable, Identifiable {
     case recent, notebooks, pdfs
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 
     var title: String {
         switch self {
@@ -42,11 +44,13 @@ struct NotesBrowser: View {
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 260), spacing: 24, alignment: .top)]
 
     private var folder: Folder? {
-        guard case .folder(let id) = section else { return nil }
+        guard case let .folder(id) = section else { return nil }
         return folders.first { $0.persistentModelID == id }
     }
 
-    private var title: String { folder?.name ?? section.title }
+    private var title: String {
+        folder?.name ?? section.title
+    }
 
     private var visibleNotes: [Note] {
         let query = searchText.trimmingCharacters(in: .whitespaces)
@@ -75,7 +79,9 @@ struct NotesBrowser: View {
         .scrollDismissesKeyboard(.immediately)
         .background(Color(.systemGroupedBackground))
         .overlay {
-            if notes.isEmpty { emptyState }
+            if notes.isEmpty {
+                emptyState
+            }
         }
         .navigationTitle(title)
         .searchable(text: $searchText, placement: .toolbar, prompt: "Search notes")
@@ -85,14 +91,18 @@ struct NotesBrowser: View {
             Button("Cancel", role: .cancel) {}
             Button("Rename") {
                 let name = renameText.trimmingCharacters(in: .whitespaces)
-                if !name.isEmpty { noteBeingRenamed?.title = name }
+                if !name.isEmpty {
+                    noteBeingRenamed?.title = name
+                }
             }
         }
         .confirmationDialog("Delete “\(notePendingDeletion?.title ?? "")” permanently?",
                             isPresented: isPresent($notePendingDeletion),
                             titleVisibility: .visible) {
             Button("Delete Note", role: .destructive) {
-                if let note = notePendingDeletion { purge([note]) }
+                if let note = notePendingDeletion {
+                    purge([note])
+                }
             }
         } message: {
             Text("This can’t be undone.")

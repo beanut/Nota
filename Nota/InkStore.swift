@@ -1,5 +1,5 @@
-import InkKit
 import Foundation
+import InkKit
 import Observation
 
 /// Keeps each note's InkKit notebook alive for the session, so reopening a note restores its pages,
@@ -13,7 +13,9 @@ final class InkStore {
 
     /// The note's notebook, created on first use with `pageCount` blank pages of `pageSize`.
     func notebook(for noteID: UUID, pageCount: Int = 1, pageSize: PageSize = .default) -> InkNotebook {
-        if let notebook = notebooks[noteID] { return notebook }
+        if let notebook = notebooks[noteID] {
+            return notebook
+        }
         let notebook = InkNotebook(pageSize: pageSize, pageCount: pageCount)
         notebooks[noteID] = notebook
         return notebook

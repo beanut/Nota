@@ -1,8 +1,8 @@
-import Foundation
-import UIKit
 import CoreGraphics
-import Testing
+import Foundation
 @testable import InkKit
+import Testing
+import UIKit
 
 @Suite("PageSize")
 struct PageSizeTests {
@@ -30,7 +30,7 @@ struct PageSizeTests {
         #expect(tiny.width == PageSize.minimumDimension)
         #expect(tiny.height == PageSize.minimumDimension)
 
-        let huge = PageSize(width: 1_000_000, height: 20_000)
+        let huge = PageSize(width: 1_000_000, height: 20000)
         #expect(huge.width == PageSize.maximumDimension)
         #expect(huge.height == PageSize.maximumDimension)
 
@@ -114,7 +114,7 @@ struct ViewTransformFittingTests {
     }
 
     @Test func fitsWidePageByWidth() {
-        let page = PageSize.letter.landscape.bounds   // 792 × 612
+        let page = PageSize.letter.landscape.bounds // 792 × 612
         let view = CGRect(x: 0, y: 0, width: 396, height: 1000)
         let t = ViewTransform.fitting(page: page, in: view)
         #expect(t.scale == 0.5)
@@ -135,9 +135,9 @@ struct ViewTransformFittingTests {
     @Test func clampsScale() {
         let page = CGRect(x: 0, y: 0, width: 10, height: 10)
         let view = CGRect(x: 0, y: 0, width: 1000, height: 1000)
-        #expect(ViewTransform.fitting(page: page, in: view, scaleRange: 0.25...8).scale == 8)
+        #expect(ViewTransform.fitting(page: page, in: view, scaleRange: 0.25 ... 8).scale == 8)
         let bigPage = CGRect(x: 0, y: 0, width: 100_000, height: 100_000)
-        #expect(ViewTransform.fitting(page: bigPage, in: view, scaleRange: 0.25...8).scale == 0.25)
+        #expect(ViewTransform.fitting(page: bigPage, in: view, scaleRange: 0.25 ... 8).scale == 0.25)
     }
 
     @Test func emptyInputsGiveIdentity() {
@@ -174,16 +174,16 @@ struct ZoomLimitTests {
     }
 
     @Test func badFitScaleFallsBack() {
-        #expect(ViewTransform.zoomRange(fitScale: 0) == 1...6)
-        #expect(ViewTransform.zoomRange(fitScale: .infinity) == 1...6)
+        #expect(ViewTransform.zoomRange(fitScale: 0) == 1 ... 6)
+        #expect(ViewTransform.zoomRange(fitScale: .infinity) == 1 ... 6)
     }
 
     @Test func fittingNoLongerClampsVeryLargeOrSmallPages() {
         let view = CGRect(x: 0, y: 0, width: 1000, height: 1000)
-        let huge = CGRect(x: 0, y: 0, width: 14_400, height: 14_400)   // 200 in square
+        let huge = CGRect(x: 0, y: 0, width: 14400, height: 14400) // 200 in square
         let scale = ViewTransform.fitting(page: huge, in: view,
-                                          scaleRange: .leastNonzeroMagnitude...(.greatestFiniteMagnitude)).scale
-        #expect(abs(scale - 1000 / 14_400) < 1e-9)
+                                          scaleRange: .leastNonzeroMagnitude ... .greatestFiniteMagnitude).scale
+        #expect(abs(scale - 1000 / 14400) < 1e-9)
     }
 
     @Test func recentringOnlyNearTheZoomOutLimit() {

@@ -5,7 +5,9 @@ import SwiftUI
 
 enum PaperStyle: String, Codable, CaseIterable, Identifiable {
     case plain, lined, dotted, grid
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 
     var title: String {
         switch self {
@@ -24,7 +26,9 @@ enum NoteKind: String, Codable {
 /// Cover colour of a note: the band across the top of its thumbnail.
 enum NoteTint: String, Codable, CaseIterable, Identifiable {
     case indigo, teal, rust, violet, graphite
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 
     var color: Color {
         switch self {
@@ -39,7 +43,9 @@ enum NoteTint: String, Codable, CaseIterable, Identifiable {
 
 enum FolderColor: String, Codable, CaseIterable, Identifiable {
     case blue, teal, orange, purple, pink, green
-    var id: String { rawValue }
+    var id: String {
+        rawValue
+    }
 
     var color: Color {
         switch self {
@@ -67,9 +73,9 @@ final class Folder {
 
     init(name: String, color: FolderColor, sortIndex: Int) {
         self.name = name
-        self.colorName = color.rawValue
+        colorName = color.rawValue
         self.sortIndex = sortIndex
-        self.createdAt = .now
+        createdAt = .now
     }
 
     var color: FolderColor {
@@ -78,7 +84,9 @@ final class Folder {
     }
 
     /// Notes in this folder that are not in Recently Deleted.
-    var activeNoteCount: Int { notes.filter { $0.deletedAt == nil }.count }
+    var activeNoteCount: Int {
+        notes.filter { $0.deletedAt == nil }.count
+    }
 }
 
 @Model
@@ -106,14 +114,14 @@ final class Note {
          isFavorite: Bool = false,
          isShared: Bool = false,
          folder: Folder? = nil) {
-        self.id = UUID()
+        id = UUID()
         self.title = title
         self.pageCount = pageCount
-        self.createdAt = modifiedAt
+        createdAt = modifiedAt
         self.modifiedAt = modifiedAt
-        self.paperName = paper.rawValue
-        self.tintName = tint.rawValue
-        self.kindName = kind.rawValue
+        paperName = paper.rawValue
+        tintName = tint.rawValue
+        kindName = kind.rawValue
         self.isFavorite = isFavorite
         self.isShared = isShared
         self.folder = folder
@@ -134,7 +142,9 @@ final class Note {
         set { kindName = newValue.rawValue }
     }
 
-    var isDeleted: Bool { deletedAt != nil }
+    var isDeleted: Bool {
+        deletedAt != nil
+    }
 
     var subtitle: String {
         let pages = pageCount == 1 ? "1 page" : "\(pageCount) pages"
@@ -148,8 +158,12 @@ extension Date {
     /// "Today", "Yesterday", a weekday within the last week, otherwise "Nov 2" (plus the year if it isn't this one).
     var libraryLabel: String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(self) { return String(localized: "Today") }
-        if calendar.isDateInYesterday(self) { return String(localized: "Yesterday") }
+        if calendar.isDateInToday(self) {
+            return String(localized: "Today")
+        }
+        if calendar.isDateInYesterday(self) {
+            return String(localized: "Yesterday")
+        }
         let startOfToday = calendar.startOfDay(for: .now)
         if let weekAgo = calendar.date(byAdding: .day, value: -6, to: startOfToday), self >= weekAgo {
             return formatted(.dateTime.weekday(.wide))
