@@ -1,60 +1,6 @@
 import NotaUI
 import SwiftUI
 
-/// An edge of the editor the Pen Case can be docked to.
-public enum ToolbarDock: String, CaseIterable, Identifiable, Sendable {
-    case top, bottom, leading, trailing
-
-    public var id: String {
-        rawValue
-    }
-
-    /// The direction the bar's items run in.
-    var axis: Axis {
-        switch self {
-        case .top, .bottom: .horizontal
-        case .leading, .trailing: .vertical
-        }
-    }
-
-    var title: LocalizedStringKey {
-        switch self {
-        case .top: "Top"
-        case .bottom: "Bottom"
-        case .leading: "Left"
-        case .trailing: "Right"
-        }
-    }
-
-    var alignment: Alignment {
-        switch self {
-        case .top: .top
-        case .bottom: .bottom
-        case .leading: .leading
-        case .trailing: .trailing
-        }
-    }
-
-    /// The edge a popover's arrow points at: popovers open away from the docked edge.
-    var popoverArrowEdge: Edge {
-        switch self {
-        case .top: .top
-        case .bottom: .bottom
-        case .leading: .leading
-        case .trailing: .trailing
-        }
-    }
-
-    /// The edge nearest to `point` in a container of `size`.
-    static func nearest(to point: CGPoint, in size: CGSize) -> ToolbarDock {
-        let distances: [(ToolbarDock, CGFloat)] = [
-            (.top, point.y), (.bottom, size.height - point.y),
-            (.leading, point.x), (.trailing, size.width - point.x)
-        ]
-        return distances.min { $0.1 < $1.1 }?.0 ?? .top
-    }
-}
-
 extension Tool {
     var icon: NotaIcon {
         switch self {
@@ -85,35 +31,28 @@ extension Tool {
     }
 }
 
-/// Figma **Floating Pen Case**: the one drawing toolbar. Tools · inks · undo/redo · more, floating over the
-/// canvas and docked to any edge. Tap the selected tool again for its options; drag the grip to move the
-/// bar to another edge.
+/// The Pen Case: the one drawing toolbar. Tools · inks · undo/redo · more, placed in the navigation bar on
+/// the same row as the back button. The note's title and Rename live in the More menu. Tap the selected
+/// tool again for its options.
 struct PenCase: View {
     @ObservedObject var controller: CanvasController
-    let dock: ToolbarDock
-    /// Moves the bar to another edge.
-    let onDock: (ToolbarDock) -> Void
-    /// Called when the grip is dropped, with the drop point in the editor's coordinate space.
-    let onDrop: (CGPoint) -> Void
+    var title: Binding<String>?
 
     @State private var optionsTool: Tool?
     @State private var showSettings = false
     @State private var confirmClear = false
-    @State private var dragOffset: CGSize = .zero
-
-    static let coordinateSpace = "InkKit.editor"
+    @State private var showRename = false
+    @State private var draftTitle = ""
 
     var body: some View {
-        let axis = dock.axis
-        stack(axis) {
-            grip
-            ViewThatFits(in: axis == .horizontal ? .horizontal : .vertical) {
-                tools(axis)
-                ScrollView(axis == .horizontal ? .horizontal : .vertical, showsIndicators: false) { tools(axis) }
+        HStack(spacing: NotaSpacing.xxxs) {
+            ViewThatFits(in: .horizontal) {
+                tools
+                ScrollView(.horizontal, showsIndicators: false) { tools }
             }
-            NotaBarDivider(in: axis)
-            InkRow(controller: controller, axis: axis)
-            NotaBarDivider(in: axis)
+            NotaBarDivider(in: .horizontal)
+            InkRow(controller: controller, axis: .horizontal)
+            NotaBarDivider(in: .horizontal)
             Button { controller.undo() } label: { NotaIconView(.undo) }
                 .buttonStyle(.notaIcon)
                 .disabled(!controller.canUndo)
@@ -122,25 +61,15 @@ struct PenCase: View {
                 .buttonStyle(.notaIcon)
                 .disabled(!controller.canRedo)
                 .accessibilityLabel("Redo")
-            NotaBarDivider(in: axis)
+            NotaBarDivider(in: .horizontal)
             moreMenu
         }
-        .padding(NotaSpacing.xxs)
-        .notaFloatingBar()
-        .offset(dragOffset)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Tools")
     }
 
-    private func stack(_ axis: Axis, @ViewBuilder content: () -> some View) -> some View {
-        let layout = axis == .horizontal
-            ? AnyLayout(HStackLayout(spacing: NotaSpacing.xxxs))
-            : AnyLayout(VStackLayout(spacing: NotaSpacing.xxxs))
-        return layout(content)
-    }
-
-    private func tools(_ axis: Axis) -> some View {
-        stack(axis) {
+    private var tools: some View {
+        HStack(spacing: NotaSpacing.xxxs) {
             ForEach(Tool.allCases) { tool in
                 ToolButton(tool: tool, selected: controller.tool == tool) {
                     if controller.tool == tool {
@@ -149,7 +78,7 @@ struct PenCase: View {
                         controller.select(tool)
                     }
                 }
-                .popover(isPresented: optionsBinding(for: tool), arrowEdge: dock.popoverArrowEdge) {
+                .popover(isPresented: optionsBinding(for: tool), arrowEdge: .top) {
                     ToolOptionsView(controller: controller, tool: tool)
                 }
             }
@@ -164,39 +93,21 @@ struct PenCase: View {
         })
     }
 
-    /// Drag handle. Dropping it nearer another edge docks the bar there.
-    private var grip: some View {
-        NotaIconView(.grip)
-            .rotationEffect(dock.axis == .horizontal ? .zero : .degrees(90))
-            .foregroundStyle(NotaColor.textTertiary)
-            .frame(width: dock.axis == .horizontal ? 20 : NotaSize.iconButton.width,
-                   height: dock.axis == .horizontal ? NotaSize.iconButton.height : 20)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(coordinateSpace: .named(Self.coordinateSpace))
-                    .onChanged { dragOffset = $0.translation }
-                    .onEnded { value in
-                        withAnimation(.snappy) {
-                            dragOffset = .zero
-                            onDrop(value.location)
-                        }
-                    }
-            )
-            .accessibilityLabel("Move toolbar")
-            .accessibilityHint("Drag to another edge of the screen.")
-    }
-
     private var moreMenu: some View {
         Menu {
+            if let title {
+                Section(title.wrappedValue.isEmpty ? "Untitled" : title.wrappedValue) {
+                    Button {
+                        draftTitle = title.wrappedValue
+                        showRename = true
+                    } label: {
+                        Label("Rename…", systemImage: "pencil")
+                    }
+                }
+            }
             Button { controller.resetZoom() } label: {
                 Label("Fit Page · \(Int((controller.zoom * 100).rounded()))%", systemImage: "arrow.up.left.and.arrow.down.right")
             }
-            Picker(selection: Binding(get: { dock }, set: onDock)) {
-                ForEach(ToolbarDock.allCases) { Text($0.title).tag($0) }
-            } label: {
-                Label("Move Toolbar", systemImage: "rectangle.3.group")
-            }
-            .pickerStyle(.menu)
             Divider()
             Button { showSettings = true } label: {
                 Label("Pressure & Tilt…", systemImage: "hand.draw")
@@ -215,13 +126,18 @@ struct PenCase: View {
         .menuStyle(.button)
         .buttonStyle(.notaIcon)
         .accessibilityLabel("More")
-        .popover(isPresented: $showSettings, arrowEdge: dock.popoverArrowEdge) {
+        .popover(isPresented: $showSettings, arrowEdge: .top) {
             CanvasSettingsView(controller: controller)
         }
         .confirmationDialog("Clear the page?", isPresented: $confirmClear) {
             Button("Clear Page", role: .destructive) { controller.clear() }
         } message: {
             Text("You can undo this.")
+        }
+        .alert("Rename Note", isPresented: $showRename) {
+            TextField("Title", text: $draftTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") { title?.wrappedValue = draftTitle }
         }
     }
 }

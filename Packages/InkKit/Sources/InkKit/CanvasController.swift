@@ -36,7 +36,7 @@ final class CanvasController: ObservableObject {
     /// Set by a Pencil Pro squeeze; location is in canvas-view (= full-screen) coordinates.
     @Published var quickPaletteLocation: CGPoint?
     /// Space kept around the page when it's fitted to the view, on top of the safe area: room for the
-    /// floating Pen Case and page bar. Set by the editor when the Pen Case moves to another edge.
+    /// floating page bar at the bottom. The Pen Case lives in the navigation bar, inside the safe area.
     @Published var pageMargins = CanvasController.defaultPageMargins {
         didSet {
             if pageMargins != oldValue {
@@ -45,7 +45,8 @@ final class CanvasController: ObservableObject {
         }
     }
 
-    static let defaultPageMargins = UIEdgeInsets(top: 76, left: 24, bottom: 76, right: 24)
+    /// Top: a 24 pt gap under the navigation bar. Bottom: the 44 pt page bar, its 8 pt inset and a gap.
+    static let defaultPageMargins = UIEdgeInsets(top: 24, left: 24, bottom: 76, right: 24)
 
     weak var canvas: CanvasView?
     /// Called when the canvas is swiped sideways to turn the page. Set by the editor that owns the pages.

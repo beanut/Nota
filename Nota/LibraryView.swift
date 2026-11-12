@@ -60,6 +60,8 @@ struct LibraryView: View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(selection: $selection)
                 .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 320)
+                // No sidebar button while a note is open: the editor's bar is for drawing.
+                .toolbar(removing: path.isEmpty ? nil : .sidebarToggle)
         } detail: {
             NavigationStack(path: $path) {
                 NotesBrowser(section: selection ?? .all, path: $path)

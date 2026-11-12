@@ -100,7 +100,7 @@ To add one: draw it in Figma on the 20 pt grid, export the SVG with `stroke="#1A
 | `NotaTag` | Chip / Tag | 24 pt, caption emph, secondary. |
 | `.buttonStyle(.nota(.primary / .ai / .secondary / .plain, size: .large / .compact))`, `NotaButtonLabel` | Button | Large 44 pt touch, compact 36 pt for toolbars. |
 | `NotaSliderRow` | Slider Row | Label and value above a slider with an ink fill. |
-| `.notaFloatingBar(fill:)` | Floating Pen Case, Page Bar | Rounded 22, hairline `borderCard`, floating shadow. |
+| `.notaFloatingBar(fill:)` | Page Bar | Rounded 22, hairline `borderCard`, floating shadow. |
 | `.notaPopoverContent()` | Tool Options | Raised background, popover on iPad and iPhone. |
 | `NotaEmptyState` | *(addition)* | Icon on an ink-tint disc, Title 3, one line of guidance, optional primary button. |
 
@@ -108,11 +108,11 @@ App-only: `SidebarRow` (Figma Sidebar Row: 44 pt, selected = ink tint), `NoteCar
 
 ## Editor chrome
 
-- **Pen Case** (`InkKit/ToolbarView.swift`): grip · tools · inks · undo/redo · more. Floats over the desk and docks to the top, bottom, left or right edge: drag the grip towards an edge, or use **More → Move Toolbar**. The choice is remembered (`InkKit.toolbarDock`). Docked left or right it runs vertically, and the page refits around it.
+- **Pen Case** (`InkKit/ToolbarView.swift`): tools · inks · undo/redo · more. Sits in the navigation bar on the same row as the back button, centered (principal placement) and drawn flat without the bar's glass background; it can't be moved. A floating favourites bar is planned separately.
 - **Room to grow:** the tool tray scrolls when it runs out of room, so M1 tools (text, shapes, photo; icons already in the set) can be added without redesigning the bar.
 - **Tool Options:** tap the selected tool again. Width presets (fine / medium / bold) and a width slider; whole-stroke or pixel eraser; freeform or rectangle lasso and Delete Selection.
 - **Colour presets** follow the tool: pen and pencil show the five pen inks, the highlighter its five highlighters, and the eraser and lasso keep the pen inks dimmed so the bar doesn't change length.
-- **More** (ellipsis): fit page (with zoom level), move toolbar, pressure and tilt, debug HUD, clear page.
+- **More** (ellipsis): fit page (with zoom level), pressure and tilt, debug HUD, clear page.
 - **Page Bar** (`InkKit/PageBar.swift`): previous · Page n of m · next · add (hold for add before/after/size and Delete Page) · paper-size pill.
 
 Not yet built (tracked in NOT-87): choosing which tools live in the Pen Case (Customize Toolbar), and the Liquid Glass variants for iOS 26+.
