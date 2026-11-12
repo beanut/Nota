@@ -36,7 +36,17 @@ public final class CanvasDocument: Identifiable {
 
     /// Goes up whenever the page's ink or size changes (each edit, undo and redo), so a cached rendering
     /// of the page is current while its revision matches.
-    public private(set) var revision = 0
+    public private(set) var revision = 0 {
+        didSet {
+            if committedRaster?.revision != revision {
+                committedRaster = nil
+            }
+        }
+    }
+
+    /// The page's committed layer as the canvas last showed it, fitted, for reopening it without
+    /// filling every stroke again. Dropped as soon as the page changes.
+    var committedRaster: CommittedRaster?
 
     /// Number of strokes on the page (including pixel-eraser strokes).
     public var strokeCount: Int {
