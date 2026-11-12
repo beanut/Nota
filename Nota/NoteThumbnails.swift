@@ -6,7 +6,8 @@ import UIKit
 
 /// Where a note's files live: one `<id>.nota` directory per note under Application Support.
 ///
-/// Only `thumbs/` exists so far; NOT-6 adds the manifest and page files alongside it.
+/// Each holds `manifest.json` (the page layout, see `NoteManifest`) and `thumbs/`; NOT-6 adds page files
+/// alongside them.
 enum NotePackage {
     static var libraryURL: URL {
         URL.applicationSupportDirectory.appending(path: "Notes", directoryHint: .isDirectory)
@@ -14,6 +15,10 @@ enum NotePackage {
 
     static func url(for noteID: UUID, in library: URL = libraryURL) -> URL {
         library.appending(path: "\(noteID.uuidString).nota", directoryHint: .isDirectory)
+    }
+
+    static func manifestURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
+        url(for: noteID, in: library).appending(path: "manifest.json")
     }
 
     static func thumbnailsURL(for noteID: UUID, in library: URL = libraryURL) -> URL {

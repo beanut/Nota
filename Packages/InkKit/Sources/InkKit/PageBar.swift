@@ -143,16 +143,22 @@ private struct CustomSizeTarget: Identifiable {
 }
 
 /// Width and height entry for a custom page, in inches, millimetres or points.
-struct CustomPageSizeSheet: View {
+public struct CustomPageSizeSheet: View {
     let initial: PageSize
     let onDone: (PageSize) -> Void
+
+    /// Starts from `initial`'s dimensions and calls `onDone` with the size entered.
+    public init(initial: PageSize, onDone: @escaping (PageSize) -> Void) {
+        self.initial = initial
+        self.onDone = onDone
+    }
 
     @Environment(\.dismiss) private var dismiss
     @State private var unit = PageSize.Unit.localeDefault
     @State private var width: Double = 0
     @State private var height: Double = 0
 
-    var body: some View {
+    public var body: some View {
         NavigationStack {
             Form {
                 Picker("Units", selection: $unit) {

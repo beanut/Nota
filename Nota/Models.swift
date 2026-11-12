@@ -99,9 +99,13 @@ final class Folder {
 final class Note {
     @Attribute(.unique) var id: UUID
     var title: String
+    /// Mirrored from the note's manifest by `InkStore` on every save and at launch; the value a note is
+    /// created with only seeds the manifest of a note that has none.
     var pageCount: Int
     var createdAt: Date
+    /// Mirrored from the note's manifest, like `pageCount`.
     var modifiedAt: Date
+    /// The first page's paper, mirrored from the manifest; each page's own paper is kept there.
     var paperName: String
     var tintName: String
     var kindName: String
