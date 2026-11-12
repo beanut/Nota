@@ -13,20 +13,22 @@ import Foundation
 /// are kept, so the committed appearance is unchanged.
 enum StrokeSplitter {
     /// Union of fully opaque eraser hulls, bucketed in a uniform grid for fast point queries.
+    private struct Cell: Hashable { let x: Int, y: Int }
+
+    private struct PolygonItem {
+        let polygon: [CGPoint]
+        let bounds: CGRect
+    }
+
     struct Coverage {
-        private struct Cell: Hashable { let x: Int, y: Int }
-
-        private struct PolygonItem {
-            let polygon: [CGPoint]
-            let bounds: CGRect
-        }
-
         private let cellSize: CGFloat = 16
         private var items: [PolygonItem] = []
         private var cells: [Cell: [Int]] = [:]
         private(set) var bounds = CGRect.null
 
-        var isEmpty: Bool { items.isEmpty }
+        var isEmpty: Bool {
+            items.isEmpty
+        }
 
         /// Adds the hulls of an eraser stroke that intersect `region`.
         mutating func add(_ eraserHulls: [Hull], within region: CGRect) {
@@ -35,7 +37,7 @@ enum StrokeSplitter {
                     addPolygon(hull.polygon, bounds: hull.bounds, within: region)
                 } else if hull.right.count >= 2 {
                     let count = hull.right.count / 2
-                    for q in 0..<count {
+                    for q in 0 ..< count {
                         let i = q * 2
                         guard i + 1 < hull.left.count else { break }
                         let quad = [hull.right[i], hull.right[i + 1], hull.left[i + 1], hull.left[i]]
@@ -48,14 +50,16 @@ enum StrokeSplitter {
             }
         }
 
-        private mutating func addPolygon(_ poly: [CGPoint], bounds b: CGRect, within region: CGRect) {
+        private mutating func addPolygon(_ poly: [CGPoint], bounds b: CGRect, within _: CGRect) {
             let index = items.count
             items.append(PolygonItem(polygon: poly, bounds: b))
             bounds = bounds.union(b)
             let x0 = cellIndex(b.minX), x1 = cellIndex(b.maxX)
             let y0 = cellIndex(b.minY), y1 = cellIndex(b.maxY)
-            for x in x0...x1 {
-                for y in y0...y1 { cells[Cell(x: x, y: y), default: []].append(index) }
+            for x in x0 ... x1 {
+                for y in y0 ... y1 {
+                    cells[Cell(x: x, y: y), default: []].append(index)
+                }
             }
         }
 
@@ -69,7 +73,9 @@ enum StrokeSplitter {
             return false
         }
 
-        private func cellIndex(_ v: CGFloat) -> Int { Int((v / cellSize).rounded(.down)) }
+        private func cellIndex(_ v: CGFloat) -> Int {
+            Int((v / cellSize).rounded(.down))
+        }
 
         /// Hull polygons are convex with consistent winding, so a point is inside when it's on the
         /// same side of every edge.
@@ -80,7 +86,11 @@ enum StrokeSplitter {
                 let a = poly[j], b = poly[i]
                 let cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
                 if abs(cross) > 1e-9 {
-                    if sign == 0 { sign = cross } else if (cross > 0) != (sign > 0) { return false }
+                    if sign == 0 {
+                        sign = cross
+                    } else if (cross > 0) != (sign > 0) {
+                        return false
+                    }
                 }
                 j = i
             }
@@ -123,10 +133,16 @@ enum StrokeSplitter {
         while k < samples.count - 1 {
             guard samples[k].cut else { k += 1; continue }
             let start = k
-            while k < samples.count && samples[k].cut { k += 1 }
-            if k < samples.count { gaps.append((start, k - 1)) }   // a run reaching the end isn't a gap
+            while k < samples.count, samples[k].cut {
+                k += 1
+            }
+            if k < samples.count {
+                gaps.append((start, k - 1))
+            } // a run reaching the end isn't a gap
         }
-        if samples[0].cut, let first = gaps.first, first.0 == 1 { gaps.removeFirst() }   // run touching the start
+        if samples[0].cut, let first = gaps.first, first.0 == 1 {
+            gaps.removeFirst()
+        } // run touching the start
         guard !gaps.isEmpty else { return nil }
 
         var pieces: [Stroke] = []
@@ -143,14 +159,14 @@ enum StrokeSplitter {
     /// Real points appear with t = 0; the stroke's last point is (count - 1, 0).
     private static func splineSamples(_ pts: [StrokePoint]) -> [Sample] {
         var samples = [Sample(segment: 0, t: 0, point: pts[0])]
-        for i in 0..<(pts.count - 1) {
+        for i in 0 ..< (pts.count - 1) {
             let p1 = pts[i].location, p2 = pts[i + 1].location
             let p0 = i > 0 ? pts[i - 1].location : p1 * 2 - p2
             let p3 = i + 2 < pts.count ? pts[i + 2].location : p2 * 2 - p1
             let (c1, c2) = StrokeRenderer.centripetalControls(p0, p1, p2, p3)
             let length = p1.distance(to: c1) + c1.distance(to: c2) + c2.distance(to: p2)
             let steps = min(max(Int((length / sampleSpacing).rounded(.up)), 1), 48)
-            for s in 1..<steps {
+            for s in 1 ..< steps {
                 let t = CGFloat(s) / CGFloat(steps)
                 let loc = StrokeRenderer.bezier(p1, c1, c2, p2, t)
                 samples.append(Sample(segment: i, t: t,
@@ -179,10 +195,14 @@ enum StrokeSplitter {
 
         let probes = min(max(Int(((hi - lo) / probeSpacing).rounded(.up)), 2), 64)
         // Ends first: they're the likeliest to be uncovered.
-        if !coverage.contains(tip.center + n * lo) || !coverage.contains(tip.center + n * hi) { return false }
-        for s in 1..<probes {
+        if !coverage.contains(tip.center + n * lo) || !coverage.contains(tip.center + n * hi) {
+            return false
+        }
+        for s in 1 ..< probes {
             let d = lo + (hi - lo) * CGFloat(s) / CGFloat(probes)
-            if !coverage.contains(tip.center + n * d) { return false }
+            if !coverage.contains(tip.center + n * d) {
+                return false
+            }
         }
         return true
     }
@@ -190,9 +210,11 @@ enum StrokeSplitter {
     private static func piece(of stroke: Stroke, from a: Sample, to b: Sample) -> Stroke {
         var pts = [a.point]
         if a.segment + 1 <= b.segment {
-            pts += stroke.points[(a.segment + 1)...b.segment]
+            pts += stroke.points[(a.segment + 1) ... b.segment]
         }
-        if b.t > 0 { pts.append(b.point) }
+        if b.t > 0 {
+            pts.append(b.point)
+        }
         return Stroke(id: UUID(), tool: stroke.tool, color: stroke.color, style: stroke.style, points: pts)
     }
 }

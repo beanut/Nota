@@ -40,7 +40,7 @@ struct NoteCard: View {
         let symbols = [
             note.kind == .pdf ? "doc.richtext" : nil,
             note.isShared ? "person.2.fill" : nil,
-            note.isFavorite ? "star.fill" : nil,
+            note.isFavorite ? "star.fill" : nil
         ].compactMap { $0 }
         if !symbols.isEmpty {
             HStack(spacing: 6) {
@@ -66,7 +66,7 @@ struct PaperThumbnail: View {
 
     var body: some View {
         Canvas { context, size in
-            let unit = size.width / 190   // design reference width
+            let unit = size.width / 190 // design reference width
             context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.white))
 
             let rule = Color(red: 0.86, green: 0.87, blue: 0.91)
@@ -97,9 +97,13 @@ struct PaperThumbnail: View {
                 let step = 17 * unit
                 var path = Path()
                 var v = step
-                while v < size.width { path.addRect(CGRect(x: v, y: 0, width: 0.5, height: size.height)); v += step }
+                while v < size.width {
+                    path.addRect(CGRect(x: v, y: 0, width: 0.5, height: size.height)); v += step
+                }
                 var h = step
-                while h < size.height { path.addRect(CGRect(x: 0, y: h, width: size.width, height: 0.5)); h += step }
+                while h < size.height {
+                    path.addRect(CGRect(x: 0, y: h, width: size.width, height: 0.5)); h += step
+                }
                 context.fill(path, with: .color(rule.opacity(0.8)))
             }
 

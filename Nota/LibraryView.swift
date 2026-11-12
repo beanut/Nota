@@ -42,7 +42,7 @@ enum LibrarySection: Hashable {
             return note.modifiedAt >= cutoff
         case .favorites: return note.isFavorite
         case .shared: return note.isShared
-        case .folder(let id): return note.folder?.persistentModelID == id
+        case let .folder(id): return note.folder?.persistentModelID == id
         }
     }
 }

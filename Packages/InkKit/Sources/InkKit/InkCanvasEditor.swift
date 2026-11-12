@@ -26,14 +26,14 @@ public struct InkCanvasEditor: View {
     public init(notebook: InkNotebook, showsDebugHUD: Bool = false) {
         self.notebook = notebook
         self.showsDebugHUD = showsDebugHUD
-        self.showsPageControls = true
+        showsPageControls = true
     }
 
     /// A single-page editor: the page can be resized but no pages can be added.
     public init(document: CanvasDocument, showsDebugHUD: Bool = false) {
-        self.notebook = InkNotebook(pages: [document], defaultPageSize: document.pageSize)
+        notebook = InkNotebook(pages: [document], defaultPageSize: document.pageSize)
         self.showsDebugHUD = showsDebugHUD
-        self.showsPageControls = false
+        showsPageControls = false
     }
 
     public var body: some View {

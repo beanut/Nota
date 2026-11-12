@@ -21,7 +21,7 @@ public final class InkNotebook: ObservableObject {
     /// A notebook of `pageCount` blank pages of `pageSize` (at least one).
     public init(pageSize: PageSize = .default, pageCount: Int = 1) {
         defaultPageSize = pageSize
-        pages = (0..<max(1, pageCount)).map { _ in CanvasDocument(pageSize: pageSize) }
+        pages = (0 ..< max(1, pageCount)).map { _ in CanvasDocument(pageSize: pageSize) }
     }
 
     /// A notebook over existing pages. An empty array gets one blank page of `defaultPageSize`.
@@ -30,25 +30,48 @@ public final class InkNotebook: ObservableObject {
         self.pages = pages.isEmpty ? [CanvasDocument(pageSize: defaultPageSize)] : pages
     }
 
-    public var pageCount: Int { pages.count }
-    public var currentPage: CanvasDocument { pages[currentPageIndex] }
-    public var canGoToPreviousPage: Bool { currentPageIndex > 0 }
-    public var canGoToNextPage: Bool { currentPageIndex < pages.count - 1 }
-    public var canRemovePage: Bool { pages.count > 1 }
+    public var pageCount: Int {
+        pages.count
+    }
+
+    public var currentPage: CanvasDocument {
+        pages[currentPageIndex]
+    }
+
+    public var canGoToPreviousPage: Bool {
+        currentPageIndex > 0
+    }
+
+    public var canGoToNextPage: Bool {
+        currentPageIndex < pages.count - 1
+    }
+
+    public var canRemovePage: Bool {
+        pages.count > 1
+    }
 
     /// Index of the page with `id`, if it's in this notebook.
-    public func index(of id: CanvasDocument.ID) -> Int? { pages.firstIndex { $0.id == id } }
+    public func index(of id: CanvasDocument.ID) -> Int? {
+        pages.firstIndex { $0.id == id }
+    }
 
     // MARK: Navigation
 
     /// Shows the page at `index`, clamped to the valid range.
     public func goToPage(_ index: Int) {
         let clamped = min(max(index, 0), pages.count - 1)
-        if clamped != currentPageIndex { currentPageIndex = clamped }
+        if clamped != currentPageIndex {
+            currentPageIndex = clamped
+        }
     }
 
-    public func goToNextPage() { goToPage(currentPageIndex + 1) }
-    public func goToPreviousPage() { goToPage(currentPageIndex - 1) }
+    public func goToNextPage() {
+        goToPage(currentPageIndex + 1)
+    }
+
+    public func goToPreviousPage() {
+        goToPage(currentPageIndex - 1)
+    }
 
     // MARK: Editing
 
@@ -114,6 +137,8 @@ public final class InkNotebook: ObservableObject {
     public func setPageSizeForAllPages(_ size: PageSize) {
         objectWillChange.send()
         defaultPageSize = size
-        for page in pages { page.pageSize = size }
+        for page in pages {
+            page.pageSize = size
+        }
     }
 }

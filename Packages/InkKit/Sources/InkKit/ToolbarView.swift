@@ -92,7 +92,7 @@ struct ToolbarView: View {
                 .frame(width: 100)
             Circle()
                 .fill(controller.tool == .eraser ? Color.secondary.opacity(0.4)
-                      : Color(cgColor: RGBA.swatches[controller.current.colorIndex].cgColor()))
+                    : Color(cgColor: RGBA.swatches[controller.current.colorIndex].cgColor()))
                 .frame(width: max(4, min(controller.current.width, 28)), height: max(4, min(controller.current.width, 28)))
                 .frame(width: 28, height: 28)
         }
@@ -135,11 +135,11 @@ private struct ToolButton: View {
 
     private var symbol: String {
         switch tool {
-        case .pen: return "pencil.tip"
-        case .pencil: return "pencil"
-        case .highlighter: return "highlighter"
-        case .eraser: return "eraser"
-        case .lasso: return "lasso"
+        case .pen: "pencil.tip"
+        case .pencil: "pencil"
+        case .highlighter: "highlighter"
+        case .eraser: "eraser"
+        case .lasso: "lasso"
         }
     }
 }
@@ -176,12 +176,12 @@ struct CanvasSettingsView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Minimum width: \(Int(controller.minWidthRatio * 100))% of max")
-                Slider(value: $controller.minWidthRatio, in: 0.02...1)
+                Slider(value: $controller.minWidthRatio, in: 0.02 ... 1)
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(String(format: "Response curve: γ = %.2f", controller.pressureGamma))
-                Slider(value: $controller.pressureGamma, in: 0.25...3)
+                Slider(value: $controller.pressureGamma, in: 0.25 ... 3)
                 CurvePreview(gamma: controller.pressureGamma, minRatio: controller.minWidthRatio)
                     .frame(height: 80)
                 Text("γ < 1 boosts light pressure, γ > 1 needs a firmer press.")
@@ -192,12 +192,12 @@ struct CanvasSettingsView: View {
             Toggle("Debug HUD", isOn: $controller.hudVisible)
 
             #if targetEnvironment(simulator)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Simulated altitude: \(Int(controller.simulatedAltitudeDegrees))°")
-                Slider(value: $controller.simulatedAltitudeDegrees, in: 5...90)
-                Text("Simulator only. Lower it to try tilt shading without a Pencil.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Simulated altitude: \(Int(controller.simulatedAltitudeDegrees))°")
+                    Slider(value: $controller.simulatedAltitudeDegrees, in: 5 ... 90)
+                    Text("Simulator only. Lower it to try tilt shading without a Pencil.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             #endif
         }
         .padding(20)
@@ -216,11 +216,15 @@ private struct CurvePreview: View {
             frame.addRect(CGRect(origin: .zero, size: size))
             ctx.stroke(frame, with: .color(.secondary.opacity(0.3)))
             var curve = Path()
-            for i in 0...60 {
+            for i in 0 ... 60 {
                 let x = Double(i) / 60
                 let y = minRatio + (1 - minRatio) * pow(x, gamma)
                 let p = CGPoint(x: x * size.width, y: (1 - y) * size.height)
-                if i == 0 { curve.move(to: p) } else { curve.addLine(to: p) }
+                if i == 0 {
+                    curve.move(to: p)
+                } else {
+                    curve.addLine(to: p)
+                }
             }
             ctx.stroke(curve, with: .color(.accentColor), lineWidth: 2)
         }
@@ -234,7 +238,7 @@ struct QuickPaletteView: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.001)   // tap anywhere to dismiss
+            Color.black.opacity(0.001) // tap anywhere to dismiss
                 .onTapGesture { controller.quickPaletteLocation = nil }
             HStack(spacing: 8) {
                 ForEach(Tool.allCases) { tool in
@@ -246,7 +250,8 @@ struct QuickPaletteView: View {
                 Rectangle().fill(.secondary.opacity(0.3)).frame(width: 1, height: 24)
                 SwatchRow(selected: Binding(get: { controller.current.colorIndex },
                                             set: { controller.current.colorIndex = $0
-                                                   controller.quickPaletteLocation = nil }))
+                                                controller.quickPaletteLocation = nil
+                                            }))
             }
             .padding(8)
             .background(.regularMaterial, in: Capsule())

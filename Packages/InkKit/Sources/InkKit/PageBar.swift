@@ -47,7 +47,9 @@ struct PageBar: View {
         }
     }
 
-    private var currentSize: PageSize { notebook.currentPage.pageSize }
+    private var currentSize: PageSize {
+        notebook.currentPage.pageSize
+    }
 
     private var addMenu: some View {
         Menu {
@@ -76,7 +78,7 @@ struct PageBar: View {
                 sizeButtons { notebook.setPageSize($0, forPageAt: notebook.currentPageIndex) }
                 Button("Custom…") { customSizeTarget = CustomSizeTarget(kind: .currentPage, initial: currentSize) }
             }
-            if allowsMultiplePages && notebook.pageCount > 1 {
+            if allowsMultiplePages, notebook.pageCount > 1 {
                 Button("Use \(currentSize.displayName()) for All Pages") {
                     notebook.setPageSizeForAllPages(currentSize)
                 }
@@ -89,7 +91,6 @@ struct PageBar: View {
     }
 
     /// Every preset in portrait and landscape, with the current size checked.
-    @ViewBuilder
     private func sizeButtons(_ choose: @escaping (PageSize) -> Void) -> some View {
         ForEach(PageSize.presets, id: \.self) { preset in
             Menu(preset.displayName()) {
@@ -147,7 +148,9 @@ private struct CustomSizeTarget: Identifiable {
     enum Kind { case currentPage, newPage }
     let kind: Kind
     let initial: PageSize
-    var id: Kind { kind }
+    var id: Kind {
+        kind
+    }
 }
 
 /// Width and height entry for a custom page, in inches, millimetres or points.
@@ -208,7 +211,7 @@ struct CustomPageSizeSheet: View {
     private func dimensionField(_ title: String, value: Binding<Double>) -> some View {
         LabeledContent(title) {
             HStack {
-                TextField(title, value: value, format: .number.precision(.fractionLength(0...2)))
+                TextField(title, value: value, format: .number.precision(.fractionLength(0 ... 2)))
                     .keyboardType(.decimalPad)
                     .multilineTextAlignment(.trailing)
                 Text(unit.symbol).foregroundStyle(.secondary)
@@ -217,6 +220,6 @@ struct CustomPageSizeSheet: View {
     }
 
     private func format(_ v: CGFloat) -> String {
-        Double(v).formatted(.number.precision(.fractionLength(0...1)))
+        Double(v).formatted(.number.precision(.fractionLength(0 ... 1)))
     }
 }

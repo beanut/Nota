@@ -44,7 +44,7 @@ enum SampleData {
             Note(title: "Trip Planning: Lisbon", pageCount: 9, modifiedAt: daysAgo(23), paper: .dotted,
                  tint: .rust, isShared: true, folder: personal),
             Note(title: "Quick Notes", pageCount: 5, modifiedAt: daysAgo(30), paper: .plain,
-                 tint: .violet, folder: personal),
+                 tint: .violet, folder: personal)
         ]
 
         let courseTitles = ["Calculus II — Problem Set 4", "Organic Chemistry", "Physics — Lecture 6",

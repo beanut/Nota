@@ -63,8 +63,8 @@ struct StrokeGeometry {
 /// Nib cross-section at one sample: an ellipse (a circle when tilt shading is off).
 struct Tip {
     var center: CGPoint
-    var major: CGFloat   // radius along azimuth
-    var minor: CGFloat   // radius across azimuth
+    var major: CGFloat // radius along azimuth
+    var minor: CGFloat // radius across azimuth
     var angle: CGFloat
     var alpha: CGFloat
 }
@@ -72,9 +72,9 @@ struct Tip {
 extension InkKind {
     var blendMode: CGBlendMode {
         switch self {
-        case .pen, .pencil: return .normal
-        case .highlighter: return .multiply
-        case .pixelEraser: return .destinationOut
+        case .pen, .pencil: .normal
+        case .highlighter: .multiply
+        case .pixelEraser: .destinationOut
         }
     }
 }
@@ -103,7 +103,7 @@ enum StrokeRenderer {
     private static let circles: [Int: [(CGFloat, CGFloat)]] = {
         var table: [Int: [(CGFloat, CGFloat)]] = [:]
         for n in [16, 32, 64] {
-            table[n] = (0..<n).map { i in
+            table[n] = (0 ..< n).map { i in
                 let t = CGFloat(i) / CGFloat(n) * 2 * .pi
                 return (cos(t), sin(t))
             }
@@ -115,7 +115,7 @@ enum StrokeRenderer {
 
     static func tiltAmount(altitude: CGFloat) -> CGFloat {
         let x = min(max((tiltStart - altitude) / (tiltStart - tiltFull), 0), 1)
-        return x * x * (3 - 2 * x)   // smoothstep
+        return x * x * (3 - 2 * x) // smoothstep
     }
 
     static func tip(for p: StrokePoint, style: BrushStyle) -> Tip {
@@ -167,13 +167,17 @@ enum StrokeRenderer {
         var lower: [CGPoint] = []
         lower.reserveCapacity(pts.count)
         for p in pts {
-            while lower.count >= 2 && cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 { lower.removeLast() }
+            while lower.count >= 2, cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 {
+                lower.removeLast()
+            }
             lower.append(p)
         }
         var upper: [CGPoint] = []
         upper.reserveCapacity(pts.count)
         for p in pts.reversed() {
-            while upper.count >= 2 && cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 { upper.removeLast() }
+            while upper.count >= 2, cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 {
+                upper.removeLast()
+            }
             upper.append(p)
         }
         lower.removeLast()
@@ -201,21 +205,27 @@ enum StrokeRenderer {
 
         /// Distance from the centre to the tangent line whose outward unit normal is `u`.
         func reach(_ u: CGPoint) -> CGFloat {
-            if round { return tip.major }
+            if round {
+                return tip.major
+            }
             let x = (u.x * c + u.y * s) * tip.major, y = (u.y * c - u.x * s) * tip.minor
             return (x * x + y * y).squareRoot()
         }
 
         /// The boundary point furthest along unit direction `u`.
         func support(_ u: CGPoint) -> CGPoint {
-            if round { return CGPoint(x: tip.center.x + u.x * tip.major, y: tip.center.y + u.y * tip.major) }
+            if round {
+                return CGPoint(x: tip.center.x + u.x * tip.major, y: tip.center.y + u.y * tip.major)
+            }
             let ux = u.x * c + u.y * s, uy = u.y * c - u.x * s
             let x = ux * tip.major * tip.major, y = uy * tip.minor * tip.minor
             let h = max((ux * x + uy * y).squareRoot(), 1e-9)
             return CGPoint(x: tip.center.x + (x * c - y * s) / h, y: tip.center.y + (x * s + y * c) / h)
         }
 
-        var stamp: Hull { StrokeRenderer.hull(fromPolygon: StrokeRenderer.polygon(for: tip), alpha: tip.alpha) }
+        var stamp: Hull {
+            StrokeRenderer.hull(fromPolygon: StrokeRenderer.polygon(for: tip), alpha: tip.alpha)
+        }
     }
 
     /// Unit normal of `v` (rotated +90°), or nil when `v` is too short to have a direction.
@@ -255,7 +265,8 @@ enum StrokeRenderer {
     ///  - **Nib change**: quads interpolate the nib linearly, so its size changes at most ~10% per step,
     ///    an elliptical nib rotates at most ~0.15 rad, and alpha moves at most one quantum.
     private static func stepCount(_ p1: CGPoint, _ c1: CGPoint, _ c2: CGPoint, _ p2: CGPoint,
-                                  from a: Tip, to b: Tip) -> Int {
+                                  tips: (from: Tip, to: Tip)) -> Int {
+        let (a, b) = tips
         let d1 = p1 - c1 * 2 + c2, d2 = c1 - c2 * 2 + p2
         var n = (0.75 * max(hypot(d1.x, d1.y), hypot(d2.x, d2.y)) / flatnessTolerance).squareRoot()
 
@@ -314,7 +325,7 @@ enum StrokeRenderer {
         let startTip = tip(for: a, style: style)
         var prev = Nib(startTip)
         let endTip = tip(for: b, style: style)
-        let steps = stepCount(p1, c1, c2, p2, from: prev.tip, to: endTip)
+        let steps = stepCount(p1, c1, c2, p2, tips: (prev.tip, endTip))
 
         var hulls: [Hull] = []
         hulls.reserveCapacity(4)
@@ -339,7 +350,7 @@ enum StrokeRenderer {
         var prevStamped = false
         var lastQuantum = (prev.tip.alpha * alphaSteps).rounded()
         if i == 0 || leadingStamp {
-            hulls.append(prev.stamp)   // start cap, or overlap with the previous fill
+            hulls.append(prev.stamp) // start cap, or overlap with the previous fill
             prevStamped = true
         } else if let (nL, nR) = referenceNormals(at: prev, tangent: c1 - p1, chord: p2 - p1,
                                                   before: tip(for: pts[i - 1], style: style), after: endTip) {
@@ -351,9 +362,9 @@ enum StrokeRenderer {
         // Segment boundaries split the allowed sliver between the two segments that meet there.
         var tolerance = joinTolerance / 2
 
-        /// Whether a quad whose tangent points on a nib are `p` (normal `u`) can weld to one whose are
-        /// `q` (normal `v`): the sliver between them is shallower than `tolerance` and much narrower
-        /// than the quads are long.
+        // Whether a quad whose tangent points on a nib are `p` (normal `u`) can weld to one whose are
+        // `q` (normal `v`): the sliver between them is shallower than `tolerance` and much narrower
+        // than the quads are long.
         func welds(_ p: CGPoint, _ q: CGPoint, _ u: CGPoint, _ v: CGPoint, length: CGFloat) -> Bool {
             guard u.x * v.x + u.y * v.y > 0 else { return false }
             let width = p.distance(to: q)
@@ -361,7 +372,7 @@ enum StrokeRenderer {
         }
 
         var lastDist: CGFloat = 0
-        for s in 1...steps {
+        for s in 1 ... steps {
             let t = CGFloat(s) / CGFloat(steps)
             let loc = s == steps ? p2 : bezier(p1, c1, c2, p2, t)
             let next = Nib(tip(for: interpolate(a, b, t, at: loc), style: style))
@@ -379,7 +390,9 @@ enum StrokeRenderer {
             guard abs(sinPhi) < steepTaper else {
                 // One stamp (nearly) swallows the other: the two stamps are the hull.
                 endStrip()
-                if !prevStamped { hulls.append(prev.stamp) }
+                if !prevStamped {
+                    hulls.append(prev.stamp)
+                }
                 hulls.append(next.stamp)
                 prevStamped = true
                 lastL = nil
@@ -397,12 +410,18 @@ enum StrokeRenderer {
             if quantum == lastQuantum, let lastL, let lastR,
                welds(lastL, aL, lastNL, nL, length: dist), welds(lastR, aR, lastNR, nR, length: dist) {
                 // Smooth join: carry the strip on, from the previous segment's if this is the first quad.
-                if right.isEmpty { stripJoins = true }
+                if right.isEmpty {
+                    stripJoins = true
+                }
             } else {
                 endStrip()
-                if !prevStamped { hulls.append(prev.stamp) }
+                if !prevStamped {
+                    hulls.append(prev.stamp)
+                }
             }
-            if right.isEmpty { stripAlpha = alpha }
+            if right.isEmpty {
+                stripAlpha = alpha
+            }
             left.append(aL)
             left.append(bL)
             right.append(aR)
@@ -431,7 +450,7 @@ enum StrokeRenderer {
                     hulls.append(prev.stamp)
                 }
             } else {
-                hulls.append(prev.stamp)   // end cap
+                hulls.append(prev.stamp) // end cap
             }
         }
         return hulls
@@ -439,17 +458,17 @@ enum StrokeRenderer {
 
     static func hulls(for points: [StrokePoint], style: BrushStyle) -> [Hull] {
         switch points.count {
-        case 0: return []
-        case 1: return [dotHull(points[0], style: style)]
+        case 0: []
+        case 1: [dotHull(points[0], style: style)]
         default:
-            return (0..<(points.count - 1)).flatMap {
+            (0 ..< (points.count - 1)).flatMap {
                 segmentHulls(points, segment: $0, style: style,
                              leadingStamp: $0 % LiveStroke.chunkSize == 0)
             }
         }
     }
 
-    static func runs<S: Sequence>(from hulls: S) -> [StrokeRun] where S.Element == Hull {
+    static func runs(from hulls: some Sequence<Hull>) -> [StrokeRun] {
         var runs: [StrokeRun] = []
         var path = CGMutablePath()
         var alpha: CGFloat = -1
@@ -468,7 +487,7 @@ enum StrokeRenderer {
             let isStamp = h.polygon.count > 2
             guard isStamp || !h.right.isEmpty else { continue }
             let q = (h.alpha * alphaSteps).rounded() / alphaSteps
-            if q != alpha && !empty {
+            if q != alpha, !empty {
                 endStrip()
                 runs.append(StrokeRun(path: path, alpha: alpha))
                 path = CGMutablePath()
@@ -479,13 +498,17 @@ enum StrokeRenderer {
                 path.addLines(between: h.polygon)
                 path.closeSubpath()
             } else {
-                if !h.joinsPrevious { endStrip() }
+                if !h.joinsPrevious {
+                    endStrip()
+                }
                 left.append(contentsOf: h.left)
                 right.append(contentsOf: h.right)
             }
         }
         endStrip()
-        if !empty { runs.append(StrokeRun(path: path, alpha: alpha)) }
+        if !empty {
+            runs.append(StrokeRun(path: path, alpha: alpha))
+        }
         return runs
     }
 
@@ -506,7 +529,9 @@ enum StrokeRenderer {
                      in ctx: CGContext, liveEraserColor: CGColor? = nil) {
         guard !runs.isEmpty else { return }
         let fill: (CGFloat) -> CGColor = { alpha in
-            if let liveEraserColor { return liveEraserColor }
+            if let liveEraserColor {
+                return liveEraserColor
+            }
             if kind == .pencil {
                 return PencilTexture.fillColor(for: color, alpha: alpha)
             }
@@ -525,7 +550,7 @@ enum StrokeRenderer {
                 ctx.fillPath(using: .winding)
             }
         } else {
-            ctx.clip(to: clip)   // keeps the transparency layer's offscreen buffer small
+            ctx.clip(to: clip) // keeps the transparency layer's offscreen buffer small
             ctx.beginTransparencyLayer(auxiliaryInfo: nil)
             ctx.setBlendMode(.copy)
             for run in runs {
@@ -543,13 +568,17 @@ enum StrokeRenderer {
     static func hitTest(_ stroke: Stroke, bounds: CGRect, point: CGPoint, radius: CGFloat) -> Bool {
         guard bounds.insetBy(dx: -radius, dy: -radius).contains(point) else { return false }
         let pts = stroke.points
-        func reach(_ p: StrokePoint) -> CGFloat { tip(for: p, style: stroke.style).major + radius }
+        func reach(_ p: StrokePoint) -> CGFloat {
+            tip(for: p, style: stroke.style).major + radius
+        }
         guard pts.count > 1 else {
             return pts.first.map { point.distance(to: $0.location) <= reach($0) } ?? false
         }
-        for i in 0..<(pts.count - 1) {
+        for i in 0 ..< (pts.count - 1) {
             let a = pts[i], b = pts[i + 1]
-            if point.distance(toSegment: a.location, b.location) <= max(reach(a), reach(b)) { return true }
+            if point.distance(toSegment: a.location, b.location) <= max(reach(a), reach(b)) {
+                return true
+            }
         }
         return false
     }
@@ -576,7 +605,7 @@ enum StrokeRenderer {
     }
 
     static func interpolate(_ a: StrokePoint, _ b: StrokePoint, _ t: CGFloat, at location: CGPoint) -> StrokePoint {
-        let dAz = atan2(sin(b.azimuth - a.azimuth), cos(b.azimuth - a.azimuth))   // shortest way round
+        let dAz = atan2(sin(b.azimuth - a.azimuth), cos(b.azimuth - a.azimuth)) // shortest way round
         return StrokePoint(location: location,
                            force: a.force + (b.force - a.force) * t,
                            altitude: a.altitude + (b.altitude - a.altitude) * t,
@@ -612,6 +641,7 @@ final class LiveStroke {
         var bounds: CGRect = .null
         var runs: [StrokeRun]?
     }
+
     private var chunks: [Chunk] = []
 
     init(stroke: Stroke) {
@@ -675,13 +705,14 @@ final class LiveStroke {
             let start = max(0, finalized.count - 1)
             let slice = start < stroke.points.count ? stroke.points[start...] : stroke.points[...]
             let localPts = Array(slice) + predicted
-            for i in finalized.count..<(totalCount - 1) {
+            for i in finalized.count ..< (totalCount - 1) {
                 let localIndex = i - start
-                guard localIndex >= 0 && localIndex + 1 < localPts.count else { continue }
+                guard localIndex >= 0, localIndex + 1 < localPts.count else { continue }
                 // The tail is filled apart from the last chunk, so its first segment overlaps it.
                 hulls.append(contentsOf: StrokeRenderer.segmentHulls(
                     localPts, segment: localIndex, style: stroke.style,
-                    leadingStamp: i == finalized.count || i % Self.chunkSize == 0))
+                    leadingStamp: i == finalized.count || i % Self.chunkSize == 0
+                ))
             }
         }
 
@@ -706,7 +737,7 @@ final class LiveStroke {
         var modifiedChunks = Set<Int>()
 
         for seg in [index - 1, index] {
-            guard seg >= 0 && seg < finalized.count else { continue }
+            guard seg >= 0, seg < finalized.count else { continue }
             for h in finalized[seg] {
                 dirty = dirty.union(h.bounds)
             }
@@ -725,7 +756,7 @@ final class LiveStroke {
             let startSeg = c * Self.chunkSize
             let endSeg = min((c + 1) * Self.chunkSize, finalized.count)
             var b = CGRect.null
-            for s in startSeg..<endSeg {
+            for s in startSeg ..< endSeg {
                 for h in finalized[s] {
                     b = b.union(h.bounds)
                 }
@@ -748,15 +779,21 @@ final class LiveStroke {
         return max(settled, finalized.count - Self.maxUnsettledSegments) / Self.chunkSize
     }
 
-    func chunkBounds(_ c: Int) -> CGRect { chunks[c].bounds }
+    func chunkBounds(_ c: Int) -> CGRect {
+        chunks[c].bounds
+    }
 
-    func chunkRuns(_ c: Int) -> [StrokeRun] { ensureChunkRuns(c) }
+    func chunkRuns(_ c: Int) -> [StrokeRun] {
+        ensureChunkRuns(c)
+    }
 
     /// Bounds of each chunk plus the tail: where the stroke has ink, without the empty space a single
     /// bounding box of a long stroke would cover.
     var pieceBounds: [CGRect] {
         var result = chunks.map(\.bounds)
-        if !tailBounds.isNull { result.append(tailBounds) }
+        if !tailBounds.isNull {
+            result.append(tailBounds)
+        }
         return result
     }
 
@@ -766,7 +803,7 @@ final class LiveStroke {
     func runs(intersecting rect: CGRect, fromChunk first: Int = 0) -> [StrokeRun] {
         var result: [StrokeRun] = []
 
-        for c in first..<max(first, chunks.count) {
+        for c in first ..< max(first, chunks.count) {
             guard chunks[c].bounds.intersects(rect) else { continue }
             result.append(contentsOf: ensureChunkRuns(c))
         }
@@ -789,7 +826,7 @@ final class LiveStroke {
         var allRuns: [StrokeRun] = []
         var totalBounds = CGRect.null
 
-        for c in 0..<chunks.count {
+        for c in 0 ..< chunks.count {
             totalBounds = totalBounds.union(chunks[c].bounds)
             allRuns.append(contentsOf: ensureChunkRuns(c))
         }
@@ -811,7 +848,7 @@ final class LiveStroke {
             chunks[c].runs = []
             return []
         }
-        let runs = StrokeRenderer.runs(from: finalized[startSeg..<endSeg].joined())
+        let runs = StrokeRenderer.runs(from: finalized[startSeg ..< endSeg].joined())
         chunks[c].runs = runs
         return runs
     }
@@ -820,12 +857,25 @@ final class LiveStroke {
 // MARK: - CGPoint arithmetic
 
 extension CGPoint {
-    static func + (l: CGPoint, r: CGPoint) -> CGPoint { CGPoint(x: l.x + r.x, y: l.y + r.y) }
-    static func - (l: CGPoint, r: CGPoint) -> CGPoint { CGPoint(x: l.x - r.x, y: l.y - r.y) }
-    static func * (l: CGPoint, r: CGFloat) -> CGPoint { CGPoint(x: l.x * r, y: l.y * r) }
-    static func / (l: CGPoint, r: CGFloat) -> CGPoint { CGPoint(x: l.x / r, y: l.y / r) }
+    static func + (l: CGPoint, r: CGPoint) -> CGPoint {
+        CGPoint(x: l.x + r.x, y: l.y + r.y)
+    }
 
-    func distance(to p: CGPoint) -> CGFloat { hypot(x - p.x, y - p.y) }
+    static func - (l: CGPoint, r: CGPoint) -> CGPoint {
+        CGPoint(x: l.x - r.x, y: l.y - r.y)
+    }
+
+    static func * (l: CGPoint, r: CGFloat) -> CGPoint {
+        CGPoint(x: l.x * r, y: l.y * r)
+    }
+
+    static func / (l: CGPoint, r: CGFloat) -> CGPoint {
+        CGPoint(x: l.x / r, y: l.y / r)
+    }
+
+    func distance(to p: CGPoint) -> CGFloat {
+        hypot(x - p.x, y - p.y)
+    }
 
     func distance(toSegment a: CGPoint, _ b: CGPoint) -> CGFloat {
         let ab = b - a

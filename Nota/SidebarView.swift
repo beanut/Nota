@@ -68,14 +68,18 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) {}
             Button("Rename") {
                 let name = folderName.trimmingCharacters(in: .whitespaces)
-                if !name.isEmpty { folderBeingRenamed?.name = name }
+                if !name.isEmpty {
+                    folderBeingRenamed?.name = name
+                }
             }
         }
         .confirmationDialog("Delete “\(folderPendingDeletion?.name ?? "")”?",
                             isPresented: isPresent($folderPendingDeletion),
                             titleVisibility: .visible) {
             Button("Delete Folder", role: .destructive) {
-                if let folder = folderPendingDeletion { delete(folder) }
+                if let folder = folderPendingDeletion {
+                    delete(folder)
+                }
             }
         } message: {
             Text("Notes in this folder stay in All Notes.")
@@ -118,18 +122,26 @@ struct SidebarView: View {
     }
 
     private func delete(_ folder: Folder) {
-        if selection == .folder(folder.persistentModelID) { selection = .all }
+        if selection == .folder(folder.persistentModelID) {
+            selection = .all
+        }
         modelContext.delete(folder)
     }
 
     private func moveFolders(from source: IndexSet, to destination: Int) {
         var reordered = folders
         reordered.move(fromOffsets: source, toOffset: destination)
-        for (index, folder) in reordered.enumerated() { folder.sortIndex = index }
+        for (index, folder) in reordered.enumerated() {
+            folder.sortIndex = index
+        }
     }
 }
 
 /// A Bool binding that is true while `item` is non-nil, and clears it on dismissal.
-func isPresent<T>(_ item: Binding<T?>) -> Binding<Bool> {
-    Binding(get: { item.wrappedValue != nil }, set: { if !$0 { item.wrappedValue = nil } })
+func isPresent(_ item: Binding<(some Any)?>) -> Binding<Bool> {
+    Binding(get: { item.wrappedValue != nil }, set: {
+        if !$0 {
+            item.wrappedValue = nil
+        }
+    })
 }

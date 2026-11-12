@@ -6,7 +6,7 @@ import Foundation
 public struct PageSize: Hashable, Sendable, Codable {
     /// Smallest and largest edge accepted for a custom page: 1 inch to 200 inches.
     public static let minimumDimension: CGFloat = 72
-    public static let maximumDimension: CGFloat = 14_400
+    public static let maximumDimension: CGFloat = 14400
 
     public let width: CGFloat
     public let height: CGFloat
@@ -39,33 +39,42 @@ public struct PageSize: Hashable, Sendable, Codable {
     /// Units a person can enter a custom size in.
     public enum Unit: String, CaseIterable, Identifiable, Sendable {
         case inches, millimeters, points
-        public var id: String { rawValue }
+        public var id: String {
+            rawValue
+        }
 
         public var pointsPerUnit: CGFloat {
             switch self {
-            case .inches: return 72
-            case .millimeters: return 72 / 25.4
-            case .points: return 1
+            case .inches: 72
+            case .millimeters: 72 / 25.4
+            case .points: 1
             }
         }
 
         public var symbol: String {
             switch self {
-            case .inches: return "in"
-            case .millimeters: return "mm"
-            case .points: return "pt"
+            case .inches: "in"
+            case .millimeters: "mm"
+            case .points: "pt"
             }
         }
 
-        public func toPoints(_ value: CGFloat) -> CGFloat { value * pointsPerUnit }
-        public func fromPoints(_ points: CGFloat) -> CGFloat { points / pointsPerUnit }
+        public func toPoints(_ value: CGFloat) -> CGFloat {
+            value * pointsPerUnit
+        }
+
+        public func fromPoints(_ points: CGFloat) -> CGFloat {
+            points / pointsPerUnit
+        }
 
         /// The accepted range for one edge, in this unit.
         public var allowedRange: ClosedRange<CGFloat> {
-            fromPoints(PageSize.minimumDimension)...fromPoints(PageSize.maximumDimension)
+            fromPoints(PageSize.minimumDimension) ... fromPoints(PageSize.maximumDimension)
         }
 
-        public static var localeDefault: Unit { Locale.current.measurementSystem == .us ? .inches : .millimeters }
+        public static var localeDefault: Unit {
+            Locale.current.measurementSystem == .us ? .inches : .millimeters
+        }
     }
 
     // MARK: Presets
@@ -85,22 +94,42 @@ public struct PageSize: Hashable, Sendable, Codable {
 
     // MARK: Derived
 
-    public var size: CGSize { CGSize(width: width, height: height) }
+    public var size: CGSize {
+        CGSize(width: width, height: height)
+    }
+
     /// The page rect in canvas space; pages start at the canvas origin.
-    public var bounds: CGRect { CGRect(origin: .zero, size: size) }
-    public var isLandscape: Bool { width > height }
-    public var isCustom: Bool { name == nil }
+    public var bounds: CGRect {
+        CGRect(origin: .zero, size: size)
+    }
+
+    public var isLandscape: Bool {
+        width > height
+    }
+
+    public var isCustom: Bool {
+        name == nil
+    }
 
     /// The same page turned to portrait (taller than wide). Square pages are unchanged.
-    public var portrait: PageSize { isLandscape ? rotated : self }
-    /// The same page turned to landscape (wider than tall). Square pages are unchanged.
-    public var landscape: PageSize { height > width ? rotated : self }
+    public var portrait: PageSize {
+        isLandscape ? rotated : self
+    }
 
-    private var rotated: PageSize { PageSize(width: height, height: width, name: name) }
+    /// The same page turned to landscape (wider than tall). Square pages are unchanged.
+    public var landscape: PageSize {
+        height > width ? rotated : self
+    }
+
+    private var rotated: PageSize {
+        PageSize(width: height, height: width, name: name)
+    }
 
     /// "Letter", "Letter (Landscape)", or "8.5 × 11 in" / "210 × 297 mm" for custom sizes.
     public func displayName(metric: Bool = Locale.current.measurementSystem != .us) -> String {
-        if let name { return isLandscape ? "\(name) (Landscape)" : name }
+        if let name {
+            return isLandscape ? "\(name) (Landscape)" : name
+        }
         if metric {
             return "\(Self.format(width / 72 * 25.4, digits: 0)) × \(Self.format(height / 72 * 25.4, digits: 0)) mm"
         }
@@ -119,6 +148,6 @@ public struct PageSize: Hashable, Sendable, Codable {
     }
 
     private static func format(_ v: CGFloat, digits: Int) -> String {
-        Double(v).formatted(.number.precision(.fractionLength(0...digits)))
+        Double(v).formatted(.number.precision(.fractionLength(0 ... digits)))
     }
 }
