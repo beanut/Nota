@@ -32,6 +32,7 @@ struct NotesBrowser: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(InkStore.self) private var inkStore
+    @Environment(ThumbnailStore.self) private var thumbnails
     @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
     @Query(sort: \Folder.sortIndex) private var folders: [Folder]
 
@@ -227,11 +228,8 @@ struct NotesBrowser: View {
             Label("Move to Folder", systemImage: "folder")
         }
         Menu {
-            Picker("Paper", selection: Binding(get: { note.paper }, set: { note.paper = $0 })) {
+            Picker("Paper", selection: Binding(get: { note.paper }, set: { setPaper($0, of: note) })) {
                 ForEach(PaperStyle.allCases) { Text($0.title).tag($0) }
-            }
-            Picker("Cover", selection: Binding(get: { note.tint }, set: { note.tint = $0 })) {
-                ForEach(NoteTint.allCases) { Text($0.rawValue.capitalized).tag($0) }
             }
         } label: {
             Label("Appearance", systemImage: "paintpalette")
@@ -280,6 +278,14 @@ struct NotesBrowser: View {
         path.append(note)
     }
 
+    /// The cover is rendered on its paper, so a note with ink gets a new cover.
+    private func setPaper(_ paper: PaperStyle, of note: Note) {
+        note.paper = paper
+        if let notebook = inkStore.existingNotebook(for: note.id) {
+            thumbnails.updateCover(of: note.id, page: notebook.pages[0].snapshot(), paper: paper)
+        }
+    }
+
     private func duplicate(_ note: Note) {
         let copy = Note(title: String(localized: "\(note.title) Copy"),
                         pageCount: note.pageCount,
@@ -294,6 +300,7 @@ struct NotesBrowser: View {
         withAnimation {
             for note in notes {
                 inkStore.discard(noteID: note.id)
+                thumbnails.remove(noteID: note.id)
                 modelContext.delete(note)
             }
         }

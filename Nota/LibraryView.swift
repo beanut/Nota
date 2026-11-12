@@ -82,5 +82,6 @@ struct LibraryView: View {
 #Preview {
     LibraryView()
         .environment(InkStore())
+        .environment(ThumbnailStore())
         .modelContainer(for: [Note.self, Folder.self], inMemory: true)
 }
