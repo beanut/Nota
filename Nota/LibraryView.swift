@@ -52,6 +52,7 @@ enum LibrarySection: Hashable {
 /// pushes the InkKit canvas and hides the sidebar.
 struct LibraryView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(InkStore.self) private var inkStore
     @State private var selection: LibrarySection? = .all
     @State private var path: [Note] = []
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -75,7 +76,12 @@ struct LibraryView: View {
         .onChange(of: path.isEmpty) { _, isEmpty in
             withAnimation { columnVisibility = isEmpty ? .all : .detailOnly }
         }
-        .task { SampleData.seedIfNeeded(in: modelContext) }
+        .task {
+            SampleData.seedIfNeeded(in: modelContext)
+            // Page counts and dates come from each note's manifest, not from what was seeded or last cached.
+            let notes = (try? modelContext.fetch(FetchDescriptor<Note>())) ?? []
+            await inkStore.reconcile(notes)
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+import InkKit
 import NotaUI
 import SwiftData
 import SwiftUI
@@ -42,6 +43,7 @@ struct NotesBrowser: View {
     @State private var renameText = ""
     @State private var notePendingDeletion: Note?
     @State private var isConfirmingEmptyTrash = false
+    @State private var isChoosingNewNotePaper = false
 
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 260), spacing: NotaSpacing.xxl, alignment: .top)]
 
@@ -108,6 +110,9 @@ struct NotesBrowser: View {
             }
         } message: {
             Text("This can’t be undone.")
+        }
+        .sheet(isPresented: $isChoosingNewNotePaper) {
+            NewNoteSheet(onCreate: createNote)
         }
         .confirmationDialog("Delete all notes in Recently Deleted?",
                             isPresented: $isConfirmingEmptyTrash,
@@ -181,7 +186,7 @@ struct NotesBrowser: View {
     }
 
     private func newNoteButton(size: NotaButtonStyle.Size) -> some View {
-        Button(action: createNote) {
+        Button { isChoosingNewNotePaper = true } label: {
             NotaButtonLabel("New Note", icon: .plus, size: size)
         }
         .buttonStyle(.nota(.primary, size: size))
@@ -266,13 +271,14 @@ struct NotesBrowser: View {
 
     // MARK: Actions
 
-    private func createNote() {
+    private func createNote(paper: PaperStyle, size: PageSize) {
         let note = Note(title: String(localized: "Untitled Note"),
-                        paper: .lined,
+                        paper: paper,
                         tint: folder.map { NoteTint.allCases[$0.sortIndex % NoteTint.allCases.count] } ?? .indigo,
                         isFavorite: section == .favorites,
                         folder: folder)
         modelContext.insert(note)
+        inkStore.create(note, size: size, paper: paper)
         try? modelContext.save()
         searchText = ""
         path.append(note)
@@ -280,7 +286,7 @@ struct NotesBrowser: View {
 
     /// The cover is rendered on its paper, so a note with ink gets a new cover.
     private func setPaper(_ paper: PaperStyle, of note: Note) {
-        note.paper = paper
+        inkStore.setPaper(paper, of: note)
         if let notebook = inkStore.existingNotebook(for: note.id) {
             thumbnails.updateCover(of: note.id, page: notebook.pages[0].snapshot(), paper: paper)
         }
@@ -293,6 +299,7 @@ struct NotesBrowser: View {
                         tint: note.tint,
                         kind: note.kind,
                         folder: note.folder)
+        inkStore.duplicate(note, as: copy)
         withAnimation { modelContext.insert(copy) }
     }
 
