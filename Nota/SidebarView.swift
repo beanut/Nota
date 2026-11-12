@@ -1,3 +1,4 @@
+import NotaCore
 import NotaUI
 import SwiftData
 import SwiftUI

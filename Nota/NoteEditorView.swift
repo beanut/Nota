@@ -1,4 +1,6 @@
 import InkKit
+import NotaCore
+import NotaDocuments
 import NotaUI
 import SwiftUI
 
@@ -9,7 +11,7 @@ import SwiftUI
 /// they happen; leaving the note or backgrounding the app saves too.
 struct NoteEditorView: View {
     @Bindable var note: Note
-    @Environment(InkStore.self) private var inkStore
+    @Environment(DocumentStore.self) private var documents
     @Environment(ThumbnailStore.self) private var thumbnails
     @Environment(\.scenePhase) private var scenePhase
     /// Each page's revision when the note was opened or last saved with ink changes.
@@ -17,8 +19,9 @@ struct NoteEditorView: View {
     @State private var pendingSave: Task<Void, Never>?
 
     var body: some View {
-        let notebook = inkStore.notebook(for: note)
+        let notebook = documents.notebook(for: note)
         InkCanvasEditor(notebook: notebook, title: $note.title)
+            .inkTheme(.nota)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(NotaColor.bgApp, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
@@ -34,7 +37,7 @@ struct NoteEditorView: View {
                 // The first page is the cover; skipped if it hasn't changed since its last render.
                 let cover = notebook.pages[0]
                 thumbnails.updateCover(of: note.id, page: cover.snapshot(),
-                                       paper: inkStore.paper(ofPage: cover.id, in: note))
+                                       paper: documents.paper(ofPage: cover.id, in: note))
             }
     }
 
@@ -55,7 +58,7 @@ struct NoteEditorView: View {
         let current = revisions(of: notebook)
         // Ink edits count only on pages that were already there; new and removed pages are layout changes.
         let inkChanged = current.contains { id, revision in savedRevisions[id].map { $0 != revision } ?? false }
-        inkStore.save(note, inkChanged: inkChanged)
+        documents.save(note, inkChanged: inkChanged)
         savedRevisions = current
     }
 

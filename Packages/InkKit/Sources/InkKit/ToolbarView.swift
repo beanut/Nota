@@ -1,8 +1,7 @@
-import NotaUI
 import SwiftUI
 
 extension Tool {
-    var icon: NotaIcon {
+    var icon: InkIcon {
         switch self {
         case .pen: .pen
         case .pencil: .pencil
@@ -45,23 +44,23 @@ struct PenCase: View {
     @State private var draftTitle = ""
 
     var body: some View {
-        HStack(spacing: NotaSpacing.xxxs) {
+        HStack(spacing: InkSpacing.xxxs) {
             ViewThatFits(in: .horizontal) {
                 tools
                 ScrollView(.horizontal, showsIndicators: false) { tools }
             }
-            NotaBarDivider(in: .horizontal)
+            InkBarDivider(axis: .horizontal)
             InkRow(controller: controller, axis: .horizontal)
-            NotaBarDivider(in: .horizontal)
-            Button { controller.undo() } label: { NotaIconView(.undo) }
-                .buttonStyle(.notaIcon)
+            InkBarDivider(axis: .horizontal)
+            Button { controller.undo() } label: { InkIconView(.undo) }
+                .buttonStyle(.inkIcon)
                 .disabled(!controller.canUndo)
                 .accessibilityLabel("Undo")
-            Button { controller.redo() } label: { NotaIconView(.redo) }
-                .buttonStyle(.notaIcon)
+            Button { controller.redo() } label: { InkIconView(.redo) }
+                .buttonStyle(.inkIcon)
                 .disabled(!controller.canRedo)
                 .accessibilityLabel("Redo")
-            NotaBarDivider(in: .horizontal)
+            InkBarDivider(axis: .horizontal)
             moreMenu
         }
         .accessibilityElement(children: .contain)
@@ -69,7 +68,7 @@ struct PenCase: View {
     }
 
     private var tools: some View {
-        HStack(spacing: NotaSpacing.xxxs) {
+        HStack(spacing: InkSpacing.xxxs) {
             ForEach(Tool.allCases) { tool in
                 ToolButton(tool: tool, selected: controller.tool == tool) {
                     if controller.tool == tool {
@@ -121,10 +120,10 @@ struct PenCase: View {
             }
             .disabled(!controller.canUndo && !controller.canRedo)
         } label: {
-            NotaIconView(.ellipsis)
+            InkIconView(.more)
         }
         .menuStyle(.button)
-        .buttonStyle(.notaIcon)
+        .buttonStyle(.inkIcon)
         .accessibilityLabel("More")
         .popover(isPresented: $showSettings, arrowEdge: .top) {
             CanvasSettingsView(controller: controller)
@@ -149,9 +148,9 @@ private struct ToolButton: View {
 
     var body: some View {
         Button(action: action) {
-            NotaIconView(tool.icon)
+            InkIconView(tool.icon)
         }
-        .buttonStyle(.notaIcon(selected: selected))
+        .buttonStyle(.inkIcon(selected: selected))
         .accessibilityLabel(tool.title)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityHint(selected ? "Shows options for this tool." : "")
@@ -164,22 +163,23 @@ private struct InkRow: View {
     @ObservedObject var controller: CanvasController
     let axis: Axis
     var onPick: () -> Void = {}
+    @Environment(\.inkTheme) private var theme
 
     var body: some View {
         let tool = controller.tool
-        let inks = CanvasController.inks(for: tool.usesInk ? tool : .pen)
+        let inks = theme.inks(for: tool.usesInk ? tool : .pen)
         let layout = axis == .horizontal
-            ? AnyLayout(HStackLayout(spacing: NotaSpacing.xxxs))
-            : AnyLayout(VStackLayout(spacing: NotaSpacing.xxxs))
+            ? AnyLayout(HStackLayout(spacing: InkSpacing.xxxs))
+            : AnyLayout(VStackLayout(spacing: InkSpacing.xxxs))
         layout {
             ForEach(inks.indices, id: \.self) { i in
-                InkSwatch(inks[i], isSelected: tool.usesInk && controller.current.colorIndex == i) {
+                InkSwatchButton(ink: inks[i], isSelected: tool.usesInk && controller.current.colorIndex == i) {
                     controller.current.colorIndex = i
                     onPick()
                 }
             }
         }
-        .padding(axis == .horizontal ? .horizontal : .vertical, NotaSpacing.xs)
+        .padding(axis == .horizontal ? .horizontal : .vertical, InkSpacing.xs)
         .disabled(!tool.usesInk)
         .opacity(tool.usesInk ? 1 : 0.35)
         .accessibilityElement(children: .contain)
@@ -192,13 +192,14 @@ private struct InkRow: View {
 struct ToolOptionsView: View {
     @ObservedObject var controller: CanvasController
     let tool: Tool
+    @Environment(\.inkTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: NotaSpacing.m) {
+        VStack(alignment: .leading, spacing: InkSpacing.m) {
             Text(tool.title)
-                .font(NotaFont.headline)
-                .foregroundStyle(NotaColor.textPrimary)
-                .padding(.top, NotaSpacing.s)
+                .font(theme.headlineFont)
+                .foregroundStyle(theme.color(\.textPrimary))
+                .padding(.top, InkSpacing.s)
 
             switch tool {
             case .eraser:
@@ -217,18 +218,21 @@ struct ToolOptionsView: View {
                 Button {
                     controller.deleteSelection()
                 } label: {
-                    NotaButtonLabel("Delete Selection", icon: .trash, size: .compact)
-                        .frame(maxWidth: .infinity)
+                    HStack(spacing: InkSpacing.xs) {
+                        InkIconView(.delete, size: 16)
+                        Text("Delete Selection")
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.nota(.secondary, size: .compact))
+                .buttonStyle(InkSecondaryButtonStyle())
                 .disabled(!controller.hasSelection)
             case .pen, .pencil, .highlighter:
                 widthControls
             }
         }
-        .padding(.horizontal, NotaSpacing.l)
+        .padding(.horizontal, InkSpacing.l)
         .frame(width: 300)
-        .notaPopoverContent()
+        .inkPopoverContent()
     }
 
     @ViewBuilder
@@ -236,7 +240,7 @@ struct ToolOptionsView: View {
         let presets = CanvasController.widthPresets(for: tool)
         let range = CanvasController.widthRange(for: tool)
         let width = Binding(get: { settings.width }, set: { setWidth($0) })
-        HStack(spacing: NotaSpacing.s) {
+        HStack(spacing: InkSpacing.s) {
             ForEach(presets.indices, id: \.self) { i in
                 let preset = presets[i]
                 Button { setWidth(preset) } label: {
@@ -244,8 +248,8 @@ struct ToolOptionsView: View {
                         .fill(dotColor)
                         .frame(width: CGFloat(6 + 5 * i), height: CGFloat(6 + 5 * i))
                         .frame(maxWidth: .infinity, minHeight: 36)
-                        .background(abs(settings.width - preset) < 0.05 ? NotaColor.bgInkTint : NotaColor.bgFill,
-                                    in: RoundedRectangle(cornerRadius: NotaRadius.control, style: .continuous))
+                        .background(abs(settings.width - preset) < 0.05 ? theme.color(\.surfaceSelected) : theme.color(\.surfaceFill),
+                                    in: RoundedRectangle(cornerRadius: InkMetrics.controlRadius, style: .continuous))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -253,8 +257,8 @@ struct ToolOptionsView: View {
                 .accessibilityAddTraits(abs(settings.width - preset) < 0.05 ? .isSelected : [])
             }
         }
-        NotaSliderRow("Width", value: width, in: range,
-                      valueText: settings.width.formatted(.number.precision(.fractionLength(1))) + " pt")
+        InkSliderRow("Width", value: width, in: range,
+                     valueText: settings.width.formatted(.number.precision(.fractionLength(1))) + " pt")
     }
 
     private var settings: CanvasController.ToolSettings {
@@ -268,8 +272,8 @@ struct ToolOptionsView: View {
     }
 
     private var dotColor: Color {
-        guard tool.usesInk else { return NotaColor.textSecondary }
-        let inks = CanvasController.inks(for: tool)
+        guard tool.usesInk else { return theme.color(\.textSecondary) }
+        let inks = theme.inks(for: tool)
         return inks[min(max(settings.colorIndex, 0), inks.count - 1)].color
     }
 }
@@ -277,47 +281,48 @@ struct ToolOptionsView: View {
 /// Pressure response, tilt toggle and HUD toggle.
 struct CanvasSettingsView: View {
     @ObservedObject var controller: CanvasController
+    @Environment(\.inkTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: NotaSpacing.l) {
+        VStack(alignment: .leading, spacing: InkSpacing.l) {
             Text("Pressure & Tilt")
-                .font(NotaFont.headline)
-                .foregroundStyle(NotaColor.textPrimary)
-                .padding(.top, NotaSpacing.s)
+                .font(theme.headlineFont)
+                .foregroundStyle(theme.color(\.textPrimary))
+                .padding(.top, InkSpacing.s)
 
-            NotaSliderRow("Minimum width", value: $controller.minWidthRatio, in: 0.02 ... 1,
-                          valueText: "\(Int(controller.minWidthRatio * 100))% of max")
+            InkSliderRow("Minimum width", value: $controller.minWidthRatio, in: 0.02 ... 1,
+                         valueText: "\(Int(controller.minWidthRatio * 100))% of max")
 
-            VStack(alignment: .leading, spacing: NotaSpacing.xxs) {
-                NotaSliderRow("Response curve", value: $controller.pressureGamma, in: 0.25 ... 3,
-                              valueText: String(format: "γ = %.2f", controller.pressureGamma))
+            VStack(alignment: .leading, spacing: InkSpacing.xxs) {
+                InkSliderRow("Response curve", value: $controller.pressureGamma, in: 0.25 ... 3,
+                             valueText: String(format: "γ = %.2f", controller.pressureGamma))
                 CurvePreview(gamma: controller.pressureGamma, minRatio: controller.minWidthRatio)
                     .frame(height: 80)
                 Text("γ < 1 boosts light pressure, γ > 1 needs a firmer press.")
-                    .font(NotaFont.footnote)
-                    .foregroundStyle(NotaColor.textSecondary)
+                    .font(theme.footnoteFont)
+                    .foregroundStyle(theme.color(\.textSecondary))
             }
 
             Toggle("Tilt shading (wider + lighter when tilted)", isOn: $controller.tiltEnabled)
             Toggle("Debug HUD", isOn: $controller.hudVisible)
 
             #if targetEnvironment(simulator)
-                VStack(alignment: .leading, spacing: NotaSpacing.xxs) {
-                    NotaSliderRow("Simulated altitude", value: $controller.simulatedAltitudeDegrees, in: 5 ... 90,
-                                  valueText: "\(Int(controller.simulatedAltitudeDegrees))°")
+                VStack(alignment: .leading, spacing: InkSpacing.xxs) {
+                    InkSliderRow("Simulated altitude", value: $controller.simulatedAltitudeDegrees, in: 5 ... 90,
+                                 valueText: "\(Int(controller.simulatedAltitudeDegrees))°")
                     Text("Simulator only. Lower it to try tilt shading without a Pencil.")
-                        .font(NotaFont.footnote)
-                        .foregroundStyle(NotaColor.textSecondary)
+                        .font(theme.footnoteFont)
+                        .foregroundStyle(theme.color(\.textSecondary))
                 }
             #endif
         }
-        .font(NotaFont.subheadline)
-        .foregroundStyle(NotaColor.textPrimary)
-        .tint(NotaColor.accentInk)
-        .padding(.horizontal, NotaSpacing.xl)
-        .padding(.bottom, NotaSpacing.s)
+        .font(theme.bodyFont)
+        .foregroundStyle(theme.color(\.textPrimary))
+        .tint(theme.color(\.accent))
+        .padding(.horizontal, InkSpacing.xl)
+        .padding(.bottom, InkSpacing.s)
         .frame(width: 340)
-        .notaPopoverContent()
+        .inkPopoverContent()
     }
 }
 
@@ -325,12 +330,13 @@ struct CanvasSettingsView: View {
 private struct CurvePreview: View {
     let gamma: Double
     let minRatio: Double
+    @Environment(\.inkTheme) private var theme
 
     var body: some View {
         Canvas { ctx, size in
             var frame = Path()
             frame.addRect(CGRect(origin: .zero, size: size))
-            ctx.stroke(frame, with: .color(NotaColor.borderSeparator))
+            ctx.stroke(frame, with: .color(theme.color(\.separator)))
             var curve = Path()
             for i in 0 ... 60 {
                 let x = Double(i) / 60
@@ -342,7 +348,7 @@ private struct CurvePreview: View {
                     curve.addLine(to: p)
                 }
             }
-            ctx.stroke(curve, with: .color(NotaColor.accentInk), lineWidth: 2)
+            ctx.stroke(curve, with: .color(theme.color(\.accent)), lineWidth: 2)
         }
     }
 }
@@ -356,18 +362,18 @@ struct QuickPaletteView: View {
         ZStack {
             Color.black.opacity(0.001) // tap anywhere to dismiss
                 .onTapGesture { controller.quickPaletteLocation = nil }
-            HStack(spacing: NotaSpacing.xxxs) {
+            HStack(spacing: InkSpacing.xxxs) {
                 ForEach(Tool.allCases) { tool in
                     ToolButton(tool: tool, selected: controller.tool == tool) {
                         controller.select(tool)
                         controller.quickPaletteLocation = nil
                     }
                 }
-                NotaBarDivider()
+                InkBarDivider()
                 InkRow(controller: controller, axis: .horizontal) { controller.quickPaletteLocation = nil }
             }
-            .padding(NotaSpacing.xxs)
-            .notaFloatingBar()
+            .padding(InkSpacing.xxs)
+            .inkFloatingBar()
             .position(x: location.x, y: max(40, location.y - 60))
         }
     }

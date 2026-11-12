@@ -9,7 +9,7 @@ An iPad note-taking app. The **Library** organises notebooks into smart collecti
 | Platform | iPadOS 17.5+, iPad only |
 | Language | Swift 5 mode, SwiftUI + SwiftData |
 | Bundle ID | `com.bernard.nota` |
-| Dependencies | `InkKit` and `NotaUI` (local packages in `Packages/`), no third-party dependencies |
+| Dependencies | Local packages in `Packages/` (see below), no third-party dependencies |
 | Tested on | iPad Pro 11-inch and 13-inch (M5) simulators only; not yet run on a physical iPad |
 
 ## Build & run
@@ -25,19 +25,37 @@ Or open `Nota.xcodeproj`, pick an iPad simulator and Run. On first launch the li
 ```
 Nota/
 ├── Nota.xcodeproj
-├── Nota/                     App target (file-system-synchronised group)
-│   ├── NotaApp.swift         Entry point, SwiftData container, InkStore
+├── Nota/                     App target: composition, navigation and scenes only
+│   ├── NotaApp.swift         Entry point, SwiftData container, stores
 │   ├── LibraryView.swift     NavigationSplitView root
 │   ├── SidebarView.swift     Smart collections + folders
 │   ├── NotesBrowser.swift    Filter chips, grid, search, menus
 │   ├── NoteCard.swift        Card + PaperThumbnail
-│   ├── NoteEditorView.swift  Hosts InkCanvasEditor
-│   ├── InkStore.swift        Per-note CanvasDocument cache
-│   ├── Models.swift          Note, Folder, enums
-│   └── SampleData.swift      First-launch seed
-├── Packages/InkKit/          Drawing engine (Swift package)
-└── Packages/NotaUI/          Design system: tokens, icons, shared controls (Swift package)
+│   ├── NewNoteSheet.swift    Paper and page size for a new note
+│   ├── NoteEditorView.swift  Hosts InkCanvasEditor, saves the note
+│   └── Theme/                InkTheme.nota, model colours → NotaUI inks
+└── Packages/
+    ├── InkKit/               Drawing engine: input, brushes, rendering, pages, editor view
+    ├── NotaCore/             Domain: Note, Folder, DocumentStore, note package + manifest, sample data
+    ├── NotaDocuments/        Cover thumbnails and paper templates (PDF and import/export later)
+    └── NotaUI/               Design system: tokens, icons, shared controls
 ```
+
+### Dependency rule
+
+```
+InkKit      NotaUI          ← depend on nothing of ours
+   ↑           ↑
+NotaCore       │            ← depends on InkKit only
+   ↑           │
+NotaDocuments ─┘            ← feature packages: NotaCore (+ InkKit, NotaUI), never each other
+   ↑
+Nota (app)                  ← the only place that sees everything
+```
+
+Each package's `Package.swift` lists exactly these dependencies, so breaking the rule is a build error, and CI runs `scripts/check-dependency-rule.sh` to catch imports that would only compile inside the app build. InkKit's editor is themed with `InkTheme` rather than importing NotaUI; the app supplies `InkTheme.nota`. More feature packages from the architecture doc (NotaAudio, NotaSync, NotaIntelligence, NotaAI, NotaHandwriting) are created when their first code lands.
+
+The InkCanvas prototype ([beanut/InkCanvas](https://github.com/beanut/InkCanvas)) is a thin demo app on this InkKit, referenced by local path: check it out next to this repository (`../Nota/Packages/InkKit`).
 
 ## Design system
 
@@ -60,10 +78,14 @@ InkCanvasEditor(notebook: notebook)
 - **Page size** – `PageSize` is in points (1/72 in) and defaults to Letter. Custom sizes can be given in inches, millimetres or points. Resizing a page keeps the ink where it is; ink past the new edge is hidden, not deleted.
 - **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page.
 
-Run the package tests on an iPad simulator:
+Run the package tests on an iPad simulator (InkKit and NotaCore have test targets):
 
 ```bash
 cd Packages/InkKit && xcodebuild test -scheme InkKit -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
+```
+
+```bash
+cd Packages/NotaCore && xcodebuild test -scheme NotaCore -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
 ```
 
 ## Known limitations
@@ -73,12 +95,10 @@ cd Packages/InkKit && xcodebuild test -scheme InkKit -destination 'platform=iOS 
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
 - No PDF import/viewer, sharing or sync yet.
-- InkKit is a copy of the InkCanvas sources, so engine fixes must be made in both places for now.
 
 ## Next steps
 
 1. Codable stroke serialisation and per-note persistence.
 2. Real thumbnails from the committed bitmap.
-3. Make InkCanvas depend on the InkKit package.
-4. PDF import and annotation, page thumbnails and drag-to-reorder.
-5. A test target for the app's models, filters and date labels (InkKit has one).
+3. PDF import and annotation, page thumbnails and drag-to-reorder.
+4. Tests for the library filters and date labels (NotaCore's tests cover the manifest and DocumentStore so far).

@@ -1,3 +1,5 @@
+import NotaCore
+import NotaDocuments
 import NotaUI
 import SwiftUI
 

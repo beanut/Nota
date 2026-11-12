@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		1A0000000000000000000010 /* InkKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000012 /* InkKit */; };
 		1A0000000000000000000013 /* NotaUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000015 /* NotaUI */; };
+		1A0000000000000000000016 /* NotaCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1A0000000000000000000018 /* NotaCore */; };
+		1A0000000000000000000019 /* NotaDocuments in Frameworks */ = {isa = PBXBuildFile; productRef = 1A000000000000000000001B /* NotaDocuments */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +32,8 @@
 			files = (
 				1A0000000000000000000010 /* InkKit in Frameworks */,
 				1A0000000000000000000013 /* NotaUI in Frameworks */,
+				1A0000000000000000000016 /* NotaCore in Frameworks */,
+				1A0000000000000000000019 /* NotaDocuments in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,6 +78,8 @@
 			packageProductDependencies = (
 				1A0000000000000000000012 /* InkKit */,
 				1A0000000000000000000015 /* NotaUI */,
+				1A0000000000000000000018 /* NotaCore */,
+				1A000000000000000000001B /* NotaDocuments */,
 			);
 			productName = Nota;
 			productReference = 1A0000000000000000000003 /* Nota.app */;
@@ -106,6 +112,8 @@
 			packageReferences = (
 				1A0000000000000000000011 /* XCLocalSwiftPackageReference "Packages/InkKit" */,
 				1A0000000000000000000014 /* XCLocalSwiftPackageReference "Packages/NotaUI" */,
+				1A0000000000000000000017 /* XCLocalSwiftPackageReference "Packages/NotaCore" */,
+				1A000000000000000000001A /* XCLocalSwiftPackageReference "Packages/NotaDocuments" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1A0000000000000000000006 /* Products */;
@@ -193,10 +201,10 @@
 		1A000000000000000000000E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7CP492XM5W;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Nota;
@@ -224,10 +232,10 @@
 		1A000000000000000000000F /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7CP492XM5W;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Nota;
@@ -284,6 +292,14 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/NotaUI;
 		};
+		1A0000000000000000000017 /* XCLocalSwiftPackageReference "Packages/NotaCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/NotaCore;
+		};
+		1A000000000000000000001A /* XCLocalSwiftPackageReference "Packages/NotaDocuments" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/NotaDocuments;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -294,6 +310,14 @@
 		1A0000000000000000000015 /* NotaUI */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = NotaUI;
+		};
+		1A0000000000000000000018 /* NotaCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = NotaCore;
+		};
+		1A000000000000000000001B /* NotaDocuments */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = NotaDocuments;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

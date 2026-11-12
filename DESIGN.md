@@ -1,6 +1,6 @@
 # Nota design system
 
-Nota's visual language: tokens, icons and the shared controls built from them. It lives in the **NotaUI** package (`Packages/NotaUI`), which the app and InkKit both use. The source of truth is the Figma file [Nota · Components](https://www.figma.com/design/umhMoBpVlbSKRFE1aD1L6J/Nota?node-id=13-43).
+Nota's visual language: tokens, icons and the shared controls built from them. It lives in the **NotaUI** package (`Packages/NotaUI`). InkKit doesn't depend on NotaUI: its editor chrome takes colours, fonts, icons and inks from an `InkTheme`, and the app passes `InkTheme.nota` (`Nota/Theme/InkTheme+Nota.swift`), built from these tokens. The source of truth is the Figma file [Nota · Components](https://www.figma.com/design/umhMoBpVlbSKRFE1aD1L6J/Nota?node-id=13-43).
 
 **Rule:** Library and editor chrome use tokens only. No `Color(red:…)`, no `.secondary`/`.primary`, no system greys. If a value is missing, add a token here first.
 
@@ -103,6 +103,8 @@ To add one: draw it in Figma on the 20 pt grid, export the SVG with `stroke="#1A
 | `.notaFloatingBar(fill:)` | Page Bar | Rounded 22, hairline `borderCard`, floating shadow. |
 | `.notaPopoverContent()` | Tool Options | Raised background, popover on iPad and iPhone. |
 | `NotaEmptyState` | *(addition)* | Icon on an ink-tint disc, Title 3, one line of guidance, optional primary button. |
+
+InkKit draws the editor's own copies of the Icon Button, Ink Swatch, Divider, Slider Row, floating bar and popover surface (`InkKit/InkChrome.swift`) at the same sizes, coloured by its `InkTheme`. Change a token here and the editor follows; change a size or shape and update `InkChrome.swift` to match.
 
 App-only: `SidebarRow` (Figma Sidebar Row: 44 pt, selected = ink tint), `NoteCard` + `PaperThumbnail` (Figma Note Card and Paper, Letter ratio).
 

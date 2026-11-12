@@ -3,6 +3,8 @@ import PackageDescription
 
 /// Nota's design system: colour, type, spacing, radius and elevation tokens, the icon set and the shared
 /// controls built from them. See DESIGN.md at the repository root.
+///
+/// Dependency rule: NotaUI depends on nothing of ours.
 let package = Package(
     name: "NotaUI",
     platforms: [.iOS("17.5")],

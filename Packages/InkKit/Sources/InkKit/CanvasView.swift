@@ -1,4 +1,3 @@
-import NotaUI
 import SwiftUI
 import UIKit
 
@@ -96,9 +95,11 @@ enum PageSwipe: Equatable {
 ///  2. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
 final class CanvasView: UIView {
-    static let paperColor = NotaUIColor.paperSurface
-    /// The surface around the page.
-    static let deskColor = NotaUIColor.bgDesk
+    /// The page, the desk around it and the lasso's accent, from the editor's `InkTheme` (see `apply(_:)`).
+    private var paperColor = InkTheme.standard.paper
+    private var deskColor = InkTheme.standard.desk
+    private var accentColor = InkTheme.standard.accent
+    private var shadowColor = InkTheme.standard.shadow
 
     let document: CanvasDocument
     weak var controller: CanvasController?
@@ -206,11 +207,11 @@ final class CanvasView: UIView {
     init(frame: CGRect, document: CanvasDocument) {
         self.document = document
         super.init(frame: frame)
-        backgroundColor = Self.deskColor
+        backgroundColor = deskColor
         isMultipleTouchEnabled = true
 
-        pageLayer.backgroundColor = Self.paperColor.cgColor
-        pageLayer.shadowColor = NotaUIColor.shadow.cgColor
+        pageLayer.backgroundColor = paperColor.cgColor
+        pageLayer.shadowColor = shadowColor.cgColor
         pageLayer.shadowOpacity = 0.18
         pageLayer.shadowRadius = 6
         pageLayer.shadowOffset = CGSize(width: 0, height: 2)
@@ -224,7 +225,7 @@ final class CanvasView: UIView {
         committedLayer.anchorPoint = .zero
         inkClipView.layer.addSublayer(committedLayer)
 
-        liveView.paperColor = Self.paperColor.cgColor
+        liveView.paperColor = paperColor.cgColor
         liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
         inkClipView.addSubview(liveView)
 
@@ -261,6 +262,23 @@ final class CanvasView: UIView {
         super.didMoveToWindow()
         guard window != nil else { return }
         DispatchQueue.main.async { [weak self] in _ = self?.becomeFirstResponder() }
+    }
+
+    /// Takes the page, desk, shadow and lasso colours from `theme`.
+    func apply(_ theme: InkTheme) {
+        // Called on every SwiftUI update; the theme rarely changes.
+        guard theme.paper != paperColor || theme.desk != deskColor || theme.accent != accentColor
+            || theme.shadow != shadowColor
+        else { return }
+        paperColor = theme.paper
+        deskColor = theme.desk
+        accentColor = theme.accent
+        shadowColor = theme.shadow
+        backgroundColor = deskColor
+        pageLayer.backgroundColor = paperColor.resolvedColor(with: traitCollection).cgColor
+        pageLayer.shadowColor = shadowColor.resolvedColor(with: traitCollection).cgColor
+        liveView.paperColor = paperColor.resolvedColor(with: traitCollection).cgColor
+        lassoOverlayView.setNeedsDisplay()
     }
 
     override func layoutSubviews() {
@@ -575,14 +593,14 @@ final class CanvasView: UIView {
         for stroke in pending.map(\.live) + (live.map { [$0] } ?? []) {
             entries.append(LiveInkView.Entry(
                 stroke: stroke,
-                previewFill: stroke.stroke.tool == .pixelEraser ? Self.paperColor.cgColor : nil
+                previewFill: stroke.stroke.tool == .pixelEraser ? paperColor.cgColor : nil
             ))
         }
         return entries
     }
 
     fileprivate func drawLassoOverlay(in ctx: CGContext) {
-        let accent = NotaUIColor.accentInk
+        let accent = accentColor
         if !selection.isEmpty, !selectionBounds.isNull {
             let r = viewTransform.toView(selectionBounds).insetBy(dx: -6, dy: -6)
             ctx.setFillColor(accent.withAlphaComponent(0.08).cgColor)
@@ -1682,10 +1700,12 @@ struct CanvasRepresentable: UIViewRepresentable {
     let telemetry: PencilTelemetry
     let document: CanvasDocument
 
-    func makeUIView(context _: Context) -> CanvasView {
+    func makeUIView(context: Context) -> CanvasView {
         let view = CanvasView(frame: .zero, document: document)
         view.controller = controller
         view.telemetry = telemetry
+        controller.theme = context.environment.inkTheme
+        view.apply(context.environment.inkTheme)
         controller.canvas = view
         // A new page: the tool palette's undo and selection state must describe this document.
         controller.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
@@ -1693,5 +1713,8 @@ struct CanvasRepresentable: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_: CanvasView, context _: Context) {}
+    func updateUIView(_ view: CanvasView, context: Context) {
+        controller.theme = context.environment.inkTheme
+        view.apply(context.environment.inkTheme)
+    }
 }

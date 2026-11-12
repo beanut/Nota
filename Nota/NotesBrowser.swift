@@ -1,4 +1,6 @@
 import InkKit
+import NotaCore
+import NotaDocuments
 import NotaUI
 import SwiftData
 import SwiftUI
@@ -32,7 +34,7 @@ struct NotesBrowser: View {
     @Binding var path: [Note]
 
     @Environment(\.modelContext) private var modelContext
-    @Environment(InkStore.self) private var inkStore
+    @Environment(DocumentStore.self) private var documents
     @Environment(ThumbnailStore.self) private var thumbnails
     @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
     @Query(sort: \Folder.sortIndex) private var folders: [Folder]
@@ -278,7 +280,7 @@ struct NotesBrowser: View {
                         isFavorite: section == .favorites,
                         folder: folder)
         modelContext.insert(note)
-        inkStore.create(note, size: size, paper: paper)
+        documents.create(note, size: size, paper: paper)
         try? modelContext.save()
         searchText = ""
         path.append(note)
@@ -286,8 +288,8 @@ struct NotesBrowser: View {
 
     /// The cover is rendered on its paper, so a note with ink gets a new cover.
     private func setPaper(_ paper: PaperStyle, of note: Note) {
-        inkStore.setPaper(paper, of: note)
-        if let notebook = inkStore.existingNotebook(for: note.id) {
+        documents.setPaper(paper, of: note)
+        if let notebook = documents.existingNotebook(for: note.id) {
             thumbnails.updateCover(of: note.id, page: notebook.pages[0].snapshot(), paper: paper)
         }
     }
@@ -299,14 +301,14 @@ struct NotesBrowser: View {
                         tint: note.tint,
                         kind: note.kind,
                         folder: note.folder)
-        inkStore.duplicate(note, as: copy)
+        documents.duplicate(note, as: copy)
         withAnimation { modelContext.insert(copy) }
     }
 
     private func purge(_ notes: [Note]) {
         withAnimation {
             for note in notes {
-                inkStore.discard(noteID: note.id)
+                documents.discard(noteID: note.id)
                 thumbnails.remove(noteID: note.id)
                 modelContext.delete(note)
             }

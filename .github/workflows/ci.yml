@@ -26,6 +26,9 @@ jobs:
       - name: SwiftLint
         run: swiftlint lint --strict --config .swiftlint.yml
 
+      - name: Package dependency rule
+        run: scripts/check-dependency-rule.sh
+
   build-and-test:
     name: Build & Test
     runs-on: macos-15
@@ -50,8 +53,7 @@ jobs:
         with:
           path: |
             ~/Library/Developer/Xcode/DerivedData
-            Packages/InkKit/.build
-          key: deriv-${{ runner.os }}-${{ hashFiles('Nota.xcodeproj/project.pbxproj', 'Packages/InkKit/Package.swift', 'Packages/InkKit/Package.resolved', 'Packages/NotaUI/Package.swift') }}
+          key: deriv-${{ runner.os }}-${{ hashFiles('Nota.xcodeproj/project.pbxproj', 'Packages/*/Package.swift') }}
           restore-keys: |
             deriv-${{ runner.os }}-
 
@@ -64,11 +66,12 @@ jobs:
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO
 
-      - name: Test InkKit package on iPad simulator
-        working-directory: Packages/InkKit
+      - name: Test InkKit and NotaCore packages on iPad simulator
         run: |
-          xcodebuild test \
-            -scheme InkKit \
-            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" \
-            -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO
+          for package in InkKit NotaCore; do
+            (cd "Packages/$package" && xcodebuild test \
+              -scheme "$package" \
+              -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" \
+              -skipPackagePluginValidation \
+              CODE_SIGNING_ALLOWED=NO) || exit 1
+          done
