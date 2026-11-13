@@ -5,29 +5,6 @@ import NotaUI
 import SwiftData
 import SwiftUI
 
-enum LibraryFilter: String, CaseIterable, Identifiable {
-    case recent, notebooks, pdfs
-    var id: String {
-        rawValue
-    }
-
-    var title: String {
-        switch self {
-        case .recent: "Recent"
-        case .notebooks: "Notebooks"
-        case .pdfs: "PDFs"
-        }
-    }
-
-    func contains(_ note: Note) -> Bool {
-        switch self {
-        case .recent: true
-        case .notebooks: note.kind == .notebook
-        case .pdfs: note.kind == .pdf
-        }
-    }
-}
-
 /// The detail column: filter chips, a grid of note cards, search and the New Note button.
 struct NotesBrowser: View {
     let section: LibrarySection
@@ -59,12 +36,7 @@ struct NotesBrowser: View {
     }
 
     private var visibleNotes: [Note] {
-        let query = searchText.trimmingCharacters(in: .whitespaces)
-        return allNotes.filter { note in
-            section.contains(note)
-                && filter.contains(note)
-                && (query.isEmpty || note.title.localizedStandardContains(query))
-        }
+        Library.visibleNotes(allNotes, in: section, filter: filter, search: searchText)
     }
 
     var body: some View {
@@ -159,7 +131,7 @@ struct NotesBrowser: View {
     /// Why the grid is empty, from the most specific reason to the least.
     @ViewBuilder
     private var emptyState: some View {
-        let inSection = allNotes.contains(where: section.contains)
+        let inSection = allNotes.contains { section.contains($0) }
         if !searchText.isEmpty {
             NotaEmptyState(.search, title: "No Results", message: "No notes match “\(searchText)”.")
         } else if inSection, filter == .pdfs {
@@ -251,7 +223,7 @@ struct NotesBrowser: View {
         }
         Divider()
         Button(role: .destructive) {
-            withAnimation { note.deletedAt = .now }
+            withAnimation { note.moveToRecentlyDeleted() }
         } label: {
             Label("Delete", systemImage: "trash")
         }
@@ -260,7 +232,7 @@ struct NotesBrowser: View {
     @ViewBuilder
     private func deletedNoteMenu(for note: Note) -> some View {
         Button {
-            withAnimation { note.deletedAt = nil }
+            withAnimation { note.recover() }
         } label: {
             Label("Recover", systemImage: "arrow.uturn.backward")
         }

@@ -142,20 +142,25 @@ public final class Note {
 public extension Date {
     /// "Today", "Yesterday", a weekday within the last week, otherwise "Nov 2" (plus the year if it isn't this one).
     var libraryLabel: String {
-        let calendar = Calendar.current
-        if calendar.isDateInToday(self) {
+        libraryLabel(relativeTo: .now)
+    }
+
+    /// `libraryLabel` as seen at `now`, in `calendar` (whose time zone decides where days begin) and `locale`.
+    func libraryLabel(relativeTo now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+        if calendar.isDate(self, inSameDayAs: now) {
             return String(localized: "Today")
         }
-        if calendar.isDateInYesterday(self) {
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(self, inSameDayAs: yesterday) {
             return String(localized: "Yesterday")
         }
-        let startOfToday = calendar.startOfDay(for: .now)
+        let style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone)
+        let startOfToday = calendar.startOfDay(for: now)
         if let weekAgo = calendar.date(byAdding: .day, value: -6, to: startOfToday), self >= weekAgo {
-            return formatted(.dateTime.weekday(.wide))
+            return formatted(style.weekday(.wide))
         }
-        if calendar.isDate(self, equalTo: .now, toGranularity: .year) {
-            return formatted(.dateTime.month(.abbreviated).day())
+        if calendar.isDate(self, equalTo: now, toGranularity: .year) {
+            return formatted(style.month(.abbreviated).day())
         }
-        return formatted(.dateTime.month(.abbreviated).day().year())
+        return formatted(style.month(.abbreviated).day().year())
     }
 }

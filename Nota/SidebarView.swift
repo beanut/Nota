@@ -21,7 +21,7 @@ struct SidebarView: View {
             Section {
                 ForEach(LibrarySection.smart, id: \.self) { section in
                     row(for: section, title: section.title,
-                        count: section == .all ? notes.filter { !$0.isDeleted }.count : nil) {
+                        count: section == .all ? Library.activeCount(of: notes) : nil) {
                             NotaIconView(section.icon).foregroundStyle(NotaColor.textInk)
                         }
                 }
@@ -134,7 +134,7 @@ struct SidebarView: View {
         let name = folderName.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return }
         let color = FolderColor.allCases[folders.count % FolderColor.allCases.count]
-        let folder = Folder(name: name, color: color, sortIndex: (folders.map(\.sortIndex).max() ?? -1) + 1)
+        let folder = Folder(name: name, color: color, sortIndex: Library.nextSortIndex(after: folders))
         modelContext.insert(folder)
         try? modelContext.save()
         selection = .folder(folder.persistentModelID)
@@ -148,11 +148,7 @@ struct SidebarView: View {
     }
 
     private func moveFolders(from source: IndexSet, to destination: Int) {
-        var reordered = folders
-        reordered.move(fromOffsets: source, toOffset: destination)
-        for (index, folder) in reordered.enumerated() {
-            folder.sortIndex = index
-        }
+        Library.moveFolders(folders, from: source, to: destination)
     }
 }
 
