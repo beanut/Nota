@@ -210,7 +210,8 @@ struct PageTemplateTests {
         let snapshots = [first.snapshot(), second.snapshot()]
         let data = try #require(PageRenderer.pdf(of: snapshots, title: "Test") { .standard($0) })
 
-        let document = try #require(try CGPDFDocument(#require(CGDataProvider(data: data as CFData))))
+        let provider = try #require(CGDataProvider(data: data as CFData))
+        let document = try #require(CGPDFDocument(provider))
         #expect(document.numberOfPages == 2)
         let page1 = try #require(document.page(at: 1)), page2 = try #require(document.page(at: 2))
         #expect(page1.getBoxRect(.mediaBox).size == PageSize.letter.size)
