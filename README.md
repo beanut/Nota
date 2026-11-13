@@ -27,7 +27,7 @@ Nota/
 ├── Nota.xcodeproj
 ├── Nota/                     App target: composition, navigation and scenes only
 │   ├── NotaApp.swift         Entry point, SwiftData container, stores
-│   ├── LibraryView.swift     NavigationSplitView root
+│   ├── LibraryView.swift     NavigationSplitView root, sidebar icons
 │   ├── SidebarView.swift     Smart collections + folders
 │   ├── NotesBrowser.swift    Filter chips, grid, search, menus
 │   ├── NoteCard.swift        Card + PaperThumbnail
@@ -36,7 +36,7 @@ Nota/
 │   └── Theme/                InkTheme.nota, model colours → NotaUI inks
 └── Packages/
     ├── InkKit/               Drawing engine: input, brushes, rendering, pages, editor view
-    ├── NotaCore/             Domain: Note, Folder, DocumentStore, note package + manifest, sample data
+    ├── NotaCore/             Domain: Note, Folder, library filters and sorting, DocumentStore, note package + manifest, sample data
     ├── NotaDocuments/        Cover thumbnails and paper templates (PDF and import/export later)
     └── NotaUI/               Design system: tokens, icons, shared controls
 ```
@@ -78,7 +78,7 @@ InkCanvasEditor(notebook: notebook)
 - **Page size** – `PageSize` is in points (1/72 in) and defaults to Letter. Custom sizes can be given in inches, millimetres or points. Resizing a page keeps the ink where it is; ink past the new edge is hidden, not deleted.
 - **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page.
 
-Run the package tests on an iPad simulator (InkKit and NotaCore have test targets):
+Run the package tests on an iPad simulator (InkKit and NotaCore have test targets). The library's rules (smart collections, filter chips, search, sorting, Recently Deleted, folder order and `Date.libraryLabel`) live in NotaCore's `Library.swift` rather than the app's views, so NotaCore's tests cover them against an in-memory SwiftData store:
 
 ```bash
 cd Packages/InkKit && xcodebuild test -scheme InkKit -skip-testing:InkKitBenchmarks -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
@@ -103,4 +103,3 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 1. Codable stroke serialisation and per-note persistence.
 2. Real thumbnails from the committed bitmap.
 3. PDF import and annotation, page thumbnails and drag-to-reorder.
-4. Tests for the library filters and date labels (NotaCore's tests cover the manifest and DocumentStore so far).

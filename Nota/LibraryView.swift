@@ -4,24 +4,8 @@ import NotaUI
 import SwiftData
 import SwiftUI
 
-/// What the sidebar has selected.
-enum LibrarySection: Hashable {
-    case all, recents, favorites, shared, deleted
-    case folder(PersistentIdentifier)
-
-    static let smart: [LibrarySection] = [.all, .recents, .favorites, .shared, .deleted]
-
-    var title: String {
-        switch self {
-        case .all: "All Notes"
-        case .recents: "Recents"
-        case .favorites: "Favorites"
-        case .shared: "Shared"
-        case .deleted: "Recently Deleted"
-        case .folder: "Folder"
-        }
-    }
-
+/// The sidebar icon for each section. Which notes a section holds is decided in NotaCore (`LibrarySection`).
+extension LibrarySection {
     var icon: NotaIcon {
         switch self {
         case .all: .grid
@@ -30,22 +14,6 @@ enum LibrarySection: Hashable {
         case .shared: .share
         case .deleted: .trash
         case .folder: .folder
-        }
-    }
-
-    /// Whether a note belongs in this section. Recently Deleted shows only deleted notes; every other
-    /// section hides them.
-    func contains(_ note: Note) -> Bool {
-        switch self {
-        case .deleted: return note.isDeleted
-        case _ where note.isDeleted: return false
-        case .all: return true
-        case .recents:
-            let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .distantPast
-            return note.modifiedAt >= cutoff
-        case .favorites: return note.isFavorite
-        case .shared: return note.isShared
-        case let .folder(id): return note.folder?.persistentModelID == id
         }
     }
 }
