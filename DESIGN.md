@@ -83,9 +83,9 @@ The Figma styles use Inter at exactly the iOS Dynamic Type sizes, so the app use
 
 ## Icons
 
-`NotaIcon` holds the 40 Figma line icons (`icon/*`) as template SVGs in `NotaUI/Resources/Icons.xcassets`: 20 pt grid, 1.75 pt round stroke, recoloured with `foregroundStyle`. Use `NotaIconView(.pen)` (or `size:` for 12–18 pt uses). Nota's own chrome uses these; menus, alerts and sheets keep SF Symbols.
+`NotaIcon` holds the 41 line icons (`icon/*`) as template SVGs in `NotaUI/Resources/Icons.xcassets`: 20 pt grid, 1.75 pt round stroke, recoloured with `foregroundStyle`. Use `NotaIconView(.pen)` (or `size:` for 12–18 pt uses). Nota's own chrome uses these; menus, alerts and sheets keep SF Symbols.
 
-Tools: pen, pencil, highlighter, eraser, lasso, text, shapes, photo. Editor: undo, redo, fit, grip, pressure, gauge. Library: grid, star, clock, trash, folder, plus, minus, search, filter, list, chevrons, xmark, ellipsis, share, arrow.up. Audio and AI: sparkles, mic, waveform, play, pause, stop, flashcards, quiz, calc.
+Tools: pen, pencil, highlighter, eraser, lasso, text, shapes, photo. Editor: undo, redo, fit, grip, pressure, gauge, return (the zoom window's new line; added in code, not yet in Figma). Library: grid, star, clock, trash, folder, plus, minus, search, filter, list, chevrons, xmark, ellipsis, share, arrow.up. Audio and AI: sparkles, mic, waveform, play, pause, stop, flashcards, quiz, calc.
 
 To add one: draw it in Figma on the 20 pt grid, export the SVG with `stroke="#1A1A1F"`, add an imageset with `template-rendering-intent: template`, and add a case to `NotaIcon`.
 

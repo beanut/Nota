@@ -52,6 +52,26 @@ final class CanvasController: ObservableObject {
     /// Top: a 24 pt gap under the navigation bar. Bottom: the 44 pt page bar, its 8 pt inset and a gap.
     static let defaultPageMargins = UIEdgeInsets(top: 24, left: 24, bottom: 76, right: 24)
 
+    // Zoom window
+
+    /// Shows the zoom window: a magnified writing panel at the bottom of the canvas for the box on the page.
+    @Published var zoomWindowVisible = false {
+        didSet {
+            if zoomWindowVisible != oldValue {
+                canvas?.zoomWindowVisibilityDidChange()
+            }
+        }
+    }
+
+    /// The zoom window's controls, in canvas-view (= full-screen) coordinates, while it's shown.
+    @Published private(set) var zoomControlsFrame: CGRect?
+    /// Whether the zoom box can move back (it's not at the start of the first line).
+    @Published private(set) var zoomCanGoBack = false
+    /// The zoom box in page points, kept so the next page opens with the box where it was.
+    var zoomBox: CGRect?
+    /// The lines on a page, for the zoom window to follow. Set by the editor; nil uses `WritingLines.standard`.
+    var writingLines: ((CanvasDocument) -> WritingLines?)?
+
     weak var canvas: CanvasView?
     /// The editor's theme; its ink presets colour new strokes. Set by the canvas from the environment.
     var theme = InkTheme.standard
@@ -158,6 +178,27 @@ final class CanvasController: ObservableObject {
 
     func deleteSelection() {
         canvas?.deleteSelection()
+    }
+
+    func zoomWindowBack() {
+        canvas?.moveZoomWindow(.back)
+    }
+
+    func zoomWindowAdvance() {
+        canvas?.moveZoomWindow(.advance)
+    }
+
+    func zoomWindowNewLine() {
+        canvas?.moveZoomWindow(.newLine)
+    }
+
+    func zoomWindowDidChange(controlsFrame: CGRect?, canGoBack: Bool) {
+        if zoomControlsFrame != controlsFrame {
+            zoomControlsFrame = controlsFrame
+        }
+        if zoomCanGoBack != canGoBack {
+            zoomCanGoBack = canGoBack
+        }
     }
 
     func selectionDidChange(_ has: Bool) {
