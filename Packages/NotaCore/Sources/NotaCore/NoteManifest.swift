@@ -2,22 +2,49 @@ import Foundation
 import InkKit
 
 /// What a note package records about its pages, kept as `manifest.json` in the note's `.nota` directory:
-/// the page order and each page's size and paper, the size new pages get, and when the note last changed.
+/// the page order and each page's size and template, the size new pages get, and when the note last changed.
+///
+/// Format 2 replaced each page's `paper` name with a full `template`; format 1 manifests are still read.
+/// Custom template backgrounds are stored beside it in `templates/` (see `NotePackage.templateURL`).
 ///
 /// The manifest is the source of truth for a note's page count and modification date; the SwiftData
 /// `Note` mirrors them for the library. Ink is not stored yet (NOT-6 adds page files alongside it).
 public struct NoteManifest: Codable, Equatable, Sendable {
-    public static let currentFormatVersion = 1
+    public static let currentFormatVersion = 2
 
     public struct Page: Codable, Equatable, Sendable {
         public var id: UUID
         public var size: PageSize
-        public var paper: PaperStyle
+        public var template: PageTemplate
 
-        public init(id: UUID, size: PageSize, paper: PaperStyle) {
+        public init(id: UUID, size: PageSize, template: PageTemplate) {
             self.id = id
             self.size = size
-            self.paper = paper
+            self.template = template
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id, size, template, paper
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(UUID.self, forKey: .id)
+            size = try c.decode(PageSize.self, forKey: .size)
+            if let template = try c.decodeIfPresent(PageTemplate.self, forKey: .template) {
+                self.template = template
+            } else {
+                // Format 1: a paper name.
+                let paper = try? c.decodeIfPresent(String.self, forKey: .paper)
+                template = paper.flatMap(LegacyPaperStyle.init(rawValue:))?.template ?? .noteDefault
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(id, forKey: .id)
+            try c.encode(size, forKey: .size)
+            try c.encode(template, forKey: .template)
         }
     }
 
@@ -29,9 +56,9 @@ public struct NoteManifest: Codable, Equatable, Sendable {
     public var createdAt: Date
     public var modifiedAt: Date
 
-    /// A manifest of `pageCount` blank pages (at least one) of `size` and `paper`.
-    public init(pageCount: Int = 1, size: PageSize, paper: PaperStyle, createdAt: Date = .now, modifiedAt: Date = .now) {
-        pages = (0 ..< max(1, pageCount)).map { _ in Page(id: UUID(), size: size, paper: paper) }
+    /// A manifest of `pageCount` blank pages (at least one) of `size` on `template`.
+    public init(pageCount: Int = 1, size: PageSize, template: PageTemplate, createdAt: Date = .now, modifiedAt: Date = .now) {
+        pages = (0 ..< max(1, pageCount)).map { _ in Page(id: UUID(), size: size, template: template) }
         defaultPageSize = size
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
@@ -41,15 +68,21 @@ public struct NoteManifest: Codable, Equatable, Sendable {
         pages.count
     }
 
-    /// The paper of the note's first page, which its cover is drawn on.
-    public var coverPaper: PaperStyle {
-        pages.first?.paper ?? .lined
+    /// The template of the note's first page, which its cover is drawn on.
+    public var coverTemplate: PageTemplate {
+        pages.first?.template ?? .noteDefault
+    }
+
+    /// Every custom background the pages use, once each.
+    public var backgrounds: [TemplateBackground] {
+        var seen = Set<UUID>()
+        return pages.compactMap(\.template.background).filter { seen.insert($0.id).inserted }
     }
 
     /// The same pages and sizes with fresh page IDs, for a duplicated note.
     public func duplicated(at date: Date = .now) -> NoteManifest {
         var copy = self
-        copy.pages = pages.map { Page(id: UUID(), size: $0.size, paper: $0.paper) }
+        copy.pages = pages.map { Page(id: UUID(), size: $0.size, template: $0.template) }
         copy.createdAt = date
         copy.modifiedAt = date
         return copy

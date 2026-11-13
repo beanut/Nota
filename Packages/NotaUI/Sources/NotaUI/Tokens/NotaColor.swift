@@ -51,6 +51,14 @@ public enum NotaColor {
 
     public static let paperSurface = Color(uiColor: NotaUIColor.paperSurface)
     public static let paperRule = Color(uiColor: NotaUIColor.paperRule)
+    public static let paperMargin = Color(uiColor: NotaUIColor.paperMargin)
+    public static let paperLabel = Color(uiColor: NotaUIColor.paperLabel)
+    public static let paperCreamSurface = Color(uiColor: NotaUIColor.paperCreamSurface)
+    public static let paperCreamRule = Color(uiColor: NotaUIColor.paperCreamRule)
+    public static let paperDarkSurface = Color(uiColor: NotaUIColor.paperDarkSurface)
+    public static let paperDarkRule = Color(uiColor: NotaUIColor.paperDarkRule)
+    public static let paperDarkMargin = Color(uiColor: NotaUIColor.paperDarkMargin)
+    public static let paperDarkLabel = Color(uiColor: NotaUIColor.paperDarkLabel)
 
     /// Shadow colour for every elevation (a cool near-black, never pure black).
     public static let shadow = Color(uiColor: NotaUIColor.shadow)
@@ -81,8 +89,18 @@ public enum NotaUIColor {
     public static let accentAI = UIColor(light: 0x7D3BED, dark: 0x9A63F5)
     public static let signalRecord = UIColor(light: 0xD92D30, dark: 0xFF5A5C)
 
+    /// Paper is the same in light and dark mode; these are page content, not chrome. White and cream
+    /// paper share the margin and label colours.
     public static let paperSurface = UIColor(hex: 0xFCFBF7)
     public static let paperRule = UIColor(hex: 0xE2E5EE)
+    public static let paperMargin = UIColor(hex: 0xEDB4B4)
+    public static let paperLabel = UIColor(hex: 0x9599A6)
+    public static let paperCreamSurface = UIColor(hex: 0xF8F2E2)
+    public static let paperCreamRule = UIColor(hex: 0xE3D9C1)
+    public static let paperDarkSurface = UIColor(hex: 0x24262A)
+    public static let paperDarkRule = UIColor(hex: 0x3C4048)
+    public static let paperDarkMargin = UIColor(hex: 0x6E4C55)
+    public static let paperDarkLabel = UIColor(hex: 0x7D838E)
 
     public static let shadow = UIColor(light: 0x1A1A33, dark: 0x000000)
     public static let inkOutline = UIColor { trait in

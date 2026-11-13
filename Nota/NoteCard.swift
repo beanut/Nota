@@ -1,3 +1,4 @@
+import InkKit
 import NotaCore
 import NotaDocuments
 import NotaUI
@@ -13,7 +14,7 @@ struct NoteCard: View {
         VStack(alignment: .leading, spacing: NotaSpacing.sm) {
             let shape = RoundedRectangle(cornerRadius: NotaRadius.paper, style: .continuous)
             // The memory cache first, so a card scrolled back into view shows its ink without a flash.
-            PaperThumbnail(paper: note.paper, cover: thumbnails.cachedImage(for: note.id) ?? loadedCover)
+            PaperThumbnail(template: note.template, cover: thumbnails.cachedImage(for: note.id) ?? loadedCover)
                 .aspectRatio(PaperThumbnail.aspectRatio, contentMode: .fit)
                 .clipShape(shape)
                 .overlay(alignment: .bottomTrailing) { badges }
@@ -65,7 +66,7 @@ struct NoteCard: View {
 /// Figma **Paper** in miniature: the note's cover page as rendered by `ThumbnailStore` (paper template and
 /// ink), or the bare template while the cover loads or when the note has no ink yet.
 struct PaperThumbnail: View {
-    let paper: PaperStyle
+    let template: PageTemplate
     var cover: UIImage?
 
     /// US Letter, as in Figma (190 × 246).
@@ -75,7 +76,7 @@ struct PaperThumbnail: View {
         ZStack(alignment: .top) {
             if let cover {
                 // Covers keep their page's proportions; a page that isn't Letter-shaped sits on plain paper.
-                NotaColor.paperSurface
+                Color(cgColor: PaperPalette.nota(template.paper).surface)
                 Image(uiImage: cover)
                     .resizable()
                     .interpolation(.high)
@@ -83,7 +84,7 @@ struct PaperThumbnail: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Canvas { context, size in
-                    context.withCGContext { PaperTemplate.draw(paper, in: $0, size: size) }
+                    context.withCGContext { PaperTemplate.draw(template, in: $0, size: size) }
                 }
             }
         }
@@ -93,8 +94,8 @@ struct PaperThumbnail: View {
 
 #Preview {
     HStack(spacing: 24) {
-        ForEach(PaperStyle.allCases) { paper in
-            PaperThumbnail(paper: paper)
+        ForEach(PageTemplate.Preset.allCases) { preset in
+            PaperThumbnail(template: preset.template)
                 .aspectRatio(PaperThumbnail.aspectRatio, contentMode: .fit)
                 .frame(width: 190)
         }

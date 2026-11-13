@@ -36,8 +36,7 @@ struct NoteEditorView: View {
                 save(notebook)
                 // The first page is the cover; skipped if it hasn't changed since its last render.
                 let cover = notebook.pages[0]
-                thumbnails.updateCover(of: note.id, page: cover.snapshot(),
-                                       paper: documents.paper(ofPage: cover.id, in: note))
+                thumbnails.updateCover(of: note.id, page: cover.snapshot())
             }
     }
 

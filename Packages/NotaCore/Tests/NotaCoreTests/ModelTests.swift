@@ -1,4 +1,5 @@
 import Foundation
+import InkKit
 @testable import NotaCore
 import SwiftData
 import Testing
@@ -10,7 +11,7 @@ struct NoteTests {
         let date = Clock.daysAgo(3)
         let note = Note(title: "Physics", modifiedAt: date)
         #expect(note.pageCount == 1)
-        #expect(note.paper == .lined)
+        #expect(note.template == .noteDefault)
         #expect(note.tint == .indigo)
         #expect(note.kind == .notebook)
         #expect(!note.isFavorite && !note.isShared && !note.isDeleted)
@@ -25,23 +26,33 @@ struct NoteTests {
 
     @Test func enumPropertiesWriteThroughToStoredNames() {
         let note = Note(title: "N")
-        note.paper = .grid
+        note.template = .preset(.cornell)
         note.tint = .rust
         note.kind = .pdf
-        #expect(note.paperName == "grid")
+        #expect(PageTemplate(encodedString: note.paperName) == .preset(.cornell))
         #expect(note.tintName == "rust")
         #expect(note.kindName == "pdf")
     }
 
     /// A value written by a newer build (or a typo in a migration) mustn't crash or blank the library.
     @Test func unknownStoredNamesFallBackToDefaults() {
-        let note = Note(title: "N", paper: .dotted, tint: .teal, kind: .pdf)
+        let note = Note(title: "N", template: .preset(.dots), tint: .teal, kind: .pdf)
         note.paperName = "hexagonal"
         note.tintName = "chartreuse"
         note.kindName = "video"
-        #expect(note.paper == .lined)
+        #expect(note.template == .noteDefault)
         #expect(note.tint == .indigo)
         #expect(note.kind == .notebook)
+    }
+
+    /// Stores from before templates (NOT-27) hold a paper name.
+    @Test func paperNamesFromBeforeTemplatesStillRead() {
+        let note = Note(title: "N")
+        for (name, preset) in [("plain", PageTemplate.Preset.blank), ("lined", .collegeRuled), ("dotted", .dots),
+                               ("grid", .smallGrid)] {
+            note.paperName = name
+            #expect(note.template == preset.template)
+        }
     }
 
     @Test func subtitlePluralisesPages() {
@@ -64,7 +75,14 @@ struct NoteTests {
 
     @Test func persistsThroughSwiftData() throws {
         let context = try makeContext()
-        let note = Note(title: "Kestrel", pageCount: 8, paper: .grid, tint: .violet, kind: .pdf, isShared: true)
+        let note = Note(
+            title: "Kestrel",
+            pageCount: 8,
+            template: PageTemplate.preset(.smallGrid).on(.dark),
+            tint: .violet,
+            kind: .pdf,
+            isShared: true
+        )
         note.moveToRecentlyDeleted(at: Clock.now)
         context.insert(note)
         try context.save()
@@ -72,7 +90,7 @@ struct NoteTests {
         let fetched = try #require(try context.fetch(FetchDescriptor<Note>()).first)
         #expect(fetched.title == "Kestrel")
         #expect(fetched.pageCount == 8)
-        #expect(fetched.paper == .grid)
+        #expect(fetched.template == PageTemplate.preset(.smallGrid).on(.dark))
         #expect(fetched.tint == .violet)
         #expect(fetched.kind == .pdf)
         #expect(fetched.isShared)
