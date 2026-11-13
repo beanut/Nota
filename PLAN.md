@@ -21,18 +21,17 @@ _Last updated: 2026-11-12._
 ## Current: M0 · Foundations
 
 Done: design system (NOT-15), real thumbnails (NOT-8), persisted page sizes (NOT-7), packages (NOT-9),
-CI (NOT-10), ink benchmarks and budgets (NOT-13).
+CI (NOT-10), ink benchmarks and budgets (NOT-13), library tests (NOT-11).
 
 Next, in order:
 
-1. [NOT-11](https://linear.app/nota-on-inkkit/issue/NOT-11) · Tests for the library's models, filters and date labels (in review).
-2. [NOT-5](https://linear.app/nota-on-inkkit/issue/NOT-5) · Ink file format v1: versioned binary stroke serialisation.
-3. [NOT-6](https://linear.app/nota-on-inkkit/issue/NOT-6) · Note packages on disk: `DocumentStore` with autosave replaces `InkStore`.
-4. [NOT-12](https://linear.app/nota-on-inkkit/issue/NOT-12) · Verify and tune on a physical iPad with Apple Pencil.
-5. [NOT-14](https://linear.app/nota-on-inkkit/issue/NOT-14) · Release pipeline: signing and automated TestFlight builds.
+1. [NOT-5](https://linear.app/nota-on-inkkit/issue/NOT-5) · Ink file format v1: versioned binary stroke serialisation.
+2. [NOT-6](https://linear.app/nota-on-inkkit/issue/NOT-6) · Note packages on disk: `DocumentStore` with autosave replaces `InkStore`.
+3. [NOT-12](https://linear.app/nota-on-inkkit/issue/NOT-12) · Verify and tune on a physical iPad with Apple Pencil.
+4. [NOT-14](https://linear.app/nota-on-inkkit/issue/NOT-14) · Release pipeline: signing and automated TestFlight builds.
+5. [NOT-85](https://linear.app/nota-on-inkkit/issue/NOT-85) · Decide the minimum iPadOS version and supported devices.
 
-Also open: [NOT-85](https://linear.app/nota-on-inkkit/issue/NOT-85) (minimum iPadOS and devices), and the
-editor redesign in progress outside the milestones,
+Also open: the editor redesign in progress outside the milestones,
 [NOT-86](https://linear.app/nota-on-inkkit/issue/NOT-86) and [NOT-87](https://linear.app/nota-on-inkkit/issue/NOT-87).
 
 After M0, M1 starts with the brush engine ([NOT-16](https://linear.app/nota-on-inkkit/issue/NOT-16)) and the

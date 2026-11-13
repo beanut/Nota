@@ -36,7 +36,8 @@ SwiftLint runs with `--strict`, so warnings fail CI.
 
 > CI is **temporarily manual-only** to save Actions minutes: both workflows only run on `workflow_dispatch`
 > (Actions tab › Run workflow, or `gh workflow run ci.yml --ref <branch>`). Until it's switched back on,
-> running the commands above locally is the check. Restore the commented-out triggers to re-enable it.
+> running the commands above locally is the check, and `main` doesn't require any checks to merge. To
+> re-enable: restore the commented-out triggers and re-add **Lint** and **Build & Test** as required checks.
 
 ## Architecture rules
 
