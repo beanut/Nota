@@ -54,24 +54,28 @@ struct LibraryView: View {
 
     var body: some View {
         let notes = openNotes
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(selection: selection)
-                .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 320)
-                // No sidebar button while a note is open: the editor's bar is for drawing.
-                .toolbar(removing: notes.isEmpty ? nil : .sidebarToggle)
-        } detail: {
+        Group {
             if notes.count == NoteWorkspace.capacity {
+                // At the root, not in the split view's detail column: there the two sides' toolbars would be
+                // merged into the column's one navigation bar.
                 NoteSplitView(notes: notes, workspace: $workspace)
             } else {
-                NavigationStack(path: path) {
-                    NotesBrowser(section: selection.wrappedValue ?? .all, path: path)
-                        .navigationDestination(for: Note.self) { note in
-                            NoteEditorView(note: note, workspace: $workspace)
-                        }
+                NavigationSplitView(columnVisibility: $columnVisibility) {
+                    SidebarView(selection: selection)
+                        .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 320)
+                        // No sidebar button while a note is open: the editor's bar is for drawing.
+                        .toolbar(removing: notes.isEmpty ? nil : .sidebarToggle)
+                } detail: {
+                    NavigationStack(path: path) {
+                        NotesBrowser(section: selection.wrappedValue ?? .all, path: path)
+                            .navigationDestination(for: Note.self) { note in
+                                NoteEditorView(note: note, workspace: $workspace)
+                            }
+                    }
                 }
+                .navigationSplitViewStyle(.balanced)
             }
         }
-        .navigationSplitViewStyle(.balanced)
         .focusedSceneValue(\.noteSceneActions, sceneActions(for: notes))
         .onChange(of: storedSection) { workspace.closeAll() }
         .onChange(of: notes.isEmpty, initial: true) { _, isEmpty in
