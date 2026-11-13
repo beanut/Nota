@@ -116,6 +116,9 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 - No PDF import/viewer, sharing or sync yet. A PDF-kind note opens beside a notebook like any other note, but shows the canvas until the PDF viewer lands. PDFs and images can be used as page templates (the PDF's first page), and `PageRenderer.pdf(of:)` exports pages as PDF, but the app has no export button yet.
 - A note open in two places shares its current page and undo history: turning the page or undoing in one turns or undoes it in the other.
 - The two notes in a split window always take half the width each.
+- Apple Pencil gestures, palm rejection, hover and scribble gestures (NOT-28) are tuned on the simulator
+  only; their thresholds need a real Pencil 2 / Pencil Pro (NOT-12). Barrel roll is shown while hovering
+  but doesn't steer a nib yet, since there are no chisel or fountain brushes before NOT-16.
 
 ## Next steps
 

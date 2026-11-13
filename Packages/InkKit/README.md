@@ -33,7 +33,10 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `TemplateView.swift` | The canvas layer that redraws the template at the current zoom, between the paper and the ink |
 | `TemplateMenu.swift` | The page bar's template pill: built-ins, paper colour, PDF or image, use for all pages |
 | `ViewTransform.swift` | Canvas → view mapping, zoom limits and page-swipe detection |
-| `CanvasView.swift` | `UIView` that handles raw touches, gestures, `UIPencilInteraction` and hover. Owns the page, the cached committed bitmap and the lasso overlay. Redraws from the document when another canvas on the same page changes it |
+| `CanvasView.swift` | `UIView` that handles raw touches, gestures, palm rejection, finger ink, `UIPencilInteraction`, hover and the scribble gestures. Owns the page, the cached committed bitmap and the lasso overlay. Redraws from the document when another canvas on the same page changes it |
+| `PencilSettings.swift` | `PencilSettings` (double-tap and squeeze actions, finger drawing, palm rejection, handedness, scribble toggles) and their persistence, quick-palette placement, and `PalmRejector` |
+| `PencilSettingsView.swift` | The More menu's Apple Pencil settings |
+| `Scribble.swift` | Scratch-out and circle-to-select detection and their target strokes |
 | `CanvasRepresentable.swift` | The `UIViewRepresentable` bridge from `InkCanvasEditor` to `CanvasView` |
 | `CanvasView+ZoomWindow.swift` | The zoom window on the canvas: showing the panel and box, mapping panel touches onto the page, moving the box, rendering the panel; the hover and eraser cursors |
 | `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through |
@@ -52,7 +55,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `Stroke.swift` | `Stroke`, `StrokePoint`, `BrushStyle`, tool enums, `RGBA` |
 | `InkFile.swift` | `InkPageFile`, the `.ink` page format: encoder, decoder and `InkFileError` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit |
-| `ToolbarView.swift` | Pen Case, tool options, pressure & tilt settings, Pencil Pro quick palette |
+| `ToolbarView.swift` | Pen Case, tool options, pressure & tilt settings, the Pencil quick palette |
 | `PageBar.swift` | Page bar (page size and template pills) and the custom page size sheet |
 | `InkTheme.swift` / `InkChrome.swift` | The theme and the controls built from it |
 | `PencilHUD.swift` | Debug HUD, throttled telemetry, sample-rate counter |
@@ -163,13 +166,44 @@ More › Zoom Window shows a writing panel at the bottom of the canvas that magn
 - `coalescedTouches(for:)` delivers every Pencil sample (about 240 Hz) instead of one per 120 Hz frame.
 - `predictedTouches(for:)` only extends the drawn tail and is discarded on the next real event.
 - `touchesEstimatedPropertiesUpdated` patches refined force and tilt into both live and committed strokes.
-- Pan, pinch and swipe recognizers accept only `.direct` (finger) touches, and they won't begin while the Pencil is down (palm rejection).
-- `UIPencilInteraction` handles double-tap (pre-17.5 and 17.5+ APIs) and Pencil Pro squeeze. `UIHoverGestureRecognizer` previews nib size and tilt while hovering.
+- Pan, pinch and swipe recognizers accept only `.direct` (finger) touches, and they won't begin while the Pencil is down.
 - The system three-finger editing gestures are disabled (`editingInteractionConfiguration = .none`) so the app's own undo/redo swipe takes over.
+
+### Apple Pencil settings
+
+More › Apple Pencil… edits `PencilSettings` (`PencilSettings.swift`). They're saved to `UserDefaults`, so
+every editor and window shares them.
+
+- **Double-tap and squeeze** (`UIPencilInteraction`) each pick Switch to Eraser, Previous Tool, Show
+  Palette or Off. The default, System Setting, follows Settings › Apple Pencil (`preferredTapAction`,
+  `preferredSqueezeAction`): the palette actions show the quick palette, and Run Shortcut is left to the
+  system. The quick palette opens at the hover position, above the tip and away from the writing hand.
+- **Finger drawing:** with Finger Draws, a lone finger draws ink, two fingers pan, and a second finger
+  landing within 0.3 s of the first cancels the ink so pinch, pan and two-finger undo still work. System
+  Setting follows Only Draw with Apple Pencil (`UIPencilInteraction.prefersPencilOnlyDrawing`). Finger
+  ink has no pressure, so it's faked from drag speed.
+- **Palm rejection** (`PalmRejector`): a direct touch is a palm if its contact (`majorRadius`) is larger
+  than the sensitivity allows (45 / 32 / 24 pt for low / medium / high), or if it lands on the writing
+  hand's side of the Pencil (below and to the right, or to the left in left-handed mode) shortly after the
+  Pencil touched or hovered (0.2 / 0.5 / 1 s). Palms are ignored by every recognizer
+  (`gestureRecognizer(_:shouldReceive:)`) and by drawing, and stay palms until they lift.
+- **Hover:** `UIHoverGestureRecognizer` previews the nib's size and tilt, plus a tick showing the
+  barrel's roll on Pencil Pro.
+- **Scribble gestures** (`Scribble.swift`, pure geometry):
+  - *Scratch out to erase:* a pen, pencil or highlighter stroke that runs back and forth at least four
+    times along its main axis, over strokes that lie mostly inside it, erases them instead of being kept
+    (one undo step). Over blank paper it stays ink.
+  - *Circle and hold to select:* a closed loop held still for about 0.45 s selects the strokes at least
+    60% inside it, switches to the lasso and lets the same Pencil touch drag them.
+  - Both give canvas haptic feedback (`UICanvasFeedbackGenerator`) on Pencil Pro.
+
+Barrel roll doesn't change the nib yet: there are no chisel or fountain brushes until the brush engine
+(NOT-16). None of this has been tried on a real Pencil (see NOT-12).
 
 ### Simulator fallback
 
-Under `#if targetEnvironment(simulator)`, a single `.direct` touch acts as the Pencil:
+The simulator has no Pencil and Only Draw with Apple Pencil is off there, so by default a single
+`.direct` touch draws, as finger ink does on a device:
 
 - Pressure comes from drag speed, low-passed so the width changes smoothly.
 - Altitude comes from the *Simulated altitude* slider (More › Pressure & Tilt).
@@ -180,9 +214,9 @@ Under `#if targetEnvironment(simulator)`, a single `.direct` touch acts as the P
 
 This is a toggleable overlay, throttled to about 30 Hz so SwiftUI never sits on the input path. It shows:
 
-- Input state: `pencil ✎`, `pencil hover`, `finger ×N`, `sim pencil` or `idle`
+- Input state: `pencil ✎`, `pencil hover`, `finger ×N`, `finger ink` or `idle`
 - Raw force and maximum, plus a normalised pressure bar
-- Altitude and azimuth in degrees, plus a tilt compass. The compass line points along azimuth, and its length is cos(altitude).
+- Altitude, azimuth and barrel roll (Pencil Pro) in degrees, plus a tilt compass. The compass line points along azimuth, and its length is cos(altitude).
 - Hover height (`zOffset`)
 - Samples/s and events/s, predicted-touch count, pending estimated updates, stroke count
 

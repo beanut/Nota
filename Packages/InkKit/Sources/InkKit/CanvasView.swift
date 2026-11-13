@@ -17,7 +17,10 @@ final class CanvasView: UIView {
     private var paperTheme = InkTheme.standard
 
     let document: CanvasDocument
-    weak var controller: CanvasController?
+    weak var controller: CanvasController? {
+        didSet { pencilSettingsDidChange() }
+    }
+
     weak var telemetry: PencilTelemetry?
 
     private(set) var viewTransform = ViewTransform()
@@ -124,21 +127,35 @@ final class CanvasView: UIView {
     private var pendingEstimates: [NSNumber: PointRef] = [:]
     private var outstandingEstimates: [UUID: Int] = [:]
     private var hoverActive = false
+    /// Where the Pencil hovers, in view points, while it does.
+    private var hoverLocation: CGPoint?
 
     // HUD
     private var hud = PencilTelemetry.Snapshot()
     private var sampleRate = RateCounter()
     private var eventRate = RateCounter()
 
-    #if targetEnvironment(simulator)
-        private struct SimSample {
-            let location: CGPoint
-            let time: TimeInterval
-            let force: CGFloat
-        }
+    /// The last finger-ink sample, for the pressure faked from drag speed.
+    private struct FingerSample {
+        let location: CGPoint
+        let time: TimeInterval
+        let force: CGFloat
+    }
 
-        private var simPrevious: SimSample?
-    #endif
+    private var fingerPrevious: FingerSample?
+
+    /// Palm rejection and finger drawing (see `PencilSettings`)
+    private var palmRejector = PalmRejector()
+    /// Direct touches judged to be a resting hand; nothing on the canvas reacts to them.
+    private var palmTouches = Set<UITouch>()
+    /// When the active stroke began, so a second finger landing soon after turns finger ink into a gesture.
+    private var strokeBeganAt: TimeInterval = 0
+
+    // Scribble gestures
+    /// Checks for circle-and-hold while ink is being drawn; runs only while a stroke is live.
+    private var holdTimer: Timer?
+    private var lastMovement: (location: CGPoint, time: TimeInterval)?
+    private lazy var feedback = UICanvasFeedbackGenerator(view: self)
 
     // Zoom window: the box on the page, the writing panel that magnifies it, and the panel's renders.
     enum ZoomMove { case back, advance, newLine }
@@ -234,6 +251,7 @@ final class CanvasView: UIView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         guard window != nil else { return }
+        pencilSettingsDidChange() // Only Draw with Apple Pencil may have changed while away
         DispatchQueue.main.async { [weak self] in _ = self?.becomeFirstResponder() }
     }
 
@@ -913,22 +931,28 @@ final class CanvasView: UIView {
         if touch.type == .pencil {
             return true
         }
-        #if targetEnvironment(simulator)
-            // No Pencil in the simulator: a lone mouse-driven touch stands in for it.
-            return touch.type == .direct && (event?.allTouches?.count ?? 1) == 1
-        #else
-            return false
-        #endif
+        // A lone finger draws when finger drawing is on (by default in the simulator, which has no Pencil).
+        guard fingerDraws, isFinger(touch) else { return false }
+        let fingers = event?.allTouches?.filter { isFinger($0) && $0.phase != .ended && $0.phase != .cancelled }
+        return (fingers?.count ?? 1) == 1
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         if !isFirstResponder {
             _ = becomeFirstResponder()
         }
+        for touch in touches where touch.type == .pencil {
+            palmRejector.pencilSeen(at: touch.location(in: self), time: touch.timestamp)
+        }
         let priorDirectTouches = event?.allTouches?.filter {
-            $0.type == .direct && !touches.contains($0) && $0.phase != .ended && $0.phase != .cancelled
+            isFinger($0) && !touches.contains($0) && $0.phase != .ended && $0.phase != .cancelled
         }.count ?? 0
-        if priorDirectTouches == 0, activeGestureCount == 0, touches.contains(where: { $0.type == .direct }) {
+        // A second finger soon after finger ink began: it was the start of a pinch, pan or tap, not ink.
+        if let active = activeTouch, active.type == .direct, let finger = touches.first(where: { isFinger($0) }),
+           finger.timestamp - strokeBeganAt < 0.3 {
+            endStroke(commit: false)
+        }
+        if priorDirectTouches == 0, activeGestureCount == 0, touches.contains(where: { isFinger($0) }) {
             gestureStartTransform = viewTransform
             didTransformInTouchSequence = false
         }
@@ -939,7 +963,7 @@ final class CanvasView: UIView {
             maxDirectTouchesInSequence = 0
             didPinchInSequence = false
         }
-        let directTouches = priorDirectTouches + touches.filter { $0.type == .direct }.count
+        let directTouches = priorDirectTouches + touches.filter { isFinger($0) }.count
         maxDirectTouchesInSequence = max(maxDirectTouchesInSequence, directTouches)
         for touch in touches {
             if activeTouch == nil, beginZoomDrag(touch) {
@@ -948,10 +972,12 @@ final class CanvasView: UIView {
             guard isDrawingTouch(touch, event: event), activeTouch == nil, activeGestureCount == 0,
                   zoomTouch == nil else { continue }
             activeTouch = touch
+            strokeBeganAt = touch.timestamp
             let location = touch.preciseLocation(in: self)
             inputInZoomPanel = zoomPanel != nil && zoomInkFrameInView.contains(location)
             inputTransform = inputInZoomPanel ? zoomInputTransform : viewTransform
             beginStroke(at: inputTransform.toCanvas(location))
+            startHoldWatch(at: location, time: touch.timestamp)
             ingest(touch, event: event, final: false)
         }
         updateFingerState(event)
@@ -962,6 +988,12 @@ final class CanvasView: UIView {
             updateZoomDrag(touch)
         }
         guard let touch = activeTouch, touches.contains(touch) else { return }
+        if touch.type == .pencil {
+            palmRejector.pencilSeen(at: touch.location(in: self), time: touch.timestamp)
+        } else if isPalm(touch) {
+            endStroke(commit: false) // finger ink whose contact grew into a palm
+            return
+        }
         ingest(touch, event: event, final: false)
     }
 
@@ -974,6 +1006,7 @@ final class CanvasView: UIView {
             endStroke(commit: true)
         }
         updateFingerState(event, ending: touches)
+        palmTouches.subtract(touches)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -984,6 +1017,7 @@ final class CanvasView: UIView {
             endStroke(commit: false)
         }
         updateFingerState(event, ending: touches)
+        palmTouches.subtract(touches)
     }
 
     /// Pencil force/tilt are often first reported as estimates and refined a few ms later.
@@ -1075,9 +1109,7 @@ final class CanvasView: UIView {
             pendingEstimates.removeAll()
             outstandingEstimates.removeAll()
         }
-        #if targetEnvironment(simulator)
-            simPrevious = nil
-        #endif
+        fingerPrevious = nil
         liveView.settle(at: viewTransform)
         if controller.tool == .lasso {
             lassoPending = true
@@ -1105,6 +1137,7 @@ final class CanvasView: UIView {
         }
 
         if let live {
+            noteMovement(at: touch.preciseLocation(in: self), time: touch.timestamp)
             // Predicted touches are never stored: the tail is rebuilt (and they're dropped) on the next real event.
             let predicted = final ? [] : (event?.predictedTouches(for: touch) ?? []).map { makePoint($0, predicted: true) }
             hud.predictedCount = predicted.count
@@ -1123,6 +1156,7 @@ final class CanvasView: UIView {
         hud.normalizedForce = point.force
         hud.altitude = point.altitude
         hud.azimuth = point.azimuth
+        hud.roll = touch.type == .pencil ? touch.rollAngle : 0
 
         if lassoPending || lassoSession != nil {
             handleLassoSample(point.location)
@@ -1164,41 +1198,17 @@ final class CanvasView: UIView {
     private func makePoint(_ touch: UITouch, predicted: Bool) -> StrokePoint {
         let viewLocation = touch.preciseLocation(in: self)
         let location = inputTransform.toCanvas(viewLocation)
-        #if targetEnvironment(simulator)
-            if touch.type != .pencil {
-                return simulatedPoint(touch, viewLocation: viewLocation, canvasLocation: location, predicted: predicted)
-            }
-        #endif
+        if touch.type != .pencil {
+            return fingerPoint(touch, viewLocation: viewLocation, canvasLocation: location, predicted: predicted)
+        }
         let v = sampleValues(touch)
         return StrokePoint(location: location, force: v.force, altitude: v.altitude, azimuth: v.azimuth,
                            timestamp: touch.timestamp)
     }
 
-    #if targetEnvironment(simulator)
-        /// Fake pressure from drag speed: slow = heavy, fast = light, low-passed so width changes smoothly.
-        private func simulatedPoint(_ touch: UITouch, viewLocation: CGPoint, canvasLocation: CGPoint,
-                                    predicted: Bool) -> StrokePoint {
-            var force: CGFloat = 0.6
-            if let prev = simPrevious {
-                force = prev.force
-                let dt = touch.timestamp - prev.time
-                if dt > 0 {
-                    let speed = viewLocation.distance(to: prev.location) / CGFloat(dt) // points per second
-                    let target = min(max(1 - speed / 2200, 0.1), 1)
-                    force = prev.force + (target - prev.force) * 0.2
-                }
-            }
-            if !predicted {
-                simPrevious = SimSample(location: viewLocation, time: touch.timestamp, force: force)
-            }
-            return StrokePoint(location: canvasLocation, force: force,
-                               altitude: controller?.simulatedAltitude ?? .pi / 2,
-                               azimuth: -.pi / 4, timestamp: touch.timestamp)
-        }
-    #endif
-
     private func endStroke(commit: Bool) {
         activeTouch = nil
+        stopHoldWatch()
         if lassoPending || lassoSession != nil {
             finishLasso(commit: commit)
         }
@@ -1209,7 +1219,8 @@ final class CanvasView: UIView {
         }
         if let live {
             self.live = nil
-            if commit, !live.stroke.points.isEmpty {
+            // A scratch-out erases the ink under it, and the scratch itself is dropped like a cancelled stroke.
+            if commit, !live.stroke.points.isEmpty, !scratchOut(with: live) {
                 let geom = live.geometry()
                 geometryCache[live.stroke.id] = geom
                 let splits = live.stroke.tool == .pixelEraser
@@ -1239,7 +1250,7 @@ final class CanvasView: UIView {
     private func updateFingerState(_ event: UIEvent?, ending: Set<UITouch> = []) {
         guard activeTouch == nil else { return }
         let fingers = event?.allTouches?.filter {
-            $0.type == .direct && !ending.contains($0) && $0.phase != .ended && $0.phase != .cancelled
+            isFinger($0) && !ending.contains($0) && $0.phase != .ended && $0.phase != .cancelled
         }.count ?? 0
         hud.state = fingers > 0 ? .finger(fingers) : (hoverActive ? .hovering : .idle)
         publishHUD(force: true)
@@ -1261,11 +1272,7 @@ final class CanvasView: UIView {
         let direct = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
 
         pan.allowedTouchTypes = direct // the Pencil never pans
-        #if targetEnvironment(simulator)
-            pan.minimumNumberOfTouches = 2 // one simulated touch draws
-        #else
-            pan.minimumNumberOfTouches = 1
-        #endif
+        pan.minimumNumberOfTouches = fingerDraws ? 2 : 1 // see `pencilSettingsDidChange()`
         pan.maximumNumberOfTouches = 2
         pan.delegate = self
         addGestureRecognizer(pan)
@@ -1500,21 +1507,26 @@ final class CanvasView: UIView {
         let pencilHovering = (g.state == .began || g.state == .changed) && g.zOffset > 0
         if pencilHovering {
             hoverActive = true
-            let altitude = g.altitudeAngle, azimuth = g.azimuthAngle(in: self)
+            let altitude = g.altitudeAngle, azimuth = g.azimuthAngle(in: self), roll = g.rollAngle
+            let location = g.location(in: self)
+            hoverLocation = location
+            // The writing hand is over the glass too: keep rejecting palms near it.
+            palmRejector.pencilSeen(at: location, time: ProcessInfo.processInfo.systemUptime)
             hud.altitude = altitude
             hud.azimuth = azimuth
+            hud.roll = roll
             hud.zOffset = g.zOffset
             if activeTouch == nil {
                 hud.state = .hovering
-                let location = g.location(in: self)
                 let inPanel = zoomPanel != nil && zoomInkFrameInView.contains(location)
                 let transform = inPanel ? zoomInputTransform : viewTransform
                 setCursor(tipOutline(at: transform.toCanvas(location), altitude: altitude, azimuth: azimuth,
-                                     transform: transform), inZoomPanel: inPanel)
+                                     roll: roll, transform: transform), inZoomPanel: inPanel)
             }
             publishHUD(force: false)
         } else if hoverActive {
             hoverActive = false
+            hoverLocation = nil
             hud.zOffset = 0
             if activeTouch == nil {
                 setCursor(nil)
@@ -1542,6 +1554,11 @@ extension CanvasView: UIGestureRecognizerDelegate {
             return g.numberOfTouches == 2
         }
         return true
+    }
+
+    /// Palm rejection: a resting hand never pans, zooms, swipes or taps.
+    func gestureRecognizer(_: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        !isPalm(touch)
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer,
@@ -1587,29 +1604,171 @@ private final class LassoOverlayView: UIView {
 // MARK: - Apple Pencil interactions
 
 extension CanvasView: UIPencilInteractionDelegate {
-    @available(iOS 17.5, *)
-    func pencilInteraction(_: UIPencilInteraction, didReceiveTap _: UIPencilInteraction.Tap) {
-        handlePencilTap()
+    /// Double-tap (Pencil 2 and Pro). Does what the Pencil settings say, by default what Settings ›
+    /// Apple Pencil says; a palette shows at the hover position.
+    func pencilInteraction(_: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        guard let controller else { return }
+        let action = controller.pencilSettings.doubleTap
+            .resolved(system: UIPencilInteraction.preferredTapAction, fallback: .eraser)
+        controller.perform(action, at: tap.hoverPose?.location ?? hoverLocation ?? center(of: bounds))
     }
 
-    /// Pre-17.5 path (2nd-gen Pencil double-tap).
-    func pencilInteractionDidTap(_: UIPencilInteraction) {
-        handlePencilTap()
-    }
-
-    /// Pencil Pro squeeze: show a quick tool palette at the hover position.
-    @available(iOS 17.5, *)
+    /// Squeeze (Pencil Pro): by default the quick palette, at the hover position.
     func pencilInteraction(_: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
-        guard squeeze.phase == .ended, UIPencilInteraction.preferredSqueezeAction != .ignore else { return }
-        let location = squeeze.hoverPose?.location ?? CGPoint(x: bounds.midX, y: bounds.midY)
-        controller?.quickPaletteLocation = controller?.quickPaletteLocation == nil ? location : nil
+        guard squeeze.phase == .ended, let controller else { return }
+        let action = controller.pencilSettings.squeeze
+            .resolved(system: UIPencilInteraction.preferredSqueezeAction, fallback: .palette)
+        controller.perform(action, at: squeeze.hoverPose?.location ?? hoverLocation ?? center(of: bounds))
     }
 
-    private func handlePencilTap() {
-        switch UIPencilInteraction.preferredTapAction {
-        case .ignore: return
-        case .switchPrevious: controller?.switchToPrevious()
-        default: controller?.toggleEraser() // .switchEraser and palette actions
+    private func center(of r: CGRect) -> CGPoint {
+        CGPoint(x: r.midX, y: r.midY)
+    }
+}
+
+// MARK: - Palm rejection and finger ink
+
+extension CanvasView {
+    /// Whether a finger draws ink, from the Pencil settings and the system's Only Draw with Apple Pencil.
+    var fingerDraws: Bool {
+        (controller?.pencilSettings.fingerDrawing ?? .system)
+            .fingerDraws(pencilOnlySystemSetting: UIPencilInteraction.prefersPencilOnlyDrawing)
+    }
+
+    /// A direct touch that isn't a resting palm.
+    private func isFinger(_ touch: UITouch) -> Bool {
+        touch.type == .direct && !isPalm(touch)
+    }
+
+    /// Classifies a direct touch when it's first seen (by a gesture recognizer or `touchesBegan`) and
+    /// again as its contact grows: once a palm, it stays one until it lifts.
+    private func isPalm(_ touch: UITouch) -> Bool {
+        guard touch.type == .direct else { return false }
+        if palmTouches.contains(touch) {
+            return true
         }
+        if palmRejector.rejects(location: touch.location(in: self), radius: touch.majorRadius,
+                                time: touch.timestamp) {
+            palmTouches.insert(touch)
+            return true
+        }
+        return false
+    }
+
+    /// Re-reads the settings the canvas caches: palm rejection and how many fingers pan.
+    func pencilSettingsDidChange() {
+        if let settings = controller?.pencilSettings {
+            palmRejector.sensitivity = settings.palmRejection
+            palmRejector.handedness = settings.handedness
+        }
+        pan.minimumNumberOfTouches = fingerDraws ? 2 : 1 // one finger draws, so two pan
+    }
+
+    /// Finger ink (and the simulator's stand-in Pencil) has no pressure, so it's faked from drag speed:
+    /// slow = heavy, fast = light, low-passed so the width changes smoothly.
+    private func fingerPoint(_ touch: UITouch, viewLocation: CGPoint, canvasLocation: CGPoint,
+                             predicted: Bool) -> StrokePoint {
+        var force: CGFloat = 0.6
+        if let prev = fingerPrevious {
+            force = prev.force
+            let dt = touch.timestamp - prev.time
+            if dt > 0 {
+                let speed = viewLocation.distance(to: prev.location) / CGFloat(dt) // points per second
+                let target = min(max(1 - speed / 2200, 0.1), 1)
+                force = prev.force + (target - prev.force) * 0.2
+            }
+        }
+        if !predicted {
+            fingerPrevious = FingerSample(location: viewLocation, time: touch.timestamp, force: force)
+        }
+        #if targetEnvironment(simulator)
+            let altitude = controller?.simulatedAltitude ?? .pi / 2
+        #else
+            let altitude = CGFloat.pi / 2
+        #endif
+        return StrokePoint(location: canvasLocation, force: force, altitude: altitude,
+                           azimuth: -.pi / 4, timestamp: touch.timestamp)
+    }
+}
+
+// MARK: - Scribble gestures
+
+extension CanvasView {
+    /// Every finished ink stroke on the page as a gesture target. Pixel-eraser strokes are invisible,
+    /// so gestures never act on them.
+    private func scribbleCandidates(excluding excluded: UUID?) -> [Scribble.Candidate] {
+        document.strokes.compactMap { stroke in
+            guard stroke.tool != .pixelEraser, stroke.id != excluded else { return nil }
+            let points = stroke.points.map(\.location)
+            return Scribble.Candidate(id: stroke.id, points: points, bounds: LassoGeometry.bounds(of: points))
+        }
+    }
+
+    /// Called as a finished ink stroke is about to be committed. If it scratched out ink, erases that
+    /// ink instead and returns true (the stroke is dropped).
+    func scratchOut(with stroke: LiveStroke) -> Bool {
+        guard controller?.pencilSettings.scratchOutToErase == true, stroke.stroke.tool != .pixelEraser else {
+            return false
+        }
+        let points = stroke.stroke.points.map(\.location)
+        guard Scribble.isScratchOut(points, minSize: 24 / inputTransform.scale) else { return false }
+        let ids = Scribble.scratchOutTargets(points, candidates: scribbleCandidates(excluding: stroke.stroke.id),
+                                             pad: stroke.stroke.style.width)
+        guard !ids.isEmpty else { return false } // shading or a zigzag over blank paper: keep it as ink
+        for id in ids {
+            forgetGeometry(id)
+        }
+        editDocument { document.recordErase(document.remove(ids: ids)) }
+        dropOrphanedPendingStrokes() // also prunes the selection and clears the live layer
+        requestFullRender()
+        if let last = points.last {
+            feedback.pathCompleted(at: inputTransform.toView(last))
+        }
+        return true
+    }
+
+    /// Starts watching the live stroke for circle-and-hold.
+    func startHoldWatch(at location: CGPoint, time: TimeInterval) {
+        stopHoldWatch()
+        guard controller?.pencilSettings.circleToSelect == true, live != nil else { return }
+        lastMovement = (location, time)
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkHold() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        holdTimer = timer
+    }
+
+    func stopHoldWatch() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        lastMovement = nil
+    }
+
+    /// Records Pencil movement for the hold check. Movement under 3 points doesn't count.
+    func noteMovement(at location: CGPoint, time: TimeInterval) {
+        guard holdTimer != nil, let last = lastMovement, last.location.distance(to: location) > 3 else { return }
+        lastMovement = (location, time)
+    }
+
+    /// The Pencil has been still for a moment: if the live stroke is a loop around ink, select that ink.
+    private func checkHold() {
+        guard let last = lastMovement, let live,
+              ProcessInfo.processInfo.systemUptime - last.time >= 0.45 else { return }
+        stopHoldWatch() // one check per stroke once it's held
+        let loop = live.stroke.points.map(\.location)
+        guard Scribble.isClosedLoop(loop, minSize: 24 / inputTransform.scale) else { return }
+        let ids = Scribble.loopSelection(loop, candidates: scribbleCandidates(excluding: live.stroke.id))
+        guard !ids.isEmpty else { return }
+        // The loop becomes a selection: drop its ink, switch to the lasso and keep the Pencil down to
+        // drag what it caught.
+        self.live = nil
+        invalidateAllLive()
+        controller?.select(.lasso)
+        selection = ids
+        pending.removeAll { ids.contains($0.live.stroke.id) } // they're redrawn where they move to
+        updateSelectionBounds()
+        lassoSession = .moving(last: inputTransform.toCanvas(last.location), total: .zero)
+        feedback.alignmentOccurred(at: last.location)
     }
 }
