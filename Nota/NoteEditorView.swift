@@ -20,7 +20,7 @@ struct NoteEditorView: View {
 
     var body: some View {
         let notebook = documents.notebook(for: note)
-        InkCanvasEditor(notebook: notebook, title: $note.title, writingLines: writingLines(on:))
+        InkCanvasEditor(notebook: notebook, title: $note.title)
             .inkTheme(.nota)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(NotaColor.bgApp, for: .navigationBar)
@@ -36,14 +36,8 @@ struct NoteEditorView: View {
                 save(notebook)
                 // The first page is the cover; skipped if it hasn't changed since its last render.
                 let cover = notebook.pages[0]
-                thumbnails.updateCover(of: note.id, page: cover.snapshot(),
-                                       paper: documents.paper(ofPage: cover.id, in: note))
+                thumbnails.updateCover(of: note.id, page: cover.snapshot())
             }
-    }
-
-    /// The lines of a page's paper, which the zoom window follows.
-    private func writingLines(on page: CanvasDocument) -> WritingLines? {
-        PaperTemplate.writingLines(for: documents.paper(ofPage: page.id, in: note), size: page.pageBounds.size)
     }
 
     /// `objectWillChange` fires before the notebook changes and often several times per edit, so the save

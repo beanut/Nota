@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// One page: its paper size, stroke list and undo/redo command stack.
+/// One page: its paper size and template, stroke list and undo/redo command stack.
 @MainActor
 public final class CanvasDocument: Identifiable {
     public let id: UUID
@@ -22,9 +22,42 @@ public final class CanvasDocument: Identifiable {
         pageSize.bounds
     }
 
-    public init(pageSize: PageSize = .default, id: UUID = UUID()) {
+    /// What's printed on the page under the ink. Changing it doesn't touch the ink or its undo history,
+    /// and doesn't change `revision`: the committed ink layer is drawn without the paper.
+    public var template: PageTemplate {
+        didSet {
+            if template != oldValue {
+                onTemplateChange?()
+            }
+        }
+    }
+
+    /// The bytes of `template.background`, when it has one. Set it before (or with) a template that names
+    /// it; artwork whose `id` doesn't match the template's background isn't drawn.
+    public var templateArtwork: TemplateArtwork? {
+        didSet {
+            if templateArtwork !== oldValue {
+                onTemplateChange?()
+            }
+        }
+    }
+
+    public init(pageSize: PageSize = .default, template: PageTemplate = .default,
+                templateArtwork: TemplateArtwork? = nil, id: UUID = UUID()) {
         self.id = id
         self.pageSize = pageSize
+        self.template = template
+        self.templateArtwork = templateArtwork
+    }
+
+    /// Puts the page on `template`, with `artwork` as its custom background (nil for none).
+    public func setTemplate(_ template: PageTemplate, artwork: TemplateArtwork?) {
+        let onChange = onTemplateChange
+        onTemplateChange = nil
+        templateArtwork = template.background == nil ? nil : artwork
+        self.template = template
+        onTemplateChange = onChange
+        onChange?()
     }
 
     /// True when `point` (canvas space) is on the page.
@@ -33,6 +66,7 @@ public final class CanvasDocument: Identifiable {
     }
 
     var onPageSizeChange: (() -> Void)?
+    var onTemplateChange: (() -> Void)?
 
     /// Goes up whenever the page's ink or size changes (each edit, undo and redo), so a cached rendering
     /// of the page is current while its revision matches.

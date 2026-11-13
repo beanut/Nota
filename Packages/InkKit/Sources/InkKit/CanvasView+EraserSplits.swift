@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Pixel eraser splits: cutting the ink strokes a pixel-eraser stroke severs into separate strokes.
@@ -36,5 +37,44 @@ extension CanvasView {
             }
         }
         return splits
+    }
+
+    /// Stroke eraser: removes the ink strokes the eraser sweeps through.
+    func eraseStrokes(along point: CGPoint) {
+        guard var session = eraseSession, let controller else { return }
+        let radius = CGFloat(controller.current.width) / 2 / inputTransform.scale
+        let from = session.last ?? point
+        let steps = max(1, Int((from.distance(to: point) / (radius * 0.5)).rounded(.up)))
+        let sweep = CGRect(x: min(from.x, point.x), y: min(from.y, point.y),
+                           width: abs(from.x - point.x), height: abs(from.y - point.y))
+            .insetBy(dx: -radius, dy: -radius)
+
+        var hits = Set<UUID>()
+        // Pixel-eraser strokes are invisible; removing them would resurrect ink, so they're skipped.
+        for stroke in document.strokes where stroke.tool != .pixelEraser {
+            let bounds = geometry(for: stroke).bounds
+            guard bounds.intersects(sweep) else { continue }
+            for k in 0 ... steps {
+                let t = CGFloat(k) / CGFloat(steps)
+                if StrokeRenderer.hitTest(stroke, bounds: bounds, point: from + (point - from) * t, radius: radius) {
+                    hits.insert(stroke.id)
+                    break
+                }
+            }
+        }
+        if !hits.isEmpty {
+            for id in hits {
+                forgetGeometry(id)
+            }
+            session.removals += document.remove(ids: hits)
+            dropOrphanedPendingStrokes()
+            requestFullRender()
+        }
+        session.last = point
+        eraseSession = session
+
+        let c = inputTransform.toView(point), r = radius * inputTransform.scale
+        setCursor(CGPath(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r), transform: nil),
+                  inZoomPanel: inputInZoomPanel)
     }
 }

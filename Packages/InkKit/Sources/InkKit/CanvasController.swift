@@ -69,7 +69,7 @@ final class CanvasController: ObservableObject {
     @Published private(set) var zoomCanGoBack = false
     /// The zoom box in page points, kept so the next page opens with the box where it was.
     var zoomBox: CGRect?
-    /// The lines on a page, for the zoom window to follow. Set by the editor; nil uses `WritingLines.standard`.
+    /// The lines on a page, for the zoom window to follow. Set by the editor; nil uses the page template's lines.
     var writingLines: ((CanvasDocument) -> WritingLines?)?
 
     weak var canvas: CanvasView?

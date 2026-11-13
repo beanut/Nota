@@ -11,8 +11,8 @@ import SwiftUI
 /// ```
 ///
 /// The More menu's Zoom Window writes small, neat handwriting in a magnified panel at the bottom of the
-/// screen. Pass `writingLines` so it follows each page's ruling; pages it returns nil for, or every page
-/// without it, use `WritingLines.standard(for:)`.
+/// screen. It follows each page's template ruling (`WritingLines.lines(for:on:)`); pass `writingLines` to
+/// override that per page, where returning nil falls back to the template's.
 public struct InkCanvasEditor: View {
     @ObservedObject private var notebook: InkNotebook
     private let showsDebugHUD: Bool

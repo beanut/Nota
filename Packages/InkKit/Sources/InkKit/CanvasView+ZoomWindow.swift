@@ -84,7 +84,7 @@ extension CanvasView {
     /// Rebuilds the box for the page, its lines and the panel's shape, keeping its place if it has one.
     func updateZoomWindow() {
         guard let panel = zoomPanel, panel.inkFrame.width > 1 else { return }
-        let lines = controller?.writingLines?(document) ?? .standard(for: document.pageBounds.size)
+        let lines = controller?.writingLines?(document) ?? .lines(for: document.template, on: document.pageSize)
         let window = ZoomWindow(page: document.pageBounds, lines: lines,
                                 aspect: panel.inkFrame.width / panel.inkFrame.height,
                                 box: zoomWindow?.box ?? controller?.zoomBox)

@@ -4,7 +4,7 @@ import NotaCore
 import Observation
 import UIKit
 
-/// Renders each note's cover page (paper template + ink) to an image, keeps it in the note package's
+/// Renders each note's cover page (its template + ink) to an image, keeps it in the note package's
 /// `thumbs/` folder and serves it to library cards.
 ///
 /// Rendering, PNG encoding, disk reads and decoding all happen off the main actor; a card asks with
@@ -32,7 +32,8 @@ public final class ThumbnailStore {
     private struct CoverKey: Equatable {
         let pageID: UUID
         let revision: Int
-        let paper: PaperStyle
+        let template: PageTemplate
+        let artworkID: UUID?
     }
 
     public init(library: URL = NotePackage.libraryURL) {
@@ -73,9 +74,11 @@ public final class ThumbnailStore {
         return cachedImage(for: noteID) ?? image
     }
 
-    /// Re-renders the note's cover from `page` unless the cached cover already shows this revision.
-    public func updateCover(of noteID: UUID, page: PageSnapshot, paper: PaperStyle) {
-        let key = CoverKey(pageID: page.pageID, revision: page.revision, paper: paper)
+    /// Re-renders the note's cover from `page` (its ink on its template) unless the cached cover already
+    /// shows this revision on this template.
+    public func updateCover(of noteID: UUID, page: PageSnapshot) {
+        let key = CoverKey(pageID: page.pageID, revision: page.revision, template: page.template,
+                           artworkID: page.templateArtwork?.id)
         guard renderedFrom[noteID] != key else { return }
         renderedFrom[noteID] = key
         renders[noteID]?.cancel()
@@ -85,7 +88,7 @@ public final class ThumbnailStore {
         renders[noteID] = Task { [weak self] in
             await ready.value
             let image = await Task.detached(priority: .userInitiated) {
-                Self.renderAndSave(page, paper: paper, to: url)
+                Self.renderAndSave(page, to: url)
             }.value
             guard let self, !Task.isCancelled else { return }
             if let image {
@@ -112,17 +115,17 @@ public final class ThumbnailStore {
 
     // MARK: Off the main actor
 
-    /// Renders the cover and writes it to `url`, returning it decoded for display. A blank page has no
-    /// cover: its file is removed and the card shows the bare template.
-    private nonisolated static func renderAndSave(_ page: PageSnapshot, paper: PaperStyle, to url: URL) -> UIImage? {
+    /// Renders the cover and writes it to `url`, returning it decoded for display. A blank page on a
+    /// built-in template has no cover: its file is removed and the card draws the bare template. A custom
+    /// background always gets one, since the card can't draw it.
+    private nonisolated static func renderAndSave(_ page: PageSnapshot, to url: URL) -> UIImage? {
         let files = FileManager.default
-        guard !page.isBlank else {
+        guard !page.isBlank || page.templateArtwork != nil else {
             try? files.removeItem(at: url)
             return nil
         }
-        guard let cgImage = PageRenderer.image(of: page, pixelWidth: pixelWidth, background: { ctx, size in
-            PaperTemplate.draw(paper, in: ctx, size: size)
-        }) else { return nil }
+        guard let cgImage = PageRenderer.image(of: page, pixelWidth: pixelWidth, palette: PaperPalette.nota)
+        else { return nil }
         let image = UIImage(cgImage: cgImage)
         if let png = image.pngData() {
             try? files.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

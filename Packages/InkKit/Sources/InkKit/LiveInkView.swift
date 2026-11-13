@@ -30,6 +30,10 @@ final class LiveInkView: UIView {
         didSet { cursorHalo.strokeColor = UIColor(cgColor: paperColor).withAlphaComponent(0.9).cgColor }
     }
 
+    /// Draws the paper and its template into a tile, in view space at the given transform, limited to the
+    /// rect. Without it the backdrop is plain `paperColor`.
+    var drawPaper: ((CGContext, ViewTransform, CGRect) -> Void)?
+
     /// The committed image. Multiply ink needs the real backdrop to preview what will be committed.
     var underlay: CGImage? {
         didSet { for tile in tiles.values where tile.drewBackdrop {
@@ -349,8 +353,12 @@ final class LiveInkView: UIView {
         }
         if let underlay, items.contains(where: { $0.entry.stroke.stroke.tool == .highlighter }) {
             tile.drewBackdrop = true
-            ctx.setFillColor(paperColor)
-            ctx.fill(tileFrame)
+            if let drawPaper {
+                drawPaper(ctx, bakeTransform, tileFrame)
+            } else {
+                ctx.setFillColor(paperColor)
+                ctx.fill(tileFrame)
+            }
             let size = CGSize(width: CGFloat(underlay.width) / scale, height: CGFloat(underlay.height) / scale)
             drawImage(underlay, in: CGRect(origin: .zero, size: size), ctx: ctx)
         }

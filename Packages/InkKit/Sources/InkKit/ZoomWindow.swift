@@ -3,7 +3,7 @@ import CoreGraphics
 /// Where a page's lines of writing are, so the zoom window can follow them: the spacing between ruled
 /// lines, where the first one sits and how far across the page handwriting runs. All in page points.
 ///
-/// The host app derives this from the page's paper; pages without ruling use `standard(for:)`.
+/// Derived from the page's template (`init(template:on:)`); pages without ruling use `standard(for:)`.
 public struct WritingLines: Equatable, Sendable {
     /// Distance between two baselines.
     public var spacing: CGFloat
@@ -19,6 +19,19 @@ public struct WritingLines: Equatable, Sendable {
         self.firstBaseline = firstBaseline
         self.left = left
         self.right = max(right, left + 1)
+    }
+
+    /// The lines of `template` on a page of `pageSize`: its ruled lines, or every row of a grid or dots.
+    /// Templates without evenly spaced rows (blank, planners, …) get `standard(for:)`.
+    public static func lines(for template: PageTemplate, on pageSize: PageSize) -> WritingLines {
+        let metrics = template.lineMetrics(on: pageSize)
+        let page = pageSize.bounds.size
+        guard let spacing = metrics.lineSpacing, let first = metrics.baselines.first else {
+            return standard(for: page)
+        }
+        let area = metrics.writingArea
+        return WritingLines(spacing: spacing, firstBaseline: first, left: area.minX + spacing,
+                            right: area.maxX - spacing)
     }
 
     /// Lines for a page without ruling: about 19 to a page width (32 pt on US Letter), the first three

@@ -1,20 +1,40 @@
 import Foundation
+import InkKit
 import SwiftData
 
 // MARK: - Value types
 
-public enum PaperStyle: String, Codable, CaseIterable, Identifiable, Sendable {
+/// The four papers notes had before page templates (NOT-27). Still read from older manifests and stores.
+enum LegacyPaperStyle: String, Codable {
     case plain, lined, dotted, grid
-    public var id: String {
-        rawValue
+
+    var template: PageTemplate {
+        switch self {
+        case .plain: PageTemplate.Preset.blank.template
+        case .lined: PageTemplate.Preset.collegeRuled.template
+        case .dotted: PageTemplate.Preset.dots.template
+        case .grid: PageTemplate.Preset.smallGrid.template
+        }
+    }
+}
+
+public extension PageTemplate {
+    /// What a new note gets unless it asks for something else.
+    static let noteDefault = Preset.collegeRuled.template
+
+    /// The template as a compact JSON string, for `Note.paperName` and remembered choices.
+    var encodedString: String {
+        (try? JSONEncoder().encode(self)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
     }
 
-    public var title: String {
-        switch self {
-        case .plain: "Blank"
-        case .lined: "Lined"
-        case .dotted: "Dotted"
-        case .grid: "Grid"
+    /// A template from `encodedString`, or from the name of a pre-template paper ("lined", "grid", …).
+    init?(encodedString string: String) {
+        if let legacy = LegacyPaperStyle(rawValue: string) {
+            self = legacy.template
+        } else if string.hasPrefix("{"), let template = try? JSONDecoder().decode(PageTemplate.self, from: Data(string.utf8)) {
+            self = template
+        } else {
+            return nil
         }
     }
 }
@@ -80,7 +100,8 @@ public final class Note {
     public var createdAt: Date
     /// Mirrored from the note's manifest, like `pageCount`.
     public var modifiedAt: Date
-    /// The first page's paper, mirrored from the manifest; each page's own paper is kept there.
+    /// The first page's template (`PageTemplate.encodedString`), mirrored from the manifest; each page's own
+    /// template is kept there. Stores from before templates hold a paper name ("lined"), read the same way.
     public var paperName: String
     public var tintName: String
     public var kindName: String
@@ -93,7 +114,7 @@ public final class Note {
     public init(title: String,
                 pageCount: Int = 1,
                 modifiedAt: Date = .now,
-                paper: PaperStyle = .lined,
+                template: PageTemplate = .noteDefault,
                 tint: NoteTint = .indigo,
                 kind: NoteKind = .notebook,
                 isFavorite: Bool = false,
@@ -104,7 +125,7 @@ public final class Note {
         self.pageCount = pageCount
         createdAt = modifiedAt
         self.modifiedAt = modifiedAt
-        paperName = paper.rawValue
+        paperName = template.encodedString
         tintName = tint.rawValue
         kindName = kind.rawValue
         self.isFavorite = isFavorite
@@ -112,9 +133,10 @@ public final class Note {
         self.folder = folder
     }
 
-    public var paper: PaperStyle {
-        get { PaperStyle(rawValue: paperName) ?? .lined }
-        set { paperName = newValue.rawValue }
+    /// The first page's template. Unreadable values read as the default.
+    public var template: PageTemplate {
+        get { PageTemplate(encodedString: paperName) ?? .noteDefault }
+        set { paperName = newValue.encodedString }
     }
 
     public var tint: NoteTint {

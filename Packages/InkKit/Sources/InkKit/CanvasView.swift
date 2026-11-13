@@ -1,92 +1,6 @@
 import SwiftUI
 import UIKit
 
-/// Canvas → view mapping: uniform scale then translation, no rotation.
-/// Because there's no rotation, angles (azimuth) are the same in both spaces.
-struct ViewTransform: Equatable {
-    var scale: CGFloat = 1
-    var offset: CGPoint = .zero
-
-    var affine: CGAffineTransform {
-        CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: offset.x, ty: offset.y)
-    }
-
-    func toView(_ p: CGPoint) -> CGPoint {
-        CGPoint(x: p.x * scale + offset.x, y: p.y * scale + offset.y)
-    }
-
-    func toCanvas(_ p: CGPoint) -> CGPoint {
-        CGPoint(x: (p.x - offset.x) / scale, y: (p.y - offset.y) / scale)
-    }
-
-    func toView(_ r: CGRect) -> CGRect {
-        r.isNull ? r : r.applying(affine)
-    }
-
-    func toCanvas(_ r: CGRect) -> CGRect {
-        r.isNull ? r : r.applying(affine.inverted())
-    }
-
-    /// The transform that shows all of `page` (canvas space) as large as possible inside `bounds` minus
-    /// `insets`, centred. Scale is clamped to `scaleRange`. Empty inputs give the identity.
-    static func fitting(page: CGRect, in bounds: CGRect, insets: UIEdgeInsets = .zero,
-                        scaleRange: ClosedRange<CGFloat> = 0.25 ... 8) -> ViewTransform {
-        // Not `bounds.inset(by:)`: a rect inset past empty is standardized to a positive size.
-        let available = CGRect(x: bounds.minX + insets.left, y: bounds.minY + insets.top,
-                               width: bounds.width - insets.left - insets.right,
-                               height: bounds.height - insets.top - insets.bottom)
-        guard page.width > 0, page.height > 0, available.size.width > 0, available.size.height > 0 else {
-            return ViewTransform()
-        }
-        let fit = min(available.width / page.width, available.height / page.height)
-        let scale = min(max(fit, scaleRange.lowerBound), scaleRange.upperBound)
-        return ViewTransform(scale: scale,
-                             offset: CGPoint(x: available.midX - page.midX * scale,
-                                             y: available.midY - page.midY * scale))
-    }
-
-    /// The most a page can be zoomed in, as a multiple of the scale that fits the whole page in view.
-    static let maxZoomFactor: CGFloat = 6
-    /// The scales a page can be zoomed to, given `fitScale`, the scale that shows the whole page.
-    /// Zooming out stops at the whole page. Zooming in stops at `maxZoomFactor` × the fitted scale, or
-    /// `maxZoomFactor` × actual size if that's larger, so a very large page can still be zoomed in to write on.
-    static func zoomRange(fitScale: CGFloat) -> ClosedRange<CGFloat> {
-        guard fitScale > 0, fitScale.isFinite else { return 1 ... maxZoomFactor }
-        return fitScale ... max(fitScale, 1) * maxZoomFactor
-    }
-
-    /// How far (0–1) to move the page towards its centred, fitted position when a pinch zooms from `old`
-    /// to `new`. Within 25% of `fitScale`, zooming out closes the gap in step with the scale, so the page
-    /// arrives centred exactly as it reaches the zoom-out limit. Zooming in, or above that band, gives 0.
-    static func recentringAmount(from old: CGFloat, to new: CGFloat, fitScale: CGFloat) -> CGFloat {
-        guard fitScale > 0 else { return 0 }
-        if new <= fitScale {
-            return 1
-        }
-        let start = min(old, fitScale * 1.25)
-        guard new < start else { return 0 }
-        return (start - new) / (start - fitScale)
-    }
-}
-
-/// A horizontal swipe that turns the page.
-enum PageSwipe: Equatable {
-    case next, previous
-
-    /// The page turn a finished pan asks for, if any. `translation` is the pan's total movement and
-    /// `velocity` its speed when the fingers lifted, both in view points. A swipe has to be mostly
-    /// sideways and either travel a quarter of `viewWidth` or be a quick flick. Swiping left (the page
-    /// moving left) shows the next page.
-    static func detect(translation: CGPoint, velocity: CGPoint, viewWidth: CGFloat) -> PageSwipe? {
-        let dx = translation.x, dy = translation.y
-        guard viewWidth > 0, abs(dx) > abs(dy) * 1.5 else { return nil }
-        let farEnough = abs(dx) > viewWidth * 0.25
-        let flicked = abs(dx) > 40 && abs(velocity.x) > 600 && velocity.x.sign == dx.sign
-        guard farEnough || flicked else { return nil }
-        return dx < 0 ? .next : .previous
-    }
-}
-
 /// Raw-touch drawing surface.
 ///
 /// Layers, bottom to top:
@@ -100,6 +14,7 @@ final class CanvasView: UIView {
     private var deskColor = InkTheme.standard.desk
     private var accentColor = InkTheme.standard.accent
     private var shadowColor = InkTheme.standard.shadow
+    private var paperTheme = InkTheme.standard
 
     let document: CanvasDocument
     weak var controller: CanvasController?
@@ -143,6 +58,7 @@ final class CanvasView: UIView {
     private var isCancellingGesture = false
 
     private let pageLayer = CALayer()
+    private let templateView = TemplateView()
     /// Holds the ink layers; masked to the page so strokes running off the edge are clipped.
     private let inkClipView = UIView()
     private let inkMask = CAShapeLayer()
@@ -185,8 +101,8 @@ final class CanvasView: UIView {
     // Input state
     private(set) var activeTouch: UITouch?
     private(set) var live: LiveStroke?
-    private var eraseSession: EraseSession?
-    private struct EraseSession {
+    var eraseSession: EraseSession?
+    struct EraseSession {
         var removals: [CanvasDocument.Removal] = []
         var last: CGPoint?
     }
@@ -241,7 +157,7 @@ final class CanvasView: UIView {
     var zoomDrag: ZoomDrag?
     /// What the active touch's locations are mapped through onto the page: the page's own transform, or the
     /// panel's when the stroke began in the panel.
-    private var inputTransform = ViewTransform()
+    private(set) var inputTransform = ViewTransform()
     private(set) var inputInZoomPanel = false
 
     private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
@@ -253,12 +169,12 @@ final class CanvasView: UIView {
         backgroundColor = deskColor
         isMultipleTouchEnabled = true
 
-        pageLayer.backgroundColor = paperColor.cgColor
         pageLayer.shadowColor = shadowColor.cgColor
         pageLayer.shadowOpacity = 0.18
         pageLayer.shadowRadius = 6
         pageLayer.shadowOffset = CGSize(width: 0, height: 2)
         layer.addSublayer(pageLayer)
+        addSubview(templateView)
 
         inkClipView.isUserInteractionEnabled = false
         inkClipView.backgroundColor = .clear
@@ -268,7 +184,7 @@ final class CanvasView: UIView {
         committedLayer.anchorPoint = .zero
         inkClipView.layer.addSublayer(committedLayer)
 
-        liveView.paperColor = paperColor.cgColor
+        templateView.provideBackdrop(for: liveView)
         liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
         inkClipView.addSubview(liveView)
 
@@ -284,7 +200,9 @@ final class CanvasView: UIView {
             guard let self else { return }
             controller?.documentDidChange(canUndo: self.document.canUndo, canRedo: self.document.canRedo)
         }
-        document.onPageSizeChange = { [weak self] in self?.resetView() }
+        document.onPageSizeChange = { [weak self] in self?.resetView(); self?.applyPaper() }
+        document.onTemplateChange = { [weak self] in self?.applyPaper() }
+        applyPaper()
     }
 
     @available(*, unavailable)
@@ -319,24 +237,36 @@ final class CanvasView: UIView {
     func apply(_ theme: InkTheme) {
         // Called on every SwiftUI update; the theme rarely changes.
         guard theme.paper != paperColor || theme.desk != deskColor || theme.accent != accentColor
-            || theme.shadow != shadowColor
+            || theme.shadow != shadowColor || theme.paperPalettes != paperTheme.paperPalettes
         else { return }
         paperColor = theme.paper
+        paperTheme = theme
         deskColor = theme.desk
         accentColor = theme.accent
         shadowColor = theme.shadow
         backgroundColor = deskColor
-        pageLayer.backgroundColor = paperColor.resolvedColor(with: traitCollection).cgColor
         pageLayer.shadowColor = shadowColor.resolvedColor(with: traitCollection).cgColor
-        liveView.paperColor = paperColor.resolvedColor(with: traitCollection).cgColor
+        applyPaper()
         lassoOverlayView.setNeedsDisplay()
         zoomPanel?.apply(theme, traits: traitCollection)
         zoomBoxView?.apply(theme, traits: traitCollection)
     }
 
+    /// Colours the page with its template's paper and shows the template.
+    private func applyPaper() {
+        let surface = templateView.show(document, theme: paperTheme)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pageLayer.backgroundColor = surface
+        CATransaction.commit()
+        liveView.paperColor = surface
+        liveView.invalidateAll()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         inkClipView.frame = bounds
+        templateView.frame = bounds
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
         layoutZoomPanel()
@@ -379,7 +309,7 @@ final class CanvasView: UIView {
     }
 
     /// Drops a stroke's cached geometry after the stroke changed.
-    private func forgetGeometry(_ id: UUID) {
+    func forgetGeometry(_ id: UUID) {
         geometryCache[id] = nil
         modifiedSinceSnapshot.insert(id)
         modifiedSinceWarmup.insert(id)
@@ -676,7 +606,7 @@ final class CanvasView: UIView {
         }
     }
 
-    private func dropOrphanedPendingStrokes() {
+    func dropOrphanedPendingStrokes() {
         let strokeIDs = Set(document.strokes.map(\.id))
         pending.removeAll { !strokeIDs.contains($0.live.stroke.id) }
         if !selection.isEmpty, !selection.isSubset(of: strokeIDs) {
@@ -697,7 +627,7 @@ final class CanvasView: UIView {
         for stroke in pending.map(\.live) + (live.map { [$0] } ?? []) {
             entries.append(LiveInkView.Entry(
                 stroke: stroke,
-                previewFill: stroke.stroke.tool == .pixelEraser ? paperColor.cgColor : nil
+                previewFill: stroke.stroke.tool == .pixelEraser ? liveView.paperColor : nil
             ))
         }
         return entries
@@ -814,6 +744,7 @@ final class CanvasView: UIView {
         CATransaction.setDisableActions(true)
         pageLayer.frame = frame
         pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
+        templateView.follow(viewTransform)
         inkMask.frame = inkClipView.bounds
         inkMask.path = CGPath(rect: frame, transform: nil)
         if let zoomBoxView, let zoomWindow {
@@ -1276,46 +1207,6 @@ final class CanvasView: UIView {
         hud.state = .idle
         hud.predictedCount = 0
         publishHUD(force: true)
-    }
-
-    // MARK: - Stroke eraser
-
-    private func eraseStrokes(along point: CGPoint) {
-        guard var session = eraseSession, let controller else { return }
-        let radius = CGFloat(controller.current.width) / 2 / inputTransform.scale
-        let from = session.last ?? point
-        let steps = max(1, Int((from.distance(to: point) / (radius * 0.5)).rounded(.up)))
-        let sweep = CGRect(x: min(from.x, point.x), y: min(from.y, point.y),
-                           width: abs(from.x - point.x), height: abs(from.y - point.y))
-            .insetBy(dx: -radius, dy: -radius)
-
-        var hits = Set<UUID>()
-        // Pixel-eraser strokes are invisible; removing them would resurrect ink, so they're skipped.
-        for stroke in document.strokes where stroke.tool != .pixelEraser {
-            let bounds = geometry(for: stroke).bounds
-            guard bounds.intersects(sweep) else { continue }
-            for k in 0 ... steps {
-                let t = CGFloat(k) / CGFloat(steps)
-                if StrokeRenderer.hitTest(stroke, bounds: bounds, point: from + (point - from) * t, radius: radius) {
-                    hits.insert(stroke.id)
-                    break
-                }
-            }
-        }
-        if !hits.isEmpty {
-            for id in hits {
-                forgetGeometry(id)
-            }
-            session.removals += document.remove(ids: hits)
-            dropOrphanedPendingStrokes()
-            requestFullRender()
-        }
-        session.last = point
-        eraseSession = session
-
-        let c = inputTransform.toView(point), r = radius * inputTransform.scale
-        setCursor(CGPath(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r), transform: nil),
-                  inZoomPanel: inputInZoomPanel)
     }
 
     // MARK: - HUD

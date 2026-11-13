@@ -3,12 +3,14 @@ import NotaCore
 import NotaUI
 import SwiftUI
 
-/// Chooses the paper and page size of a new note. Remembers the last choice for the next note.
+/// Chooses the template, paper and page size of a new note. Remembers the last choice for the next note.
 struct NewNoteSheet: View {
-    let onCreate: (PaperStyle, PageSize) -> Void
+    let onCreate: (PageTemplate, PageSize) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("newNotePaper") private var paper: PaperStyle = .lined
+    /// `PageTemplate.encodedString`; before templates this key held a paper name, which reads the same way.
+    @AppStorage("newNotePaper") private var storedTemplate = ""
+    @State private var template = PageTemplate.noteDefault
     @AppStorage("newNotePageSize") private var storedSize = ""
     @State private var size: PageSize = .localeDefault
     @State private var isEnteringCustomSize = false
@@ -16,8 +18,12 @@ struct NewNoteSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Paper") {
-                    paperPicker
+                Section("Template") {
+                    templatePicker
+                    Picker("Paper", selection: $template.paper) {
+                        ForEach(PaperColor.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
                 }
                 Section("Page Size") {
                     Picker("Size", selection: presetBinding) {
@@ -41,7 +47,8 @@ struct NewNoteSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
                         storedSize = Self.encode(size)
-                        onCreate(paper, size)
+                        storedTemplate = template.encodedString
+                        onCreate(template, size)
                         dismiss()
                     }
                 }
@@ -54,32 +61,40 @@ struct NewNoteSheet: View {
             if let remembered = Self.decode(storedSize) {
                 size = remembered
             }
+            if let remembered = PageTemplate(encodedString: storedTemplate), remembered.background == nil {
+                template = remembered
+            }
         }
     }
 
-    private var paperPicker: some View {
-        HStack(spacing: NotaSpacing.l) {
-            ForEach(PaperStyle.allCases) { style in
+    /// Every built-in, drawn on the chosen paper.
+    private var templatePicker: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: NotaSpacing.l), count: 5),
+                  spacing: NotaSpacing.l) {
+            ForEach(PageTemplate.Preset.allCases) { preset in
+                let isSelected = template.preset == preset
                 Button {
-                    paper = style
+                    template = preset.template.on(template.paper)
                 } label: {
                     VStack(spacing: NotaSpacing.xs) {
-                        PaperThumbnail(paper: style)
+                        PaperThumbnail(template: preset.template.on(template.paper))
                             .aspectRatio(PaperThumbnail.aspectRatio, contentMode: .fit)
                             .clipShape(RoundedRectangle(cornerRadius: NotaRadius.paper, style: .continuous))
                             .overlay {
                                 RoundedRectangle(cornerRadius: NotaRadius.paper, style: .continuous)
-                                    .strokeBorder(style == paper ? NotaColor.accentInk : NotaColor.borderCard,
-                                                  lineWidth: style == paper ? 2 : 1)
+                                    .strokeBorder(isSelected ? NotaColor.accentInk : NotaColor.borderCard,
+                                                  lineWidth: isSelected ? 2 : 1)
                             }
-                        Text(style.title)
+                        Text(preset.title)
                             .font(NotaFont.footnoteEmph)
-                            .foregroundStyle(style == paper ? NotaColor.textInk : NotaColor.textSecondary)
+                            .foregroundStyle(isSelected ? NotaColor.textInk : NotaColor.textSecondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(style.title)
-                .accessibilityAddTraits(style == paper ? .isSelected : [])
+                .accessibilityLabel(preset.title)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
         .padding(.vertical, NotaSpacing.s)
