@@ -26,6 +26,11 @@ final class CanvasController: ObservableObject {
     @Published var pressureGamma: Double = 0.6
     @Published var tiltEnabled = true
     @Published var hudVisible = true
+    /// Set while Record Pencil Input is on; the canvas feeds it every ink event (see `InkInputRecording`).
+    private(set) var inputRecorder: InputRecorder?
+    @Published private(set) var isRecordingInput = false
+    /// The last finished recording, written to a temporary file so the More menu can share it.
+    @Published private(set) var lastRecordingURL: URL?
     /// Simulator only: altitude fed to the fake Pencil so tilt shading can be exercised.
     @Published var simulatedAltitudeDegrees: Double = 90
 
@@ -54,6 +59,26 @@ final class CanvasController: ObservableObject {
     var onSwipeToPage: ((PageSwipe) -> Void)?
     /// Whether there's a page to turn to in that direction (and no page turn already under way).
     var canSwipeToPage: ((PageSwipe) -> Bool)?
+
+    /// Starts or stops recording Pencil input. Stopping writes the strokes recorded so far (if any) to
+    /// a temporary `.inkrec.json` file, offered by the More menu for the benchmarks' fixtures.
+    func setRecordingInput(_ on: Bool) {
+        guard on != isRecordingInput else { return }
+        if on {
+            inputRecorder = InputRecorder()
+        } else if let recording = inputRecorder?.recording {
+            inputRecorder = nil
+            if !recording.strokes.isEmpty, let data = try? recording.encoded() {
+                let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("pencil-\(stamp).inkrec.json")
+                if (try? data.write(to: url)) != nil {
+                    lastRecordingURL = url
+                }
+            }
+        }
+        isRecordingInput = on
+    }
 
     func canSwipe(_ swipe: PageSwipe) -> Bool {
         canSwipeToPage?(swipe) ?? false

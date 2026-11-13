@@ -657,6 +657,26 @@ final class LiveStroke {
         Array(finalized.joined()) + tail
     }
 
+    /// Appends one real (coalesced) sample and returns its index. A sample within `minSpacing` canvas
+    /// points of the last one only updates that point's pressure, so it never adds a degenerate segment;
+    /// then the result is nil. The canvas and the benchmark replay both feed samples through here.
+    @discardableResult
+    func append(_ point: StrokePoint, minSpacing: CGFloat) -> Int? {
+        if let last = stroke.points.last, last.location.distance(to: point.location) < minSpacing {
+            stroke.points[stroke.points.count - 1].force = point.force
+            return nil
+        }
+        stroke.points.append(point)
+        return stroke.points.count - 1
+    }
+
+    /// The per-event step after appending an event's samples: finalizes every segment that now has its
+    /// four real control points and rebuilds the provisional tail with `predicted`. Returns the
+    /// canvas-space rect the live layer must redraw.
+    func advance(predicted: [StrokePoint]) -> CGRect {
+        finalizeAvailable().union(rebuildTail(predicted: predicted))
+    }
+
     /// Unchanged contract: finalize every segment whose 4 control points are real samples
     /// (while finalizedCount + 2 < stroke.points.count). Returns canvas-space dirty rect.
     @discardableResult

@@ -190,6 +190,22 @@ final class LiveInkView: UIView {
         invalidateAll()
     }
 
+    /// Draws every tile waiting for display now instead of at the next Core Animation commit. The
+    /// benchmarks call it after each replayed event to time the frame's live-layer fill with the event.
+    func displayPendingTiles() {
+        for tile in tiles.values {
+            tile.displayIfNeeded()
+        }
+    }
+
+    /// Bytes held by the tiles' backing stores and the baked per-stroke tile bitmaps.
+    var tileMemory: Int {
+        let tilePixels = Int((Self.tileSize * scale).rounded(.up))
+        let tileBytes = tilePixels * tilePixels * 4
+        let bakedCount = rasters.values.reduce(0) { $0 + $1.values.filter { $0.context != nil }.count }
+        return (tiles.count + bakedCount) * tileBytes
+    }
+
     func setCursor(_ path: CGPath?) {
         cursorHalo.path = path
         cursorLine.path = path

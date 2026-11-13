@@ -316,20 +316,7 @@ final class CanvasView: UIView {
         let pixelSize = bitmapPixelSize
         let scale = bitmapScale
         renderQueue.sync {
-            guard pixelSize.width > 0, pixelSize.height > 0,
-                  let space = CGColorSpace(name: CGColorSpace.sRGB),
-                  let ctx = CGContext(data: nil,
-                                      width: Int(pixelSize.width),
-                                      height: Int(pixelSize.height),
-                                      bitsPerComponent: 8, bytesPerRow: 0, space: space,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                                          | CGBitmapInfo.byteOrder32Little.rawValue)
-            else { self.bitmap = nil; return }
-            // Flip to UIKit's top-left origin and scale so the bitmap is addressed in view points.
-            ctx.translateBy(x: 0, y: pixelSize.height)
-            ctx.scaleBy(x: scale, y: -scale)
-            ctx.setShouldAntialias(true)
-            self.bitmap = ctx
+            self.bitmap = CommittedRenderer.makeBitmap(pixelSize: pixelSize, scale: scale)
         }
     }
 
@@ -350,14 +337,6 @@ final class CanvasView: UIView {
         }
     }
 
-    private struct RenderSnapshotItem {
-        let id: UUID
-        let kind: InkKind
-        let color: RGBA
-        let cachedGeometry: StrokeGeometry?
-        let stroke: Stroke?
-    }
-
     private func startFullRender() {
         generation &+= 1
         let currentGeneration = generation
@@ -369,76 +348,22 @@ final class CanvasView: UIView {
         let targetTransform = bitmapTransform
 
         let unsubmittedIDs = Set(pending.filter { !$0.submitted }.map(\.live.stroke.id))
-        var itemsToRender: [RenderSnapshotItem] = []
-        for stroke in document.strokes {
-            guard !unsubmittedIDs.contains(stroke.id) else { continue }
-            if let cached = geometryCache[stroke.id] {
-                itemsToRender.append(RenderSnapshotItem(
-                    id: stroke.id,
-                    kind: stroke.tool,
-                    color: stroke.color,
-                    cachedGeometry: cached,
-                    stroke: nil
-                ))
-            } else {
-                itemsToRender.append(RenderSnapshotItem(
-                    id: stroke.id,
-                    kind: stroke.tool,
-                    color: stroke.color,
-                    cachedGeometry: nil,
-                    stroke: stroke
-                ))
-            }
+        let itemsToRender = document.strokes.compactMap { stroke -> CommittedRenderer.Item? in
+            guard !unsubmittedIDs.contains(stroke.id) else { return nil }
+            let cached = geometryCache[stroke.id]
+            return CommittedRenderer.Item(id: stroke.id, kind: stroke.tool, color: stroke.color,
+                                          geometry: cached, stroke: cached == nil ? stroke : nil)
         }
 
         let coveredPending = pending.filter(\.submitted)
 
         renderQueue.async { [weak self] in
             guard let self else { return }
-            let visible = targetTransform.toCanvas(currentBounds)
             var computedGeometries: [(UUID, StrokeGeometry)] = []
-
-            struct DrawItem {
-                let runs: [StrokeRun]
-                let clip: CGRect
-                let kind: InkKind
-                let color: RGBA
-            }
-            var drawItems: [DrawItem] = []
-            drawItems.reserveCapacity(itemsToRender.count)
-
-            for item in itemsToRender {
-                let geom: StrokeGeometry
-                if let cached = item.cachedGeometry {
-                    geom = cached
-                } else if let stroke = item.stroke {
-                    let computed = StrokeRenderer.geometry(for: stroke)
-                    computedGeometries.append((item.id, computed))
-                    geom = computed
-                } else {
-                    continue
-                }
-                if geom.bounds.intersects(visible) {
-                    drawItems.append(DrawItem(
-                        runs: geom.runs,
-                        clip: geom.bounds.insetBy(dx: -2, dy: -2),
-                        kind: item.kind,
-                        color: item.color
-                    ))
-                }
-            }
-
             var image: CGImage?
             if let ctx = bitmap {
-                ctx.clear(currentBounds)
-                ctx.saveGState()
-                ctx.concatenate(targetTransform.affine)
-                PencilTexture.prepareContext(ctx, phase: targetTransform.offset)
-                for item in drawItems {
-                    StrokeRenderer.draw(runs: item.runs, clip: item.clip,
-                                        kind: item.kind, color: item.color, in: ctx)
-                }
-                ctx.restoreGState()
+                computedGeometries = CommittedRenderer.render(itemsToRender, into: ctx, bounds: currentBounds,
+                                                              transform: targetTransform)
                 image = ctx.makeImage()
             }
 
@@ -924,6 +849,11 @@ final class CanvasView: UIView {
         var liveTouchesTail = false
         var pendingDirty = CGRect.null
         for touch in touches {
+            if let recorder = controller?.inputRecorder, let key = touch.estimationUpdateIndex {
+                let v = sampleValues(touch)
+                recorder.update(estimationKey: key, force: v.force, altitude: v.altitude, azimuth: v.azimuth,
+                                final: touch.estimatedPropertiesExpectingUpdates.isEmpty)
+            }
             guard let key = touch.estimationUpdateIndex, let ref = pendingEstimates[key] else { continue }
             let refined = sampleValues(touch)
             let apply: (inout StrokePoint) -> Void = { p in
@@ -1009,8 +939,10 @@ final class CanvasView: UIView {
             eraseSession = EraseSession()
         } else if controller.tool == .eraser || document.contains(start) {
             let template = controller.strokeTemplate(viewScale: viewTransform.scale)
-            live = LiveStroke(stroke: Stroke(id: UUID(), tool: template.kind, color: template.color,
-                                             style: template.style, points: []))
+            let stroke = Stroke(id: UUID(), tool: template.kind, color: template.color, style: template.style,
+                                points: [])
+            live = LiveStroke(stroke: stroke)
+            controller.inputRecorder?.begin(stroke, viewScale: viewTransform.scale, pageSize: document.pageSize)
         }
         if hoverActive {
             setCursor(nil)
@@ -1030,8 +962,8 @@ final class CanvasView: UIView {
             // Predicted touches are never stored: the tail is rebuilt (and they're dropped) on the next real event.
             let predicted = final ? [] : (event?.predictedTouches(for: touch) ?? []).map { makePoint($0, predicted: true) }
             hud.predictedCount = predicted.count
-            let dirty = live.finalizeAvailable().union(live.rebuildTail(predicted: predicted))
-            invalidateLive(canvasRect: dirty)
+            controller?.inputRecorder?.endEvent(strokeID: live.stroke.id, predicted: predicted)
+            invalidateLive(canvasRect: live.advance(predicted: predicted))
         }
         hud.state = touch.type == .pencil ? .pencilDown : .simulatedPencil
         publishHUD(force: final)
@@ -1055,15 +987,12 @@ final class CanvasView: UIView {
             return
         }
         guard let live else { return }
-        if let last = live.stroke.points.last,
-           last.location.distance(to: point.location) * viewTransform.scale < 0.3 {
-            // Near-duplicate sample: keep the newest pressure but don't add a degenerate segment.
-            live.stroke.points[live.stroke.points.count - 1].force = point.force
-            return
-        }
-        let index = live.stroke.points.count
-        live.stroke.points.append(point)
-        if !touch.estimatedPropertiesExpectingUpdates.isEmpty, let key = touch.estimationUpdateIndex {
+        let expectsUpdate = !touch.estimatedPropertiesExpectingUpdates.isEmpty
+        controller?.inputRecorder?.sample(point, strokeID: live.stroke.id,
+                                          estimationKey: expectsUpdate ? touch.estimationUpdateIndex : nil)
+        // Near-duplicate samples (under 0.3 view points apart) only update the last point's pressure.
+        guard let index = live.append(point, minSpacing: 0.3 / viewTransform.scale) else { return }
+        if expectsUpdate, let key = touch.estimationUpdateIndex {
             if let old = pendingEstimates[key] {
                 decrementOutstandingEstimates(for: old.strokeID)
             }

@@ -114,6 +114,14 @@ struct PenCase: View {
             Toggle(isOn: $controller.hudVisible) {
                 Label("Debug HUD", systemImage: "gauge.with.dots.needle.67percent")
             }
+            Toggle(isOn: Binding(get: { controller.isRecordingInput }, set: { controller.setRecordingInput($0) })) {
+                Label("Record Pencil Input", systemImage: "record.circle")
+            }
+            if let url = controller.lastRecordingURL, !controller.isRecordingInput {
+                ShareLink(item: url) {
+                    Label("Share Pencil Recording…", systemImage: "square.and.arrow.up")
+                }
+            }
             Divider()
             Button(role: .destructive) { confirmClear = true } label: {
                 Label("Clear Page", systemImage: "trash")

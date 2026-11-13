@@ -81,12 +81,14 @@ InkCanvasEditor(notebook: notebook)
 Run the package tests on an iPad simulator (InkKit and NotaCore have test targets):
 
 ```bash
-cd Packages/InkKit && xcodebuild test -scheme InkKit -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
+cd Packages/InkKit && xcodebuild test -scheme InkKit -skip-testing:InkKitBenchmarks -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
 ```
 
 ```bash
 cd Packages/NotaCore && xcodebuild test -scheme NotaCore -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
 ```
+
+InkKit's performance benchmarks and latency budgets (page open under 150 ms for 5k strokes, under 2 ms of live-stroke work per touch event) run nightly in CI against a stored baseline; run them locally with `scripts/run-benchmarks.sh bench-output`. See [Packages/InkKit/README.md › Benchmarks](Packages/InkKit/README.md#benchmarks).
 
 ## Known limitations
 
