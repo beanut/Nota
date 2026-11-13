@@ -18,10 +18,8 @@ struct CommittedRasterTests {
     /// than one alpha run), highlighter (multiply) and pixel eraser (destination-out).
     private func page(_ count: Int) -> [Stroke] {
         (0 ..< count).map { n in
-            let tool: InkKind = [.pen, .pencil, .highlighter, .pen, .pixelEraser][n % 5]
-            let style = BrushStyle(width: tool == .highlighter ? 14 : 4, minWidthRatio: 0.25, pressureGamma: 0.6,
-                                   opacity: tool == .highlighter ? 0.38 : (tool == .pencil ? 0.85 : 1),
-                                   tiltEnabled: true)
+            let tool: TestBrush = [.pen, .pencil, .highlighter, .pen, .pixelEraser][n % 5]
+            let brush = tool.brush(width: tool == .highlighter ? 14 : 4, tilt: true)
             let y0 = CGFloat(n * 37 % 560) + 10, x0 = CGFloat(n * 53 % 120) + 5
             let points = (0 ..< 40).map { (i: Int) -> StrokePoint in
                 let t = CGFloat(i)
@@ -31,15 +29,14 @@ struct CommittedRasterTests {
                 return StrokePoint(location: location, force: force, altitude: altitude, azimuth: t * 0.2,
                                    timestamp: Double(i) / 240)
             }
-            return Stroke(id: UUID(), tool: tool, color: RGBA.swatches[n % RGBA.swatches.count], style: style,
-                          points: points)
+            return Stroke(id: UUID(), color: RGBA.swatches[n % RGBA.swatches.count], brush: brush, points: points)
         }
     }
 
     private func render(_ strokes: [Stroke], parallel: Bool = true) throws -> CGContext {
         let ctx = try #require(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: scale))
         let items = strokes.map {
-            CommittedRenderer.Item(id: $0.id, kind: $0.tool, color: $0.color, geometry: nil, stroke: $0)
+            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0)
         }
         CommittedRenderer.render(items, into: ctx, bounds: bounds, transform: transform, parallel: parallel)
         return ctx

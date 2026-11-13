@@ -16,7 +16,7 @@ enum CommittedRenderer {
     /// One stroke to draw: its geometry if the canvas has it cached, otherwise the stroke to build it from.
     struct Item {
         let id: UUID
-        let kind: InkKind
+        let brush: BrushDescriptor
         let color: RGBA
         let geometry: StrokeGeometry?
         let stroke: Stroke?
@@ -62,7 +62,7 @@ enum CommittedRenderer {
             if geom.bounds.intersects(visible) {
                 drawItems.append(DrawItem(runs: geom.runs, bounds: geom.bounds,
                                           clip: geom.bounds.insetBy(dx: -2, dy: -2),
-                                          kind: item.kind, color: item.color))
+                                          brush: item.brush, color: item.color))
             }
         }
 
@@ -77,13 +77,13 @@ enum CommittedRenderer {
         let runs: [StrokeRun]
         let bounds: CGRect
         let clip: CGRect
-        let kind: InkKind
+        let brush: BrushDescriptor
         let color: RGBA
     }
 
     /// Every stroke's geometry, in order, built on every core.
     static func geometries(for strokes: [Stroke]) -> [StrokeGeometry] {
-        let items = strokes.map { Item(id: $0.id, kind: $0.tool, color: $0.color, geometry: nil, stroke: $0) }
+        let items = strokes.map { Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0) }
         return buildGeometry(items).map { $0! }
     }
 
@@ -123,7 +123,7 @@ enum CommittedRenderer {
         PencilTexture.prepareContext(ctx, phase: CGPoint(x: transform.offset.x,
                                                          y: transform.offset.y - patternShift))
         for item in items {
-            StrokeRenderer.draw(runs: item.runs, clip: item.clip, kind: item.kind, color: item.color, in: ctx)
+            StrokeRenderer.draw(runs: item.runs, clip: item.clip, brush: item.brush, color: item.color, in: ctx)
         }
         ctx.restoreGState()
     }

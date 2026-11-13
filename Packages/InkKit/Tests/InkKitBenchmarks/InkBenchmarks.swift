@@ -130,6 +130,64 @@ final class InkBenchmarks: XCTestCase {
         check(late.p95, under: Self.liveEventBudgetMs, "Live-stroke work late in a long stroke (p95)")
     }
 
+    // MARK: Stamp brushes
+
+    /// The stamp path's benchmark brush (NOT-16): a dry brush, with bristles and every kind of jitter,
+    /// sized from each recorded stroke's width. It has no budget yet; these numbers are its baseline.
+    static func stampBrush(width: CGFloat) -> BrushDescriptor {
+        BrushDescriptor(name: "Benchmark Dry Brush", size: width * 0.5 ... width * 2,
+                        texture: .bristle(count: 8, spread: 0.9), spacing: 0.3,
+                        jitter: .init(size: 0.3, angle: 0.2, scatter: 0.1, opacity: 0.4, seed: 1))
+    }
+
+    /// `testStrokeGeometryBuild` with every corpus stroke drawn with the stamp brush.
+    func testStampBrushGeometryBuild() {
+        let strokes = corpus.strokes.map { stroke in
+            var stroke = stroke
+            stroke.brush = Self.stampBrush(width: stroke.brush.maxWidth)
+            return stroke
+        }
+        let times = timed {
+            for stroke in strokes {
+                _ = StrokeRenderer.geometry(for: stroke)
+            }
+        }
+        let stats = Stats(times)
+        BenchResults.record("stroke_geometry.stamp.corpus_ms", stats.median, unit: "ms")
+        BenchResults.record("stroke_geometry.stamp.per_stroke_us", stats.median * 1000 / Double(strokes.count),
+                            unit: "us")
+    }
+
+    /// `testLiveStrokeAppend` with every recorded stroke drawn with the stamp brush.
+    func testStampBrushLiveStroke() {
+        let transform = Bench.fittedTransform(for: corpus.pageSize)
+        let replayer = InputReplayer(viewSize: Bench.screen, transform: transform, displayScale: Bench.displayScale)
+        let recordings = corpus.recordedStrokes.map { recorded in
+            var recorded = recorded
+            recorded.brush = Self.stampBrush(width: CGFloat(recorded.style.width))
+            return recorded
+        }
+        var events: [Double] = []
+        var iteration = 0
+        measure(metrics: [XCTClockMetric()], options: Bench.measureOptions) {
+            defer { iteration += 1 }
+            for recorded in recordings {
+                var last = Bench.now()
+                replayer.replay(recorded, transform: transform) { _ in
+                    let now = Bench.now()
+                    if iteration > 0 {
+                        events.append(Double(now - last) / 1_000_000)
+                    }
+                    last = now
+                }
+            }
+        }
+        let stats = Stats(events)
+        BenchResults.record("live_event.stamp.p50_ms", stats.median, unit: "ms")
+        BenchResults.record("live_event.stamp.p95_ms", stats.p95, unit: "ms")
+        BenchResults.record("live_event.stamp.p99_ms", stats.p99, unit: "ms")
+    }
+
     // MARK: Page open
 
     /// Opening a page the canvas has shown before: a fresh screen-sized committed bitmap and the page's
@@ -175,7 +233,7 @@ final class InkBenchmarks: XCTestCase {
     /// A page of `count` strokes drawn fitted into a committed bitmap, as the canvas shows it.
     private func fittedPage(strokes count: Int) throws -> (CGImage, ViewTransform) {
         let page = corpus.page(strokes: count)
-        let items = page.map { CommittedRenderer.Item(id: $0.id, kind: $0.tool, color: $0.color, geometry: nil, stroke: $0) }
+        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0) }
         let transform = Bench.fittedTransform(for: corpus.pageSize)
         let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
         CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
@@ -187,7 +245,7 @@ final class InkBenchmarks: XCTestCase {
     /// at the fitted zoom, exactly as `CanvasView`'s first full render.
     private func pageOpenCold(strokes count: Int, iterations: Int) {
         let page = corpus.page(strokes: count)
-        let items = page.map { CommittedRenderer.Item(id: $0.id, kind: $0.tool, color: $0.color, geometry: nil, stroke: $0) }
+        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0) }
         let transform = Bench.fittedTransform(for: corpus.pageSize)
         let times = timed(iterations: iterations) {
             guard let ctx = CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale) else {
@@ -246,7 +304,7 @@ final class InkBenchmarks: XCTestCase {
     func testFullPageRedraw5k() throws {
         let page = corpus.page(strokes: 5000)
         let items = page.map {
-            CommittedRenderer.Item(id: $0.id, kind: $0.tool, color: $0.color,
+            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color,
                                    geometry: StrokeRenderer.geometry(for: $0), stroke: nil)
         }
         let transform = Bench.fittedTransform(for: corpus.pageSize)
@@ -282,7 +340,7 @@ final class InkBenchmarks: XCTestCase {
                                               centredOn: CGPoint(x: box.midX, y: box.midY))
         let pixels = Bench.pixelSize
         let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale))
-        let items = page.map { CommittedRenderer.Item(id: $0.id, kind: $0.tool, color: $0.color, geometry: cache[$0.id], stroke: nil) }
+        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: cache[$0.id], stroke: nil) }
         CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
         let image = ctx.makeImage()
         peak = max(peak, Bench.footprint())

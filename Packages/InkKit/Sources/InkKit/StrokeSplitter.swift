@@ -121,10 +121,11 @@ enum StrokeSplitter {
 
         var samples = splineSamples(pts)
         guard samples.count > 2 else { return nil }
+        let brush = BrushModel(stroke.brush)
         for k in samples.indices {
             let prev = samples[max(k - 1, 0)].point.location
             let next = samples[min(k + 1, samples.count - 1)].point.location
-            samples[k].cut = isCut(samples[k].point, direction: next - prev, style: stroke.style, coverage: coverage)
+            samples[k].cut = isCut(samples[k].point, direction: next - prev, brush: brush, coverage: coverage)
         }
 
         // Interior runs of cut samples → (first, last) sample indices of each run.
@@ -178,8 +179,8 @@ enum StrokeSplitter {
     }
 
     /// True when the nib's full extent across `direction` is inside the eraser coverage.
-    private static func isCut(_ p: StrokePoint, direction: CGPoint, style: BrushStyle, coverage: Coverage) -> Bool {
-        let tip = StrokeRenderer.tip(for: p, style: style)
+    private static func isCut(_ p: StrokePoint, direction: CGPoint, brush: BrushModel, coverage: Coverage) -> Bool {
+        let tip = StrokeRenderer.tip(for: p, brush: brush)
         guard coverage.contains(tip.center) else { return false }
         let len = hypot(direction.x, direction.y)
         guard len > 1e-6 else { return false }
@@ -215,7 +216,7 @@ enum StrokeSplitter {
         if b.t > 0 {
             pts.append(b.point)
         }
-        return Stroke(id: UUID(), tool: stroke.tool, color: stroke.color, style: stroke.style, points: pts,
+        return Stroke(id: UUID(), color: stroke.color, brush: stroke.brush, points: pts,
                       createdAt: stroke.createdAt)
     }
 }
