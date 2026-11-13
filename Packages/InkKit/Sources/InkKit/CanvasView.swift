@@ -10,7 +10,7 @@ import UIKit
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
 final class CanvasView: UIView {
     /// The page, the desk around it and the lasso's accent, from the editor's `InkTheme` (see `apply(_:)`).
-    private var paperColor = InkTheme.standard.paper
+    private(set) var paperColor = InkTheme.standard.paper
     private var deskColor = InkTheme.standard.desk
     private var accentColor = InkTheme.standard.accent
     private var shadowColor = InkTheme.standard.shadow
@@ -64,13 +64,13 @@ final class CanvasView: UIView {
     private let inkMask = CAShapeLayer()
     private var fittedBoundsSize = CGSize.zero
     private let committedLayer = CALayer()
-    private let liveView = LiveInkView()
+    let liveView = LiveInkView()
     private let renderQueue = DispatchQueue(label: "InkCanvas.render", qos: .userInteractive)
     private var generation: UInt64 = 0
     private var bitmap: CGContext?
     private var bitmapPixelSize = CGSize.zero
-    private var bitmapScale: CGFloat = 2
-    private var geometryCache: [UUID: StrokeGeometry] = [:]
+    private(set) var bitmapScale: CGFloat = 2
+    private(set) var geometryCache: [UUID: StrokeGeometry] = [:]
 
     private final class PendingStroke {
         var live: LiveStroke
@@ -99,10 +99,10 @@ final class CanvasView: UIView {
     private var isCommitScheduled = false
 
     // Input state
-    private var activeTouch: UITouch?
-    private var live: LiveStroke?
-    private var eraseSession: EraseSession?
-    private struct EraseSession {
+    private(set) var activeTouch: UITouch?
+    private(set) var live: LiveStroke?
+    var eraseSession: EraseSession?
+    struct EraseSession {
         var removals: [CanvasDocument.Removal] = []
         var last: CGPoint?
     }
@@ -137,6 +137,28 @@ final class CanvasView: UIView {
 
         private var simPrevious: SimSample?
     #endif
+
+    // Zoom window: the box on the page, the writing panel that magnifies it, and the panel's renders.
+    enum ZoomMove { case back, advance, newLine }
+    var zoomWindow: ZoomWindow?
+    var zoomPanel: ZoomPanelView?
+    var zoomBoxView: ZoomBoxOverlayView?
+    let zoomRenderQueue = DispatchQueue(label: "InkCanvas.zoomRender", qos: .userInteractive)
+    var zoomBitmap: CGContext? // touched only on zoomRenderQueue
+    var zoomGeneration: UInt64 = 0
+    var zoomRenderScheduled = false
+    var zoomRenderInFlight = false
+    var zoomRenderRequested = false
+    /// Strokes that ended while the panel was showing, kept on the panel's live layer until a render of
+    /// the box includes them, so they never blink out.
+    var zoomHeld: [LiveStroke] = []
+    /// A touch dragging the box by its tab or resizing it by its knob.
+    var zoomTouch: UITouch?
+    var zoomDrag: ZoomDrag?
+    /// What the active touch's locations are mapped through onto the page: the page's own transform, or the
+    /// panel's when the stroke began in the panel.
+    private(set) var inputTransform = ViewTransform()
+    private(set) var inputInZoomPanel = false
 
     private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
     private lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
@@ -226,6 +248,8 @@ final class CanvasView: UIView {
         pageLayer.shadowColor = shadowColor.resolvedColor(with: traitCollection).cgColor
         applyPaper()
         lassoOverlayView.setNeedsDisplay()
+        zoomPanel?.apply(theme, traits: traitCollection)
+        zoomBoxView?.apply(theme, traits: traitCollection)
     }
 
     /// Colours the page with its template's paper and shows the template.
@@ -245,6 +269,7 @@ final class CanvasView: UIView {
         templateView.frame = bounds
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
+        layoutZoomPanel()
         if bounds.size != fittedBoundsSize, bounds.width > 0, bounds.height > 0 {
             // First layout or a rotation / split-view resize: show the whole page again.
             fittedBoundsSize = bounds.size
@@ -253,6 +278,7 @@ final class CanvasView: UIView {
             updateCommittedLayerTransform()
             controller?.zoomDidChange(viewTransform.scale)
         }
+        updateZoomWindow()
         updatePageChrome()
         let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
         let pixels = CGSize(width: (bounds.width * scale).rounded(.up), height: (bounds.height * scale).rounded(.up))
@@ -283,13 +309,13 @@ final class CanvasView: UIView {
     }
 
     /// Drops a stroke's cached geometry after the stroke changed.
-    private func forgetGeometry(_ id: UUID) {
+    func forgetGeometry(_ id: UUID) {
         geometryCache[id] = nil
         modifiedSinceSnapshot.insert(id)
         modifiedSinceWarmup.insert(id)
     }
 
-    private func geometry(for stroke: Stroke) -> StrokeGeometry {
+    func geometry(for stroke: Stroke) -> StrokeGeometry {
         if let g = geometryCache[stroke.id] {
             return g
         }
@@ -389,6 +415,7 @@ final class CanvasView: UIView {
         updateCommittedLayerTransform()
         CATransaction.commit()
         liveView.underlay = image
+        scheduleZoomRender()
     }
 
     // MARK: - Page raster
@@ -579,14 +606,15 @@ final class CanvasView: UIView {
         }
     }
 
-    private func dropOrphanedPendingStrokes() {
+    func dropOrphanedPendingStrokes() {
         let strokeIDs = Set(document.strokes.map(\.id))
         pending.removeAll { !strokeIDs.contains($0.live.stroke.id) }
         if !selection.isEmpty, !selection.isSubset(of: strokeIDs) {
             selection.formIntersection(strokeIDs)
             updateSelectionBounds()
         }
-        liveView.invalidateAll()
+        zoomHeld.removeAll { !strokeIDs.contains($0.stroke.id) }
+        invalidateAllLive()
         updateLassoOverlay()
     }
 
@@ -641,27 +669,12 @@ final class CanvasView: UIView {
 
     private func invalidateLive(canvasRect: CGRect) {
         liveView.invalidate(canvasRect: canvasRect)
+        zoomPanel?.liveView.invalidate(canvasRect: canvasRect)
     }
 
-    private func setCursor(_ path: CGPath?) {
-        liveView.setCursor(path)
-    }
-
-    private func tipOutline(at canvasPoint: CGPoint, altitude: CGFloat, azimuth: CGFloat) -> CGPath? {
-        guard let controller, controller.tool != .lasso else { return nil }
-        let path = CGMutablePath()
-        if controller.tool == .eraser {
-            let r = CGFloat(controller.current.width) / 2
-            let c = viewTransform.toView(canvasPoint)
-            path.addEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
-        } else {
-            let style = controller.strokeTemplate(viewScale: viewTransform.scale).style
-            let sample = StrokePoint(location: canvasPoint, force: 1, altitude: altitude, azimuth: azimuth, timestamp: 0)
-            let poly = StrokeRenderer.polygon(for: StrokeRenderer.tip(for: sample, style: style))
-            path.addLines(between: poly, transform: viewTransform.affine)
-            path.closeSubpath()
-        }
-        return path
+    func invalidateAllLive() {
+        liveView.invalidateAll()
+        zoomPanel?.liveView.invalidateAll()
     }
 
     // MARK: - Commands
@@ -694,6 +707,7 @@ final class CanvasView: UIView {
     }
 
     func resetView() {
+        updateZoomWindow()
         viewTransform = fittedTransform()
         liveView.settle(at: viewTransform)
         updateCommittedLayerTransform()
@@ -708,8 +722,12 @@ final class CanvasView: UIView {
     /// The transform that fits the whole page between the margins.
     func fittedTransform() -> ViewTransform {
         let s = safeAreaInsets, m = controller?.pageMargins ?? CanvasController.defaultPageMargins
-        let insets = UIEdgeInsets(top: s.top + m.top, left: s.left + m.left,
+        var insets = UIEdgeInsets(top: s.top + m.top, left: s.left + m.left,
                                   bottom: s.bottom + m.bottom, right: s.right + m.right)
+        if zoomPanel != nil {
+            // The page sits above the writing panel, so the zoom box is never under it.
+            insets.bottom = bounds.maxY - zoomPanelFrame().minY + Self.zoomPanelGap
+        }
         return ViewTransform.fitting(page: document.pageBounds, in: bounds, insets: insets,
                                      scaleRange: .leastNonzeroMagnitude ... .greatestFiniteMagnitude)
     }
@@ -720,7 +738,7 @@ final class CanvasView: UIView {
     }
 
     /// Moves the paper and the ink clip to follow the page.
-    private func updatePageChrome() {
+    func updatePageChrome() {
         let frame = pageFrameInView
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -729,6 +747,10 @@ final class CanvasView: UIView {
         templateView.follow(viewTransform)
         inkMask.frame = inkClipView.bounds
         inkMask.path = CGPath(rect: frame, transform: nil)
+        if let zoomBoxView, let zoomWindow {
+            zoomBoxView.frame = bounds
+            zoomBoxView.show(box: viewTransform.toView(zoomWindow.box))
+        }
         CATransaction.commit()
     }
 
@@ -790,7 +812,7 @@ final class CanvasView: UIView {
         guard let controller else { return }
         switch lassoSession {
         case nil:
-            let slop = 10 / viewTransform.scale
+            let slop = 10 / inputTransform.scale
             if !selection.isEmpty, selectionBounds.insetBy(dx: -slop, dy: -slop).contains(p) {
                 // Dragging inside the selection moves it. Pending strokes are redrawn by the full render.
                 pending.removeAll { selection.contains($0.live.stroke.id) }
@@ -803,7 +825,7 @@ final class CanvasView: UIView {
         case var .drawing(pts)?:
             switch controller.lassoMode {
             case .freeform:
-                if let last = pts.last, last.distance(to: p) * viewTransform.scale < 1.5 {
+                if let last = pts.last, last.distance(to: p) * inputTransform.scale < 1.5 {
                     return
                 }
                 pts.append(p)
@@ -895,20 +917,33 @@ final class CanvasView: UIView {
         let directTouches = priorDirectTouches + touches.filter { $0.type == .direct }.count
         maxDirectTouchesInSequence = max(maxDirectTouchesInSequence, directTouches)
         for touch in touches {
-            guard isDrawingTouch(touch, event: event), activeTouch == nil, activeGestureCount == 0 else { continue }
+            if activeTouch == nil, beginZoomDrag(touch) {
+                continue
+            }
+            guard isDrawingTouch(touch, event: event), activeTouch == nil, activeGestureCount == 0,
+                  zoomTouch == nil else { continue }
             activeTouch = touch
-            beginStroke(at: viewTransform.toCanvas(touch.preciseLocation(in: self)))
+            let location = touch.preciseLocation(in: self)
+            inputInZoomPanel = zoomPanel != nil && zoomInkFrameInView.contains(location)
+            inputTransform = inputInZoomPanel ? zoomInputTransform : viewTransform
+            beginStroke(at: inputTransform.toCanvas(location))
             ingest(touch, event: event, final: false)
         }
         updateFingerState(event)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let touch = zoomTouch, touches.contains(touch) {
+            updateZoomDrag(touch)
+        }
         guard let touch = activeTouch, touches.contains(touch) else { return }
         ingest(touch, event: event, final: false)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let touch = zoomTouch, touches.contains(touch) {
+            endZoomDrag()
+        }
         if let touch = activeTouch, touches.contains(touch) {
             ingest(touch, event: event, final: true)
             endStroke(commit: true)
@@ -917,6 +952,9 @@ final class CanvasView: UIView {
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let touch = zoomTouch, touches.contains(touch) {
+            endZoomDrag()
+        }
         if let touch = activeTouch, touches.contains(touch) {
             endStroke(commit: false)
         }
@@ -945,6 +983,7 @@ final class CanvasView: UIView {
                 apply(&live.stroke.points[ref.index])
                 let r = live.refreshPoint(ref.index)
                 liveView.geometryChanged(of: live, fromSegment: ref.index - 1, canvasRect: r.dirty)
+                zoomPanel?.liveView.geometryChanged(of: live, fromSegment: ref.index - 1, canvasRect: r.dirty)
                 liveDirty = liveDirty.union(r.dirty)
                 if r.touchesTail {
                     liveTouchesTail = true
@@ -958,6 +997,8 @@ final class CanvasView: UIView {
                 pendingStroke.revisionAfter = wasCurrent ? document.revision : -1
                 let r = pendingStroke.live.refreshPoint(ref.index)
                 liveView.geometryChanged(of: pendingStroke.live, fromSegment: ref.index - 1, canvasRect: r.dirty)
+                zoomPanel?.liveView.geometryChanged(of: pendingStroke.live, fromSegment: ref.index - 1,
+                                                    canvasRect: r.dirty)
                 var dirty = r.dirty
                 if r.touchesTail {
                     dirty = dirty.union(pendingStroke.live.rebuildTail(predicted: []))
@@ -1018,11 +1059,11 @@ final class CanvasView: UIView {
         } else if controller.tool == .eraser && controller.eraserMode == .stroke {
             eraseSession = EraseSession()
         } else if controller.tool == .eraser || document.contains(start) {
-            let template = controller.strokeTemplate(viewScale: viewTransform.scale)
+            let template = controller.strokeTemplate(viewScale: inputTransform.scale)
             let stroke = Stroke(id: UUID(), tool: template.kind, color: template.color, style: template.style,
                                 points: [])
             live = LiveStroke(stroke: stroke)
-            controller.inputRecorder?.begin(stroke, viewScale: viewTransform.scale, pageSize: document.pageSize)
+            controller.inputRecorder?.begin(stroke, viewScale: inputTransform.scale, pageSize: document.pageSize)
         }
         if hoverActive {
             setCursor(nil)
@@ -1071,7 +1112,7 @@ final class CanvasView: UIView {
         controller?.inputRecorder?.sample(point, strokeID: live.stroke.id,
                                           estimationKey: expectsUpdate ? touch.estimationUpdateIndex : nil)
         // Near-duplicate samples (under 0.3 view points apart) only update the last point's pressure.
-        guard let index = live.append(point, minSpacing: 0.3 / viewTransform.scale) else { return }
+        guard let index = live.append(point, minSpacing: 0.3 / inputTransform.scale) else { return }
         if expectsUpdate, let key = touch.estimationUpdateIndex {
             if let old = pendingEstimates[key] {
                 decrementOutstandingEstimates(for: old.strokeID)
@@ -1097,7 +1138,7 @@ final class CanvasView: UIView {
     /// `preciseLocation` is in this view's coordinate space; strokes are stored in canvas space.
     private func makePoint(_ touch: UITouch, predicted: Bool) -> StrokePoint {
         let viewLocation = touch.preciseLocation(in: self)
-        let location = viewTransform.toCanvas(viewLocation)
+        let location = inputTransform.toCanvas(viewLocation)
         #if targetEnvironment(simulator)
             if touch.type != .pencil {
                 return simulatedPoint(touch, viewLocation: viewLocation, canvasLocation: location, predicted: predicted)
@@ -1154,90 +1195,18 @@ final class CanvasView: UIView {
                 pending.append(PendingStroke(live: live, geometry: geom, deadline: deadline,
                                              revisionBefore: revisionBefore, revisionAfter: document.revision))
                 schedulePendingCommit()
+                if zoomPanel != nil {
+                    zoomHeld.append(live)
+                    followWriting(geom.bounds, of: live.stroke)
+                    scheduleZoomRender()
+                }
             } else {
-                liveView.invalidateAll() // clears the live layer
+                invalidateAllLive() // clears the live layer
             }
         }
         hud.state = .idle
         hud.predictedCount = 0
         publishHUD(force: true)
-    }
-
-    // MARK: - Pixel eraser splits
-
-    /// Ink strokes that `eraser` (about to be appended on top) cuts clean through, with their pieces.
-    /// Only strokes overlapping the eraser are examined. Coverage is the union of every pixel eraser
-    /// above each stroke that overlaps it, so two partial erases that together sever a line count too.
-    /// `hulls` are the eraser's own, reused from its `LiveStroke` (identical to a fresh build once it ended).
-    private func splits(cutBy eraser: Stroke, hulls eraserOwnHulls: [Hull]) -> [CanvasDocument.Split] {
-        let eraserBounds = geometry(for: eraser).bounds
-        guard !eraserBounds.isNull else { return [] }
-        let strokes = document.strokes
-        var eraserHulls: [UUID: [Hull]] = [eraser.id: eraserOwnHulls]
-        func hulls(of e: Stroke) -> [Hull] {
-            if let h = eraserHulls[e.id] {
-                return h
-            }
-            let h = StrokeRenderer.hulls(for: e.points, style: e.style)
-            eraserHulls[e.id] = h
-            return h
-        }
-
-        var splits: [CanvasDocument.Split] = []
-        for (index, stroke) in strokes.enumerated() where stroke.tool != .pixelEraser {
-            let bounds = geometry(for: stroke).bounds
-            guard bounds.intersects(eraserBounds) else { continue }
-            let region = bounds.insetBy(dx: -1, dy: -1)
-            var coverage = StrokeSplitter.Coverage()
-            for other in strokes[(index + 1)...] where other.tool == .pixelEraser
-                && geometry(for: other).bounds.intersects(region) {
-                coverage.add(hulls(of: other), within: region)
-            }
-            coverage.add(hulls(of: eraser), within: region)
-            if let pieces = StrokeSplitter.pieces(of: stroke, coverage: coverage) {
-                splits.append(CanvasDocument.Split(index: index, original: stroke, pieces: pieces))
-            }
-        }
-        return splits
-    }
-
-    // MARK: - Stroke eraser
-
-    private func eraseStrokes(along point: CGPoint) {
-        guard var session = eraseSession, let controller else { return }
-        let radius = CGFloat(controller.current.width) / 2 / viewTransform.scale
-        let from = session.last ?? point
-        let steps = max(1, Int((from.distance(to: point) / (radius * 0.5)).rounded(.up)))
-        let sweep = CGRect(x: min(from.x, point.x), y: min(from.y, point.y),
-                           width: abs(from.x - point.x), height: abs(from.y - point.y))
-            .insetBy(dx: -radius, dy: -radius)
-
-        var hits = Set<UUID>()
-        // Pixel-eraser strokes are invisible; removing them would resurrect ink, so they're skipped.
-        for stroke in document.strokes where stroke.tool != .pixelEraser {
-            let bounds = geometry(for: stroke).bounds
-            guard bounds.intersects(sweep) else { continue }
-            for k in 0 ... steps {
-                let t = CGFloat(k) / CGFloat(steps)
-                if StrokeRenderer.hitTest(stroke, bounds: bounds, point: from + (point - from) * t, radius: radius) {
-                    hits.insert(stroke.id)
-                    break
-                }
-            }
-        }
-        if !hits.isEmpty {
-            for id in hits {
-                forgetGeometry(id)
-            }
-            session.removals += document.remove(ids: hits)
-            dropOrphanedPendingStrokes()
-            requestFullRender()
-        }
-        session.last = point
-        eraseSession = session
-
-        let c = viewTransform.toView(point), r = radius * viewTransform.scale
-        setCursor(CGPath(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r), transform: nil))
     }
 
     // MARK: - HUD
@@ -1512,7 +1481,11 @@ final class CanvasView: UIView {
             hud.zOffset = g.zOffset
             if activeTouch == nil {
                 hud.state = .hovering
-                setCursor(tipOutline(at: viewTransform.toCanvas(g.location(in: self)), altitude: altitude, azimuth: azimuth))
+                let location = g.location(in: self)
+                let inPanel = zoomPanel != nil && zoomInkFrameInView.contains(location)
+                let transform = inPanel ? zoomInputTransform : viewTransform
+                setCursor(tipOutline(at: transform.toCanvas(location), altitude: altitude, azimuth: azimuth,
+                                     transform: transform), inZoomPanel: inPanel)
             }
             publishHUD(force: false)
         } else if hoverActive {
@@ -1534,9 +1507,12 @@ extension CanvasView: UIGestureRecognizerDelegate {
         if g is UIHoverGestureRecognizer {
             return true
         }
-        if activeTouch != nil {
+        if activeTouch != nil || zoomTouch != nil {
             return false
         } // palm rejection: no panning while the Pencil is down
+        if g === pan || g === pinch, let panel = zoomPanel, panel.frame.contains(g.location(in: self)) {
+            return false // the writing panel stays put
+        }
         if g === pinch {
             return g.numberOfTouches == 2
         }
@@ -1557,96 +1533,6 @@ extension CanvasView: UIGestureRecognizerDelegate {
     func gestureRecognizer(_: UIGestureRecognizer,
                            shouldRequireFailureOf _: UIGestureRecognizer) -> Bool {
         false
-    }
-}
-
-// MARK: - Multi-finger tap recognizer
-
-/// Recognizes an exact N-finger single tap immediately on touch-up with zero multi-tap delay,
-/// and avoids UIKit's built-in `UITapGestureRecognizer` failure dependencies with iPadOS's
-/// system three-finger productivity tap recognizers.
-private final class MultiFingerTapRecognizer: UIGestureRecognizer {
-    let numberOfTouchesRequired: Int
-    private let maxDuration: TimeInterval = 0.35
-    private let maxMovement: CGFloat = 28
-
-    private var startPositions: [UITouch: CGPoint] = [:]
-    private var activeTouches: Set<UITouch> = []
-    private var maxTouchCount = 0
-    private var startTime: TimeInterval = 0
-
-    init(touchesRequired: Int, target: Any?, action: Selector?) {
-        numberOfTouchesRequired = touchesRequired
-        super.init(target: target, action: action)
-        allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
-        cancelsTouchesInView = false
-        delaysTouchesBegan = false
-        delaysTouchesEnded = false
-    }
-
-    override func reset() {
-        super.reset()
-        startPositions.removeAll()
-        activeTouches.removeAll()
-        maxTouchCount = 0
-        startTime = 0
-    }
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        super.touchesBegan(touches, with: event)
-        guard let view else { state = .failed; return }
-        for touch in touches {
-            if startPositions.isEmpty {
-                startTime = touch.timestamp
-            }
-            startPositions[touch] = touch.location(in: view)
-            activeTouches.insert(touch)
-        }
-        maxTouchCount = max(maxTouchCount, startPositions.count)
-        if maxTouchCount > numberOfTouchesRequired {
-            state = .failed
-        }
-    }
-
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        super.touchesMoved(touches, with: event)
-        guard let view else { state = .failed; return }
-        for touch in touches {
-            if touch.timestamp - startTime > maxDuration {
-                state = .failed
-                return
-            }
-            if let start = startPositions[touch],
-               touch.location(in: view).distance(to: start) > maxMovement {
-                state = .failed
-                return
-            }
-        }
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        super.touchesEnded(touches, with: event)
-        guard let view else { state = .failed; return }
-        for touch in touches {
-            if touch.timestamp - startTime > maxDuration {
-                state = .failed
-                return
-            }
-            if let start = startPositions[touch],
-               touch.location(in: view).distance(to: start) > maxMovement {
-                state = .failed
-                return
-            }
-            activeTouches.remove(touch)
-        }
-        if activeTouches.isEmpty {
-            state = (maxTouchCount == numberOfTouchesRequired) ? .ended : .failed
-        }
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        super.touchesCancelled(touches, with: event)
-        state = .failed
     }
 }
 
@@ -1720,6 +1606,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         // A new page: the tool palette's undo and selection state must describe this document.
         controller.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
         controller.selectionDidChange(false)
+        if controller.zoomWindowVisible {
+            view.zoomWindowVisibilityDidChange()
+        }
         return view
     }
 

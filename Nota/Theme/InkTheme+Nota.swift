@@ -49,6 +49,8 @@ private extension NotaIcon {
         case .addPage: .plus
         case .disclosure: .chevronDown
         case .delete: .trash
+        case .newLine: .newLine
+        case .close: .xmark
         }
     }
 }
