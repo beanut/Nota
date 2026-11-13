@@ -1,4 +1,5 @@
 import InkKit
+import NotaDocuments
 import NotaUI
 import SwiftUI
 
@@ -20,6 +21,7 @@ extension InkTheme {
         swatchOutline: NotaUIColor.inkOutline,
         paper: NotaUIColor.paperSurface,
         desk: NotaUIColor.bgDesk,
+        paperPalettes: PaperPalette.notaPalettes,
         headlineFont: NotaFont.headline,
         bodyFont: NotaFont.subheadline,
         bodyEmphasizedFont: NotaFont.subheadlineEmph,
@@ -47,6 +49,8 @@ private extension NotaIcon {
         case .addPage: .plus
         case .disclosure: .chevronDown
         case .delete: .trash
+        case .newLine: .newLine
+        case .close: .xmark
         }
     }
 }

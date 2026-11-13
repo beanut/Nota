@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-/// An ordered stack of pages, each a `CanvasDocument` with its own paper size and undo history.
+/// An ordered stack of pages, each a `CanvasDocument` with its own paper size, template and undo history.
 ///
 /// A notebook always has at least one page, and `currentPageIndex` is always a valid index.
 ///
@@ -17,17 +17,21 @@ public final class InkNotebook: ObservableObject {
     @Published public private(set) var currentPageIndex: Int = 0
     /// Size used for new pages when none is given and there is no current page to copy.
     public var defaultPageSize: PageSize
+    /// Template used for new pages when there is no page to copy.
+    public var defaultTemplate: PageTemplate
 
-    /// A notebook of `pageCount` blank pages of `pageSize` (at least one).
-    public init(pageSize: PageSize = .default, pageCount: Int = 1) {
+    /// A notebook of `pageCount` blank pages of `pageSize` on `template` (at least one).
+    public init(pageSize: PageSize = .default, pageCount: Int = 1, template: PageTemplate = .default) {
         defaultPageSize = pageSize
-        pages = (0 ..< max(1, pageCount)).map { _ in CanvasDocument(pageSize: pageSize) }
+        defaultTemplate = template
+        pages = (0 ..< max(1, pageCount)).map { _ in CanvasDocument(pageSize: pageSize, template: template) }
     }
 
     /// A notebook over existing pages. An empty array gets one blank page of `defaultPageSize`.
-    public init(pages: [CanvasDocument], defaultPageSize: PageSize = .default) {
+    public init(pages: [CanvasDocument], defaultPageSize: PageSize = .default, defaultTemplate: PageTemplate = .default) {
         self.defaultPageSize = defaultPageSize
-        self.pages = pages.isEmpty ? [CanvasDocument(pageSize: defaultPageSize)] : pages
+        self.defaultTemplate = defaultTemplate
+        self.pages = pages.isEmpty ? [CanvasDocument(pageSize: defaultPageSize, template: defaultTemplate)] : pages
     }
 
     public var pageCount: Int {
@@ -76,19 +80,21 @@ public final class InkNotebook: ObservableObject {
     // MARK: Editing
 
     /// Inserts a blank page after the current one and shows it. Its size is `size`, or else the current
-    /// page's size, so a notebook stays uniform unless asked otherwise.
+    /// page's size, so a notebook stays uniform unless asked otherwise. It's on the current page's template.
     @discardableResult
     public func addPage(size: PageSize? = nil) -> CanvasDocument {
         insertPage(at: currentPageIndex + 1, size: size)
     }
 
-    /// Inserts a blank page at `index` (clamped to `0...pageCount`) and shows it. Without `size` it takes
-    /// the size of its neighbour: the page before it, or for a new first page the page after it.
+    /// Inserts a blank page at `index` (clamped to `0...pageCount`) and shows it. It takes its neighbour's
+    /// template, and without `size` its size too: the page before it, or for a new first page the page after it.
     @discardableResult
     public func insertPage(at index: Int, size: PageSize? = nil) -> CanvasDocument {
         let i = min(max(index, 0), pages.count)
         let neighbour = i > 0 ? pages[i - 1] : pages.first
-        let page = CanvasDocument(pageSize: size ?? neighbour?.pageSize ?? defaultPageSize)
+        let page = CanvasDocument(pageSize: size ?? neighbour?.pageSize ?? defaultPageSize,
+                                  template: neighbour?.template ?? defaultTemplate,
+                                  templateArtwork: neighbour?.templateArtwork)
         pages.insert(page, at: i)
         currentPageIndex = i
         return page
@@ -139,6 +145,22 @@ public final class InkNotebook: ObservableObject {
         defaultPageSize = size
         for page in pages {
             page.pageSize = size
+        }
+    }
+
+    /// Puts the page at `index` on `template` (with `artwork` for a custom background).
+    public func setTemplate(_ template: PageTemplate, artwork: TemplateArtwork? = nil, forPageAt index: Int) {
+        guard pages.indices.contains(index) else { return }
+        objectWillChange.send()
+        pages[index].setTemplate(template, artwork: artwork)
+    }
+
+    /// Puts every page on `template` and makes it the default for new pages.
+    public func setTemplateForAllPages(_ template: PageTemplate, artwork: TemplateArtwork? = nil) {
+        objectWillChange.send()
+        defaultTemplate = template.background == nil ? template : defaultTemplate
+        for page in pages {
+            page.setTemplate(template, artwork: artwork)
         }
     }
 }

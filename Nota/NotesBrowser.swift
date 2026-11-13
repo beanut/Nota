@@ -207,11 +207,22 @@ struct NotesBrowser: View {
             Label("Move to Folder", systemImage: "folder")
         }
         Menu {
-            Picker("Paper", selection: Binding(get: { note.paper }, set: { setPaper($0, of: note) })) {
-                ForEach(PaperStyle.allCases) { Text($0.title).tag($0) }
+            Picker("Template", selection: Binding(get: { note.template.preset }, set: { preset in
+                if let preset {
+                    setTemplate(preset.template.on(note.template.paper), of: note)
+                }
+            })) {
+                ForEach(PageTemplate.Preset.allCases) { Text($0.title).tag(Optional($0)) }
+            }
+            Picker("Paper", selection: Binding(get: { note.template.paper }, set: { paper in
+                var template = note.template.on(paper)
+                template.background = nil
+                setTemplate(template, of: note)
+            })) {
+                ForEach(PaperColor.allCases) { Text($0.title).tag($0) }
             }
         } label: {
-            Label("Appearance", systemImage: "paintpalette")
+            Label("Template", systemImage: "paintpalette")
         }
         Button {
             duplicate(note)
@@ -245,31 +256,32 @@ struct NotesBrowser: View {
 
     // MARK: Actions
 
-    private func createNote(paper: PaperStyle, size: PageSize) {
+    private func createNote(template: PageTemplate, size: PageSize) {
         let note = Note(title: String(localized: "Untitled Note"),
-                        paper: paper,
+                        template: template,
                         tint: folder.map { NoteTint.allCases[$0.sortIndex % NoteTint.allCases.count] } ?? .indigo,
                         isFavorite: section == .favorites,
                         folder: folder)
         modelContext.insert(note)
-        documents.create(note, size: size, paper: paper)
+        documents.create(note, size: size, template: template)
         try? modelContext.save()
         searchText = ""
         path.append(note)
     }
 
-    /// The cover is rendered on its paper, so a note with ink gets a new cover.
-    private func setPaper(_ paper: PaperStyle, of note: Note) {
-        documents.setPaper(paper, of: note)
+    /// Puts every page on `template`. The cover is rendered on its template, so a note with ink gets a new
+    /// cover.
+    private func setTemplate(_ template: PageTemplate, of note: Note) {
+        documents.setTemplate(template, of: note)
         if let notebook = documents.existingNotebook(for: note.id) {
-            thumbnails.updateCover(of: note.id, page: notebook.pages[0].snapshot(), paper: paper)
+            thumbnails.updateCover(of: note.id, page: notebook.pages[0].snapshot())
         }
     }
 
     private func duplicate(_ note: Note) {
         let copy = Note(title: String(localized: "\(note.title) Copy"),
                         pageCount: note.pageCount,
-                        paper: note.paper,
+                        template: note.template,
                         tint: note.tint,
                         kind: note.kind,
                         folder: note.folder)

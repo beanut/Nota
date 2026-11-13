@@ -107,6 +107,9 @@ struct PenCase: View {
             Button { controller.resetZoom() } label: {
                 Label("Fit Page · \(Int((controller.zoom * 100).rounded()))%", systemImage: "arrow.up.left.and.arrow.down.right")
             }
+            Toggle(isOn: $controller.zoomWindowVisible) {
+                Label("Zoom Window", systemImage: "rectangle.and.text.magnifyingglass")
+            }
             Divider()
             Button { showSettings = true } label: {
                 Label("Pressure & Tilt…", systemImage: "hand.draw")
@@ -384,5 +387,28 @@ struct QuickPaletteView: View {
             .inkFloatingBar()
             .position(x: location.x, y: max(40, location.y - 60))
         }
+    }
+}
+
+/// The zoom window's buttons, in a column at the right of its writing panel: close, then move the box
+/// back, on, or to the start of the next line.
+struct ZoomWindowControls: View {
+    @ObservedObject var controller: CanvasController
+
+    var body: some View {
+        VStack(spacing: InkSpacing.xxxs) {
+            Button { controller.zoomWindowVisible = false } label: { InkIconView(.close) }
+                .accessibilityLabel("Close zoom window")
+            Spacer(minLength: 0)
+            Button { controller.zoomWindowBack() } label: { InkIconView(.previousPage) }
+                .disabled(!controller.zoomCanGoBack)
+                .accessibilityLabel("Move zoom box back")
+            Button { controller.zoomWindowAdvance() } label: { InkIconView(.nextPage) }
+                .accessibilityLabel("Move zoom box on")
+            Button { controller.zoomWindowNewLine() } label: { InkIconView(.newLine) }
+                .accessibilityLabel("Next line")
+        }
+        .buttonStyle(.inkIcon)
+        .padding(.vertical, InkSpacing.xs)
     }
 }

@@ -31,7 +31,7 @@ Nota/
 │   ├── SidebarView.swift     Smart collections + folders
 │   ├── NotesBrowser.swift    Filter chips, grid, search, menus
 │   ├── NoteCard.swift        Card + PaperThumbnail
-│   ├── NewNoteSheet.swift    Paper and page size for a new note
+│   ├── NewNoteSheet.swift    Template, paper and page size for a new note
 │   ├── NoteEditorView.swift  Hosts InkCanvasEditor, saves the note
 │   └── Theme/                InkTheme.nota, model colours → NotaUI inks
 └── Packages/
@@ -76,7 +76,9 @@ InkCanvasEditor(notebook: notebook)
 
 - **Pages** – `InkNotebook` is an ordered list of `CanvasDocument`s with add / insert / remove / move and navigation. Each page has its own paper size, ink and undo history. A notebook always keeps at least one page.
 - **Page size** – `PageSize` is in points (1/72 in) and defaults to Letter. Custom sizes can be given in inches, millimetres or points. Resizing a page keeps the ink where it is; ink past the new edge is hidden, not deleted.
+- **Templates** – each page has a `PageTemplate`: blank, narrow / college / wide ruled, small and large grid, dotted, Cornell, music staff, isometric, to-do, weekly and monthly planners, or any PDF or image, on white, cream or dark paper. Templates are drawn as vectors (crisp at every zoom, real lines in an exported PDF) and expose their line metrics for handwriting layout. The page bar's template pill changes this page or every page; the library's Template menu changes a whole note.
 - **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page.
+- **Zoom window** – More › Zoom Window opens a magnified writing panel above the page bar for a box on the page, for small, neat handwriting. Every tool works in it. Writing into the panel's shaded right-hand zone moves the box along the line, and at the end of the line on to the next one, following the page template's ruling. Drag the box by its tab, resize it (and so the magnification) by its corner knob, or use the panel's back, on and new-line buttons.
 
 Run the package tests on an iPad simulator (InkKit and NotaCore have test targets). The library's rules (smart collections, filter chips, search, sorting, Recently Deleted, folder order and `Date.libraryLabel`) live in NotaCore's `Library.swift` rather than the app's views, so NotaCore's tests cover them against an in-memory SwiftData store:
 
@@ -97,7 +99,7 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 - Pages are shown one at a time; there's no continuous vertical scroll or page-thumbnail sidebar yet.
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
-- No PDF import/viewer, sharing or sync yet.
+- No PDF import/viewer, sharing or sync yet. PDFs and images can be used as page templates (the PDF's first page), and `PageRenderer.pdf(of:)` exports pages as PDF, but the app has no export button yet.
 
 ## Next steps
 
