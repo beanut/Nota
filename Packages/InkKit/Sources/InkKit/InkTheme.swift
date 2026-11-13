@@ -77,10 +77,13 @@ public struct InkTheme {
 
     // MARK: Page
 
-    /// The page. Ink is drawn on it, so it should stay the same in light and dark mode.
+    /// White paper. Ink is drawn on it, so it should stay the same in light and dark mode.
     public var paper: UIColor
     /// The surface around the page.
     public var desk: UIColor
+    /// The colours of each paper a template can be on. A missing entry falls back to
+    /// `PaperPalette.standard`, with `paper` as white paper's surface.
+    public var paperPalettes: [PaperColor: PaperPalette]
 
     // MARK: Type
 
@@ -109,7 +112,7 @@ public struct InkTheme {
     public init(textPrimary: UIColor, textSecondary: UIColor, textTertiary: UIColor, textSelected: UIColor,
                 accent: UIColor, surfaceRaised: UIColor, surfaceFill: UIColor, surfaceSelected: UIColor,
                 border: UIColor, separator: UIColor, shadow: UIColor, swatchOutline: UIColor,
-                paper: UIColor, desk: UIColor,
+                paper: UIColor, desk: UIColor, paperPalettes: [PaperColor: PaperPalette] = [:],
                 headlineFont: Font = .headline, bodyFont: Font = .subheadline,
                 bodyEmphasizedFont: Font = .subheadline.weight(.semibold),
                 footnoteFont: Font = .footnote, footnoteEmphasizedFont: Font = .footnote.weight(.semibold),
@@ -130,6 +133,7 @@ public struct InkTheme {
         self.swatchOutline = swatchOutline
         self.paper = paper
         self.desk = desk
+        self.paperPalettes = paperPalettes
         self.headlineFont = headlineFont
         self.bodyFont = bodyFont
         self.bodyEmphasizedFont = bodyEmphasizedFont
@@ -139,6 +143,14 @@ public struct InkTheme {
         self.penInks = penInks
         self.highlighterInks = highlighterInks
     }
+
+    /// The colours `paper` is drawn in.
+    public func palette(for paper: PaperColor) -> PaperPalette {
+        paperPalettes[paper] ?? .standard(paper, white: self.paper.resolvedColor(with: Self.onPaper).cgColor)
+    }
+
+    /// Paper is the same in both appearances; resolve dynamic colours as light.
+    static let onPaper = UITraitCollection(userInterfaceStyle: .light)
 
     /// The inks for `tool`: highlighters get their own set, everything else the pen inks.
     func inks(for tool: Tool) -> [InkColor] {

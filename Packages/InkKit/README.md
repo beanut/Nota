@@ -24,8 +24,15 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | --- | --- |
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
 | `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes |
-| `CanvasDocument.swift` | One page's strokes, size and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`) |
+| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
+| `PageTemplate.swift` | `PageTemplate` (pattern, spacing, margins, paper colour, custom background), the built-in presets, `PaperColor` / `PaperPalette` |
+| `TemplateLayout.swift` | Each pattern's measurements, and `lineMetrics(on:)`: baselines, line spacing, writing area and regions for the handwriting layout engine |
+| `TemplateRenderer.swift` | Draws a template as Core Graphics vectors (canvas, thumbnails, PDF), skipping pattern outside the visible rect |
+| `TemplateArtwork.swift` | A custom background's bytes (a PDF page or an image), decoded once; PDF pages stay vector |
+| `TemplateView.swift` | The canvas layer that redraws the template at the current zoom, between the paper and the ink |
+| `TemplateMenu.swift` | The page bar's template pill: built-ins, paper colour, PDF or image, use for all pages |
+| `ViewTransform.swift` | Canvas → view mapping, zoom limits and page-swipe detection |
 | `CanvasView.swift` | `UIView` that handles raw touches, gestures, `UIPencilInteraction` and hover. Owns the page, the cached committed bitmap and the lasso overlay, plus the `UIViewRepresentable` bridge |
 | `LiveInkView.swift` | The live ink layer: a grid of tile layers showing the in-progress stroke and strokes awaiting rasterization, plus the hover/eraser cursor |
 | `StrokeRenderer.swift` | Nib model (pressure → width, tilt → ellipse + opacity), centripetal Catmull-Rom, outline geometry (tangent strips and nib stamps), drawing, hit-testing, and the incremental `LiveStroke` |
@@ -35,13 +42,43 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes built in parallel, culling, drawing in parallel bands), shared by the canvas and the benchmarks |
 | `CommittedRaster.swift` | A page's committed layer kept compressed with the page, so reopening it restores the pixels instead of re-rendering |
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
-| `PageRenderer.swift` | Renders a page snapshot to an image off the main actor (thumbnails) |
+| `PageRenderer.swift` | Renders a page snapshot (template + ink) to an image off the main actor (thumbnails), or pages to a PDF |
 | `Stroke.swift` | `Stroke`, `StrokePoint`, `BrushStyle`, tool enums, `RGBA` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit |
 | `ToolbarView.swift` | Pen Case, tool options, pressure & tilt settings, Pencil Pro quick palette |
-| `PageBar.swift` | Page bar and the custom page size sheet |
+| `PageBar.swift` | Page bar (page size and template pills) and the custom page size sheet |
 | `InkTheme.swift` / `InkChrome.swift` | The theme and the controls built from it |
 | `PencilHUD.swift` | Debug HUD, throttled telemetry, sample-rate counter |
+
+## Page templates
+
+Each page has a `PageTemplate`: a pattern (blank, ruled, grid, dots, Cornell, music staff, isometric, to-do,
+weekly or monthly planner), its spacing and margins in points, a paper colour (white, cream, dark) and
+optionally a custom background, a PDF page or an image whose bytes live in a `TemplateArtwork` beside it.
+`PageTemplate.Preset` lists the built-ins (narrow / college / wide ruled, small and large grid, …).
+
+```swift
+notebook.setTemplate(PageTemplate.preset(.cornell).on(.cream), forPageAt: 0)
+notebook.setTemplateForAllPages(.preset(.dots))
+let metrics = page.template.lineMetrics(on: page.pageSize)   // baselines, spacing, writing area, regions
+let pdf = PageRenderer.pdf(of: notebook.pages.map { $0.snapshot() }) { theme.palette(for: $0) }
+```
+
+- **Vectors everywhere.** `TemplateRenderer` draws with Core Graphics paths and CoreText, so the same code
+  draws the canvas, thumbnails and PDF export. On the canvas a `TemplateView` between the page layer and the
+  ink redraws it at the current transform whenever the page pans or zooms (never while ink is written),
+  with a one-pixel minimum line width, so it's crisp at every zoom. Repeating patterns only build what's on
+  screen, so a zoomed-in corner of a 200-inch page stays cheap. PDF backgrounds are drawn as PDF.
+- **Ink stays separate.** The committed ink bitmap is transparent over the paper, so changing a template
+  doesn't re-render ink, doesn't touch `revision` and isn't an undoable edit. The live layer's backdrop for
+  multiply (highlighter) previews draws the template too.
+- **Colours come from the theme.** `InkTheme.paperPalettes` maps each `PaperColor` to fixed (non-dynamic)
+  surface, rule, accent and label colours; `PaperPalette.standard` is the default. Paper doesn't follow dark
+  mode.
+- **Line metrics** (`TemplateLineMetrics`) describe where writing goes, for the handwriting layout engine
+  (NOT-65).
+- **Known gaps:** the pixel eraser's live preview paints plain paper colour (the lines reappear when the
+  stroke commits); a custom PDF background uses the file's first page.
 
 ## Architecture
 

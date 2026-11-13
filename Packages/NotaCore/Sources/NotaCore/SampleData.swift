@@ -1,4 +1,5 @@
 import Foundation
+import InkKit
 import SwiftData
 
 /// Seeds the library with sample folders and notes the first time the app launches.
@@ -29,21 +30,21 @@ public enum SampleData {
         }
 
         let featured: [Note] = [
-            Note(title: "Physics — Lecture 7", pageCount: 12, modifiedAt: daysAgo(0), paper: .lined,
+            Note(title: "Physics — Lecture 7", pageCount: 12, modifiedAt: daysAgo(0), template: .preset(.collegeRuled),
                  tint: .indigo, isFavorite: true, folder: courses),
-            Note(title: "Sketchbook: Interiors", pageCount: 34, modifiedAt: daysAgo(1), paper: .dotted,
+            Note(title: "Sketchbook: Interiors", pageCount: 34, modifiedAt: daysAgo(1), template: .preset(.dots),
                  tint: .teal, isFavorite: true, folder: personal),
-            Note(title: "Project Kestrel", pageCount: 8, modifiedAt: daysAgo(2), paper: .grid,
+            Note(title: "Project Kestrel", pageCount: 8, modifiedAt: daysAgo(2), template: .preset(.smallGrid),
                  tint: .indigo, isShared: true, folder: work),
-            Note(title: "Reading Journal", pageCount: 21, modifiedAt: daysAgo(9), paper: .lined,
+            Note(title: "Reading Journal", pageCount: 21, modifiedAt: daysAgo(9), template: .preset(.collegeRuled),
                  tint: .rust, folder: personal),
-            Note(title: "Design Sync", pageCount: 3, modifiedAt: daysAgo(12), paper: .plain,
+            Note(title: "Design Sync", pageCount: 3, modifiedAt: daysAgo(12), template: .preset(.blank),
                  tint: .graphite, isShared: true, folder: work),
-            Note(title: "Spanish Vocabulary", pageCount: 46, modifiedAt: daysAgo(18), paper: .lined,
+            Note(title: "Spanish Vocabulary", pageCount: 46, modifiedAt: daysAgo(18), template: .preset(.collegeRuled),
                  tint: .indigo, isFavorite: true, folder: courses),
-            Note(title: "Trip Planning: Lisbon", pageCount: 9, modifiedAt: daysAgo(23), paper: .dotted,
+            Note(title: "Trip Planning: Lisbon", pageCount: 9, modifiedAt: daysAgo(23), template: .preset(.dots),
                  tint: .rust, isShared: true, folder: personal),
-            Note(title: "Quick Notes", pageCount: 5, modifiedAt: daysAgo(30), paper: .plain,
+            Note(title: "Quick Notes", pageCount: 5, modifiedAt: daysAgo(30), template: .preset(.blank),
                  tint: .violet, folder: personal)
         ]
 
@@ -58,7 +59,9 @@ public enum SampleData {
         let personalTitles = ["Recipes", "Garden Layout", "Budget 2026", "Book List", "Workout Log"]
 
         let tints = NoteTint.allCases
-        let papers = PaperStyle.allCases
+        let papers: [PageTemplate] = [.preset(.blank), .preset(.collegeRuled), .preset(.dots), .preset(.smallGrid),
+                                      .preset(.cornell), .preset(.todo), .preset(.weeklyPlanner),
+                                      PageTemplate.preset(.wideRuled).on(.cream), PageTemplate.preset(.dots).on(.dark)]
         var archive: [Note] = []
         for (folder, titles, offset) in [(courses, courseTitles, 0), (work, workTitles, 3), (personal, personalTitles, 7)] {
             for (i, title) in titles.enumerated() {
@@ -66,7 +69,7 @@ public enum SampleData {
                 archive.append(Note(title: title,
                                     pageCount: isPDF ? 2 + (i * 7) % 30 : 1 + (i * 5) % 24,
                                     modifiedAt: daysAgo(34 + i * 4 + offset),
-                                    paper: papers[(i + offset) % papers.count],
+                                    template: papers[(i + offset) % papers.count],
                                     tint: tints[(i + offset) % tints.count],
                                     kind: isPDF ? .pdf : .notebook,
                                     isFavorite: i % 7 == 2,
