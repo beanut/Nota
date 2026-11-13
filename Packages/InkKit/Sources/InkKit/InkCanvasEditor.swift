@@ -9,11 +9,16 @@ import SwiftUI
 /// ```swift
 /// InkCanvasEditor(notebook: note.notebook, title: $note.title)
 /// ```
+///
+/// The More menu's Zoom Window writes small, neat handwriting in a magnified panel at the bottom of the
+/// screen. It follows each page's template ruling (`WritingLines.lines(for:on:)`); pass `writingLines` to
+/// override that per page, where returning nil falls back to the template's.
 public struct InkCanvasEditor: View {
     @ObservedObject private var notebook: InkNotebook
     private let showsDebugHUD: Bool
     private let showsPageControls: Bool
     private let title: Binding<String>?
+    private let writingLines: ((CanvasDocument) -> WritingLines?)?
 
     @StateObject private var controller = CanvasController()
     @StateObject private var telemetry = PencilTelemetry()
@@ -25,18 +30,22 @@ public struct InkCanvasEditor: View {
     @Environment(\.inkTheme) private var theme
 
     /// A multi-page editor.
-    public init(notebook: InkNotebook, title: Binding<String>? = nil, showsDebugHUD: Bool = false) {
+    public init(notebook: InkNotebook, title: Binding<String>? = nil, showsDebugHUD: Bool = false,
+                writingLines: ((CanvasDocument) -> WritingLines?)? = nil) {
         self.notebook = notebook
         self.title = title
         self.showsDebugHUD = showsDebugHUD
+        self.writingLines = writingLines
         showsPageControls = true
     }
 
     /// A single-page editor: the page can be resized but no pages can be added.
-    public init(document: CanvasDocument, title: Binding<String>? = nil, showsDebugHUD: Bool = false) {
+    public init(document: CanvasDocument, title: Binding<String>? = nil, showsDebugHUD: Bool = false,
+                writingLines: ((CanvasDocument) -> WritingLines?)? = nil) {
         self.title = title
         notebook = InkNotebook(pages: [document], defaultPageSize: document.pageSize)
         self.showsDebugHUD = showsDebugHUD
+        self.writingLines = writingLines
         showsPageControls = false
     }
 
@@ -61,6 +70,15 @@ public struct InkCanvasEditor: View {
             }
         }
         .overlay {
+            // The canvas view's coordinate space, where it lays out the zoom panel.
+            if let frame = controller.zoomControlsFrame {
+                ZoomWindowControls(controller: controller)
+                    .frame(width: frame.width, height: frame.height)
+                    .position(x: frame.midX, y: frame.midY)
+                    .ignoresSafeArea()
+            }
+        }
+        .overlay {
             // Same full-screen coordinate space as the canvas view, so hover locations line up.
             if let location = controller.quickPaletteLocation {
                 QuickPaletteView(controller: controller, location: location)
@@ -71,6 +89,7 @@ public struct InkCanvasEditor: View {
         .toolbar { penCaseItem }
         .onAppear {
             controller.hudVisible = showsDebugHUD
+            controller.writingLines = writingLines
             controller.onSwipeToPage = { [notebook] swipe in turnPage(swipe, in: notebook) }
             controller.canSwipeToPage = { [notebook] swipe in canTurnPage(swipe, in: notebook) }
         }

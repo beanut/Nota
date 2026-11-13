@@ -17,6 +17,9 @@ final class InkBenchmarks: XCTestCase {
     static let pageOpenBudgetMs = 150.0
     /// Live-stroke work per touch event: under 2 ms (asserted on the 95th percentile).
     static let liveEventBudgetMs = 2.0
+    /// `.ink` file for a 5k-stroke page: under 1 MB, decoded in under 50 ms (NOT-5).
+    static let inkFileBudgetKB = 1024.0
+    static let inkDecodeBudgetMs = 50.0
 
     private var corpus: Corpus {
         Corpus.shared
@@ -206,6 +209,34 @@ final class InkBenchmarks: XCTestCase {
 
     func testPageOpenCold20k() {
         pageOpenCold(strokes: 20000, iterations: 2)
+    }
+
+    // MARK: Ink file
+
+    /// Saving a 5k-stroke page's ink in the `.ink` format (NOT-5): the encoded size, and the encode time
+    /// (on save, off the main actor). The page's copies of the corpus are each stretched a little, so the
+    /// compressor can't shrink the page by matching one copy against the last, as it would on the tiled page.
+    func testInkFileEncode5k() {
+        let strokes = corpus.distinctPage(strokes: 5000)
+        let points = strokes.reduce(0) { $0 + $1.points.count }
+        let file = InkPageFile(pageID: UUID(), strokes: strokes)
+        var data = Data()
+        let times = timed(iterations: 5) { data = file.encoded() }
+        BenchResults.record("ink_file.5k_kb", Double(data.count) / 1024, unit: "KB", budget: Self.inkFileBudgetKB)
+        BenchResults.record("ink_file.bytes_per_point", Double(data.count) / Double(points), unit: "B")
+        BenchResults.record("ink_file.encode_5k_ms", Stats(times).median, unit: "ms")
+    }
+
+    /// Reading that page back: decompressing and parsing every stroke, as opening a page will once NOT-6
+    /// reads ink from disk (when it joins `page_open`).
+    func testInkFileDecode5k() {
+        let data = InkPageFile(pageID: UUID(), strokes: corpus.distinctPage(strokes: 5000)).encoded()
+        var decoded: InkPageFile?
+        let times = timed { decoded = try? InkPageFile(data: data) }
+        XCTAssertEqual(decoded?.strokeCount, 5000)
+        XCTAssertEqual(decoded?.encoded(), data, "Re-encoding a decoded page must give the same bytes")
+        BenchResults.record("ink_file.decode_5k_ms", Stats(times).median, unit: "ms", budget: Self.inkDecodeBudgetMs)
+        check(Stats(times).median, under: Self.inkDecodeBudgetMs, "Decoding a 5000-stroke page (median)")
     }
 
     // MARK: Full-page redraw

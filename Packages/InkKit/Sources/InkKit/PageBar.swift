@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Floating bar under the page: previous / next, the page number, adding pages and the page size.
+/// Floating bar under the page: previous / next, the page number, adding pages, the page size and template.
 struct PageBar: View {
     @ObservedObject var notebook: InkNotebook
     let allowsMultiplePages: Bool
@@ -27,6 +27,7 @@ struct PageBar: View {
                 addMenu
             }
             sizeMenu
+            TemplateMenu(notebook: notebook, allowsMultiplePages: allowsMultiplePages)
         }
         .padding(.leading, InkSpacing.xxs)
         .padding(.trailing, InkSpacing.xs)
@@ -88,18 +89,7 @@ struct PageBar: View {
                 }
             }
         } label: {
-            // Figma: the paper-size pill.
-            HStack(spacing: InkSpacing.xxs) {
-                Text(currentSize.displayName())
-                    .font(theme.footnoteEmphasizedFont)
-                InkIconView(.disclosure, size: 12)
-            }
-            .foregroundStyle(theme.color(\.textPrimary))
-            .padding(.leading, InkSpacing.sm)
-            .padding(.trailing, InkSpacing.s)
-            .frame(height: 28)
-            .background(theme.color(\.surfaceFill), in: Capsule())
-            .contentShape(Capsule())
+            InkPill(text: currentSize.displayName())
         }
         .menuStyle(.button)
         .buttonStyle(.plain)

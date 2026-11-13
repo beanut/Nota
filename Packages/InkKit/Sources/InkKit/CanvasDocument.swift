@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// One page: its paper size, stroke list and undo/redo command stack.
+/// One page: its paper size and template, stroke list and undo/redo command stack.
 @MainActor
 public final class CanvasDocument: Identifiable {
     public let id: UUID
@@ -24,10 +24,58 @@ public final class CanvasDocument: Identifiable {
         pageSize.bounds
     }
 
-    public init(pageSize: PageSize = .default, id: UUID = UUID()) {
+    /// What's printed on the page under the ink. Changing it doesn't touch the ink or its undo history,
+    /// and doesn't change `revision`: the committed ink layer is drawn without the paper.
+    public var template: PageTemplate {
+        didSet {
+            if template != oldValue {
+                notifyTemplateChange()
+            }
+        }
+    }
+
+    /// The bytes of `template.background`, when it has one. Set it before (or with) a template that names
+    /// it; artwork whose `id` doesn't match the template's background isn't drawn.
+    public var templateArtwork: TemplateArtwork? {
+        didSet {
+            if templateArtwork !== oldValue {
+                notifyTemplateChange()
+            }
+        }
+    }
+
+    public init(pageSize: PageSize = .default, template: PageTemplate = .default,
+                templateArtwork: TemplateArtwork? = nil, id: UUID = UUID()) {
         self.id = id
         self.pageSize = pageSize
+        self.template = template
+        self.templateArtwork = templateArtwork
     }
+
+    /// Puts the page on `template`, with `artwork` as its custom background (nil for none).
+    public func setTemplate(_ template: PageTemplate, artwork: TemplateArtwork?) {
+        announcesTemplateChanges = false
+        templateArtwork = template.background == nil ? nil : artwork
+        self.template = template
+        announcesTemplateChanges = true
+        notifyTemplateChange()
+    }
+
+    /// A page holding the ink of a `.ink` file, with an empty undo history. The page takes the file's id.
+    public convenience init(file: InkPageFile, pageSize: PageSize) {
+        self.init(pageSize: pageSize, id: file.pageID)
+        strokes = file.strokes
+        preservedRecords = file.unknownRecords
+    }
+
+    /// The page's ink as it is now, ready to encode (off the main actor if need be) and write to disk.
+    /// Records from a newer format version that the page was opened with go back out with it.
+    public var inkFile: InkPageFile {
+        InkPageFile(pageID: id, strokes: strokes, unknownRecords: preservedRecords)
+    }
+
+    /// Records from the file the page was read from that this version doesn't understand.
+    private var preservedRecords: [InkPageFile.UnknownRecord] = []
 
     /// True when `point` (canvas space) is on the page.
     public func contains(_ point: CGPoint) -> Bool {
@@ -91,17 +139,20 @@ public final class CanvasDocument: Identifiable {
         weak var owner: AnyObject?
         let onChange: (Change) -> Void
         let onPageSizeChange: () -> Void
+        let onTemplateChange: () -> Void
     }
 
     private var observers: [Observer] = []
 
-    /// Calls `onChange` after every edit, undo, redo and refinement of the page, and `onPageSizeChange`
-    /// after it's resized, until `owner` is released or `removeObserver(_:)` is called. Observing again
-    /// with the same owner replaces its handlers.
+    /// Calls `onChange` after every edit, undo, redo and refinement of the page, `onPageSizeChange` after
+    /// it's resized and `onTemplateChange` after its paper or background changes, until `owner` is released
+    /// or `removeObserver(_:)` is called. Observing again with the same owner replaces its handlers.
     func addObserver(_ owner: AnyObject, onChange: @escaping (Change) -> Void,
-                     onPageSizeChange: @escaping () -> Void = {}) {
+                     onPageSizeChange: @escaping () -> Void = {},
+                     onTemplateChange: @escaping () -> Void = {}) {
         removeObserver(owner)
-        observers.append(Observer(owner: owner, onChange: onChange, onPageSizeChange: onPageSizeChange))
+        observers.append(Observer(owner: owner, onChange: onChange, onPageSizeChange: onPageSizeChange,
+                                  onTemplateChange: onTemplateChange))
     }
 
     func removeObserver(_ owner: AnyObject) {
@@ -121,6 +172,16 @@ public final class CanvasDocument: Identifiable {
     private func notify(_ change: Change) {
         for observer in liveObservers() {
             observer.onChange(change)
+        }
+    }
+
+    /// False while `setTemplate` changes the template and its artwork together, so observers redraw once.
+    private var announcesTemplateChanges = true
+
+    private func notifyTemplateChange() {
+        guard announcesTemplateChanges else { return }
+        for observer in liveObservers() {
+            observer.onTemplateChange()
         }
     }
 

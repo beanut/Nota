@@ -8,6 +8,8 @@ public struct PageSnapshot: Sendable {
     /// The page's `revision` when the snapshot was taken.
     public let revision: Int
     public let pageSize: PageSize
+    public let template: PageTemplate
+    public let templateArtwork: TemplateArtwork?
     let strokes: [Stroke]
 
     /// True when the page has no ink to draw.
@@ -19,7 +21,8 @@ public struct PageSnapshot: Sendable {
 public extension CanvasDocument {
     /// The page's current ink, for rendering elsewhere (see `PageRenderer`).
     func snapshot() -> PageSnapshot {
-        PageSnapshot(pageID: id, revision: revision, pageSize: pageSize, strokes: strokes)
+        PageSnapshot(pageID: id, revision: revision, pageSize: pageSize, template: template,
+                     templateArtwork: template.background == nil ? nil : templateArtwork, strokes: strokes)
     }
 }
 
@@ -68,5 +71,53 @@ public enum PageRenderer {
         ctx.scaleBy(x: scale, y: scale)
         drawInk(page, in: ctx)
         return ctx.makeImage()
+    }
+
+    /// The page rendered `pixelWidth` pixels wide on its own template, coloured by `palette`.
+    public static func image(of page: PageSnapshot, pixelWidth: Int,
+                             palette: @escaping (PaperColor) -> PaperPalette) -> CGImage? {
+        image(of: page, pixelWidth: pixelWidth) { ctx, size in
+            drawTemplate(of: page, in: ctx, scale: size.width / page.pageSize.width, palette: palette(page.template.paper))
+        }
+    }
+
+    /// Draws the page's template into `ctx` scaled by `scale` (pixels per point), origin top-left, y down.
+    public static func drawTemplate(of page: PageSnapshot, in ctx: CGContext, scale: CGFloat, palette: PaperPalette) {
+        ctx.saveGState()
+        ctx.scaleBy(x: scale, y: scale)
+        TemplateRenderer.draw(page.template, pageSize: page.pageSize, palette: palette, artwork: page.templateArtwork,
+                              in: ctx, minimumLineWidth: scale > 0 ? 0.5 / scale : 0)
+        ctx.restoreGState()
+    }
+
+    /// A PDF of `pages`, one PDF page per page at its own size, each with its template and ink. Templates
+    /// (and PDF backgrounds) stay vector; ink is filled outlines, as on the canvas. Nil if there are no
+    /// pages or the PDF context can't be made.
+    public static func pdf(of pages: [PageSnapshot], title: String? = nil,
+                           palette: (PaperColor) -> PaperPalette) -> Data? {
+        guard let first = pages.first else { return nil }
+        let data = NSMutableData()
+        var mediaBox = first.pageSize.bounds
+        var info: [CFString: Any] = [kCGPDFContextCreator: "InkKit"]
+        if let title {
+            info[kCGPDFContextTitle] = title
+        }
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, info as CFDictionary)
+        else { return nil }
+        for page in pages {
+            var box = page.pageSize.bounds
+            let boxData = Data(bytes: &box, count: MemoryLayout<CGRect>.size) as CFData
+            ctx.beginPDFPage([kCGPDFContextMediaBox: boxData] as CFDictionary)
+            // PDF space is y-up; canvas space is y-down.
+            ctx.translateBy(x: 0, y: box.height)
+            ctx.scaleBy(x: 1, y: -1)
+            TemplateRenderer.draw(page.template, pageSize: page.pageSize, palette: palette(page.template.paper),
+                                  artwork: page.templateArtwork, in: ctx)
+            drawInk(page, in: ctx)
+            ctx.endPDFPage()
+        }
+        ctx.closePDF()
+        return data as Data
     }
 }

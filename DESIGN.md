@@ -43,12 +43,19 @@ Selected = ink tint, everywhere (sidebar rows, filter chips, width presets). The
 | `signalRecord` | signal/record | `#D92D30` | `#FF5A5C` |
 | `paperSurface` | paper/surface | `#FCFBF7` | same |
 | `paperRule` | paper/rule | `#E2E5EE` | same |
+| `paperMargin` | *(Nota addition)* margin rule, Cornell and planner dividers on white and cream paper | `#EDB4B4` | same |
+| `paperLabel` | *(Nota addition)* planner labels on white and cream paper | `#9599A6` | same |
+| `paperCreamSurface` / `paperCreamRule` | *(Nota addition)* cream paper | `#F8F2E2` / `#E3D9C1` | same |
+| `paperDarkSurface` / `paperDarkRule` | *(Nota addition)* dark paper | `#24262A` / `#3C4048` | same |
+| `paperDarkMargin` / `paperDarkLabel` | *(Nota addition)* dividers and labels on dark paper | `#6E4C55` / `#7D838E` | same |
 | `shadow` | (shadow colour) | `#1A1A33` | `#000000` |
 | `inkOutline` | *(Nota addition)* | black 6% | white 32% |
 
 The app's `AccentColor` asset is `accentInk`, so system controls (toggles, links, the text cursor) follow it.
 
 **Paper and ink don't change in dark mode.** The page is a physical sheet: ink written in dark mode must look the same in light mode, and black ink must stay readable. The desk around the page darkens; the page doesn't.
+
+**Paper colours** are a page's own choice (white, cream or dark, set with its template), not the app's appearance: dark paper stays dark in light mode, and white paper stays white in dark mode. Templates draw their lines in the paper's rule colour, and margin rules, Cornell and planner dividers in its margin colour. `PaperPalette.nota` (NotaDocuments) maps each paper to these tokens for both the canvas (`InkTheme.nota`) and thumbnails.
 
 ## Inks
 
@@ -83,9 +90,9 @@ The Figma styles use Inter at exactly the iOS Dynamic Type sizes, so the app use
 
 ## Icons
 
-`NotaIcon` holds 41 line icons (`icon/*`) as template SVGs in `NotaUI/Resources/Icons.xcassets`: 20 pt grid, 1.75 pt round stroke, recoloured with `foregroundStyle`. Use `NotaIconView(.pen)` (or `size:` for 12–18 pt uses). Nota's own chrome uses these; menus, alerts and sheets keep SF Symbols.
+`NotaIcon` holds the 42 line icons (`icon/*`) as template SVGs in `NotaUI/Resources/Icons.xcassets`: 20 pt grid, 1.75 pt round stroke, recoloured with `foregroundStyle`. Use `NotaIconView(.pen)` (or `size:` for 12–18 pt uses). Nota's own chrome uses these; menus, alerts and sheets keep SF Symbols.
 
-Tools: pen, pencil, highlighter, eraser, lasso, text, shapes, photo. Editor: undo, redo, fit, grip, pressure, gauge, split (the editor's window menu; drawn in code for NOT-30 and not yet in Figma). Library: grid, star, clock, trash, folder, plus, minus, search, filter, list, chevrons, xmark, ellipsis, share, arrow.up. Audio and AI: sparkles, mic, waveform, play, pause, stop, flashcards, quiz, calc.
+Tools: pen, pencil, highlighter, eraser, lasso, text, shapes, photo. Editor: undo, redo, fit, grip, pressure, gauge, split (the editor's window menu; drawn in code for NOT-30 and not yet in Figma), return (the zoom window's new line; added in code, not yet in Figma). Library: grid, star, clock, trash, folder, plus, minus, search, filter, list, chevrons, xmark, ellipsis, share, arrow.up. Audio and AI: sparkles, mic, waveform, play, pause, stop, flashcards, quiz, calc.
 
 To add one: draw it in Figma on the 20 pt grid, export the SVG with `stroke="#1A1A1F"`, add an imageset with `template-rendering-intent: template`, and add a case to `NotaIcon`.
 

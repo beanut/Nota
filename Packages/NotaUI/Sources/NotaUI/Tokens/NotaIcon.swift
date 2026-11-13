@@ -20,6 +20,7 @@ public enum NotaIcon: String, CaseIterable, Identifiable, Sendable {
     // MARK: Editor
 
     case undo, redo, fit, grip, pressure, gauge, split
+    case newLine = "return"
 
     // MARK: Audio and AI
 

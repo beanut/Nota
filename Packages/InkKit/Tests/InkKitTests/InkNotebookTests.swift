@@ -242,3 +242,56 @@ func makeStroke(at point: CGPoint) -> Stroke {
     }
     return Stroke(id: UUID(), tool: .pen, color: RGBA.swatches[0], style: style, points: points)
 }
+
+@MainActor
+@Suite("Notebook templates")
+struct NotebookTemplateTests {
+    @Test func newPagesTakeTheirNeighboursTemplate() {
+        let notebook = InkNotebook(pageCount: 1, template: .preset(.cornell))
+        notebook.addPage()
+        #expect(notebook.currentPage.template == .preset(.cornell))
+        notebook.setTemplate(.preset(.dots), forPageAt: 1)
+        notebook.insertPage(at: 0)
+        #expect(notebook.pages.map(\.template) == [.preset(.cornell), .preset(.cornell), .preset(.dots)])
+    }
+
+    @Test func templateChangesLeaveInkAndRevisionAlone() {
+        let notebook = InkNotebook()
+        let page = notebook.currentPage
+        page.add(makeStroke(at: CGPoint(x: 10, y: 10)))
+        let revision = page.revision
+        notebook.setTemplate(PageTemplate.preset(.wideRuled).on(.cream), forPageAt: 0)
+        #expect(page.template == PageTemplate.preset(.wideRuled).on(.cream))
+        #expect(page.revision == revision)
+        #expect(page.strokeCount == 1)
+        #expect(page.canUndo)
+    }
+
+    @Test func useForAllPagesSetsTheDefaultToo() {
+        let notebook = InkNotebook(pageCount: 3)
+        notebook.setTemplateForAllPages(.preset(.musicStaff))
+        #expect(notebook.pages.allSatisfy { $0.template == .preset(.musicStaff) })
+        #expect(notebook.defaultTemplate == .preset(.musicStaff))
+    }
+
+    @Test func artworkIsDroppedWithItsBackground() throws {
+        let page = CanvasDocument()
+        let pdf = try #require(PageRenderer.pdf(of: [page.snapshot()]) { .standard($0) })
+        let artwork = try #require(TemplateArtwork(data: pdf))
+        var custom = PageTemplate.blank
+        custom.background = artwork.background
+        page.setTemplate(custom, artwork: artwork)
+        #expect(page.snapshot().templateArtwork === artwork)
+        page.setTemplate(.preset(.dots), artwork: artwork)
+        #expect(page.templateArtwork == nil)
+    }
+
+    @Test func templateChangesNotifyTheCanvasOnce() {
+        let page = CanvasDocument()
+        var calls = 0
+        let owner = NSObject()
+        page.addObserver(owner, onChange: { _ in }, onTemplateChange: { calls += 1 })
+        page.setTemplate(.preset(.smallGrid), artwork: nil)
+        #expect(calls == 1)
+    }
+}

@@ -18,6 +18,9 @@ struct CanvasRepresentable: UIViewRepresentable {
         // A new page: the tool palette's undo and selection state must describe this document.
         controller.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
         controller.selectionDidChange(false)
+        if controller.zoomWindowVisible {
+            view.zoomWindowVisibilityDidChange()
+        }
         return view
     }
 
