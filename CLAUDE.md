@@ -115,7 +115,9 @@ ink don't change in dark mode. Exemptions are listed in DESIGN.md.
 - **Only tested on simulators.** Nothing has run on a physical iPad with Pencil yet (NOT-12), so pressure,
   tilt, latency and palm rejection are unverified; the benchmark input fixture is synthetic. Say so in PRs
   that depend on real-device behaviour.
-- Ink isn't saved to disk yet: InkKit has the `.ink` page format (NOT-5), but nothing writes it until NOT-6;
-  note metadata is in SwiftData. See README › Known limitations.
+- Notes live in `.nota` packages written by `DocumentStore` (NotaCore): the manifest is the source of truth
+  for pages and dates, SwiftData is the library index and can be rebuilt from packages. All package I/O goes
+  through `DocumentStore`'s serial queue and `PackageFiles` (atomic temp + rename); don't write the manifest,
+  `pages/` or `templates/` from elsewhere (`ThumbnailStore` owns `thumbs/`). See README › Known limitations.
 - `DerivedData/` and `build/` in the repo root are gitignored local build output; don't commit them.
 - Personal preferences go in `CLAUDE.local.md` (gitignored), not this file.

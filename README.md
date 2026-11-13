@@ -108,8 +108,14 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 
 ## Known limitations
 
-- Ink isn't saved to disk yet; strokes last until the app quits. InkKit can encode a page as a `.ink` file
-  (NOT-5), but nothing writes one until NOT-6. Note metadata is persisted with SwiftData.
+- Each note is a `.nota` package (manifest + one `.ink` file per page with ink) that `DocumentStore` autosaves
+  about a second after each change, when the editor closes and when the app leaves the screen. Undo history
+  isn't saved. Pages load a whole note at a time (decoded off the main thread); the 8 most recent notes stay
+  in memory. Loading individual pages on demand waits for continuous scroll (NOT-26).
+- A note's cover is re-rendered when its editor closes, so a note whose editor was open when the app was
+  killed shows its previous cover until it's next opened and closed.
+- The library index (SwiftData) is rebuilt from packages at launch if notes are missing from it, with title,
+  dates, page count and template; folders, favourites and tints aren't in packages, so they're lost then.
 - Pages are shown one at a time; there's no continuous vertical scroll or page-thumbnail sidebar yet.
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
@@ -119,6 +125,5 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 
 ## Next steps
 
-1. Per-note ink persistence: write each page's `.ink` file into the note package (NOT-6).
-2. Real thumbnails from the committed bitmap.
-3. PDF import and annotation, page thumbnails and drag-to-reorder.
+1. Real thumbnails from the committed bitmap.
+2. PDF import and annotation, page thumbnails and drag-to-reorder.
