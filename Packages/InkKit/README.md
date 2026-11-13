@@ -37,6 +37,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
 | `PageRenderer.swift` | Renders a page snapshot to an image off the main actor (thumbnails) |
 | `Stroke.swift` | `Stroke`, `StrokePoint`, `BrushStyle`, tool enums, `RGBA` |
+| `InkFile.swift` | `InkPageFile`, the `.ink` page format: encoder, decoder and `InkFileError` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit |
 | `ToolbarView.swift` | Pen Case, tool options, pressure & tilt settings, Pencil Pro quick palette |
 | `PageBar.swift` | Page bar and the custom page size sheet |
@@ -48,8 +49,38 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 ### Data model
 
 - `StrokePoint { location, force, altitude, azimuth, timestamp }`: `location` is in **canvas space**, independent of zoom and pan. `force` is normalised to 0…1 (`force / maximumPossibleForce`).
-- `Stroke { id, tool, color, style, points }`: `tool` is an `InkKind` (`pen`, `pencil`, `highlighter` or `pixelEraser`). `style` is a **snapshot** of the brush settings taken when the stroke began, so later slider changes never restyle existing ink.
+- `Stroke { id, tool, color, style, points, createdAt }`: `tool` is an `InkKind` (`pen`, `pencil`, `highlighter` or `pixelEraser`). `style` is a **snapshot** of the brush settings taken when the stroke began, so later slider changes never restyle existing ink. `createdAt` is wall-clock time (point timestamps are touch uptime), for replaying ink against audio later; pieces a pixel eraser cuts keep it.
 - View transform: canvas → view is a uniform scale plus translation with no rotation, so azimuth angles are the same in both spaces.
+
+### Ink file format
+
+A page's ink is stored as one `.ink` file (Architecture §3), read and written by `InkPageFile`:
+
+```swift
+let file = try InkPageFile(data: data)                  // off the main actor; throws InkFileError
+let page = CanvasDocument(file: file, pageSize: size)  // page size comes from the note's manifest
+let saved = page.inkFile.encoded()                      // snapshot on the main actor, encode anywhere
+```
+
+Layout (v1, little-endian):
+
+| Bytes | Field |
+| --- | --- |
+| 0–3 | Magic `NINK` |
+| 4–7 | Major, minor version (u16 each). Readers refuse any other **major** version and read every minor version of their own |
+| 8–23 | Page id (`CanvasDocument.id`) |
+| 24 | Body encoding: 0 stored, 1 LZFSE. 25–27 reserved |
+| 28–35 | Stored body size, decoded body size (u32 each) |
+| 36–39 | CRC-32 of bytes 0–35 and the stored body |
+| 40– | Body: a sequence of records |
+
+Each record is `type u8 · payload length (varint) · payload`:
+
+- **1, brush table** (first): every distinct `InkKind` + `BrushStyle` on the page, stored once. Per brush: kind code, flags (bit 0 tilt), then width, min width ratio, pressure gamma and opacity as f64.
+- **2, stroke**, in drawing order: id (16 bytes), brush index (varint), colour (4 × f32), `createdAt` (f64 seconds since 2001), the first point's timestamp (f64), point count (varint), then six columns of zigzag varints. Points are quantised (location to 1/64 pt, force to 1/1024, altitude and azimuth to 1/1024 rad, time to 1/4096 s) and delta-encoded: x, y and time as second-order deltas (the change in step, near zero for smooth, regularly sampled input), force, altitude and azimuth as first-order. Every step is a power of two, so a decoded page re-encodes to the same bytes.
+- **Any other type** is kept as it is, with its position among the strokes, and written back on save. A newer minor version adds data that must survive older apps as new record types; fields it appends to a known record are skipped by older readers (and lost if they re-save).
+
+Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size may be at most 256× the stored size, so a reader can bound its allocation. Decoding checks every length, count and index against what's left and rejects non-finite numbers, so damaged or truncated input throws an `InkFileError` (`notAnInkFile`, `unsupportedVersion`, `truncated`, `checksumMismatch`, `corrupt`) and never traps. Nothing writes these files yet; NOT-6 stores one per page in the note package.
 
 ### Rendering pipeline
 
@@ -119,6 +150,8 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `page_open_cold.{1,5,20}k_ms` | Opening a page with no raster (first time shown at this size): a fresh committed bitmap, every stroke's geometry built, the page drawn | – |
 | `page_raster.*` | Compressing a 5k-stroke page's committed layer when the page closes (in the background), and its size | – |
 | `full_redraw.5k_ms` | Re-rendering a 5k-stroke page with geometry cached (undo, erase, end of zoom) | – |
+| `ink_file.5k_kb`, `ink_file.bytes_per_point` | Size of a 5k-stroke page's `.ink` file. Each corpus copy is stretched a little so the compressor can't match copies against each other | < 1024 KB |
+| `ink_file.encode_5k_ms` / `decode_5k_ms` | Encoding that page, and decoding it back (which joins page open in NOT-6) | decode < 50 ms |
 | `memory.6x.*` | Physical footprint with a 5k page open at 6× zoom while the corpus is written on top: cached geometry, committed bitmap, live tiles. Measured from a settled baseline (free memory returned first), so earlier benchmarks don't change it | – |
 
 ### Recorded input

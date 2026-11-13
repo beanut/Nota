@@ -215,6 +215,7 @@ enum StrokeSplitter {
         if b.t > 0 {
             pts.append(b.point)
         }
-        return Stroke(id: UUID(), tool: stroke.tool, color: stroke.color, style: stroke.style, points: pts)
+        return Stroke(id: UUID(), tool: stroke.tool, color: stroke.color, style: stroke.style, points: pts,
+                      createdAt: stroke.createdAt)
     }
 }

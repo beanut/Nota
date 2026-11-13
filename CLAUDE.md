@@ -115,6 +115,7 @@ ink don't change in dark mode. Exemptions are listed in DESIGN.md.
 - **Only tested on simulators.** Nothing has run on a physical iPad with Pencil yet (NOT-12), so pressure,
   tilt, latency and palm rejection are unverified; the benchmark input fixture is synthetic. Say so in PRs
   that depend on real-device behaviour.
-- Ink isn't saved to disk yet (NOT-5, NOT-6); note metadata is in SwiftData. See README › Known limitations.
+- Ink isn't saved to disk yet: InkKit has the `.ink` page format (NOT-5), but nothing writes it until NOT-6;
+  note metadata is in SwiftData. See README › Known limitations.
 - `DerivedData/` and `build/` in the repo root are gitignored local build output; don't commit them.
 - Personal preferences go in `CLAUDE.local.md` (gitignored), not this file.
