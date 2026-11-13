@@ -94,7 +94,8 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 
 ## Known limitations
 
-- Ink isn't saved to disk yet; strokes last until the app quits. Note metadata is persisted with SwiftData.
+- Ink isn't saved to disk yet; strokes last until the app quits. InkKit can encode a page as a `.ink` file
+  (NOT-5), but nothing writes one until NOT-6. Note metadata is persisted with SwiftData.
 - Pages are shown one at a time; there's no continuous vertical scroll or page-thumbnail sidebar yet.
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
@@ -102,6 +103,6 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 
 ## Next steps
 
-1. Codable stroke serialisation and per-note persistence.
+1. Per-note ink persistence: write each page's `.ink` file into the note package (NOT-6).
 2. Real thumbnails from the committed bitmap.
 3. PDF import and annotation, page thumbnails and drag-to-reorder.

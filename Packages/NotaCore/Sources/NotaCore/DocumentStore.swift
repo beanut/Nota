@@ -8,8 +8,8 @@ import Observation
 /// Each note package holds a `manifest.json` (see `NoteManifest`) with every page's size and template, and
 /// a `templates/` folder with the PDFs and images custom templates are drawn on, so a note reopens after
 /// relaunch with the same pages. The note's `pageCount`, `modifiedAt` and `template` are
-/// mirrored from it on every save. Ink and undo history live only in memory for now: InkKit has no
-/// on-disk stroke format until NOT-6.
+/// mirrored from it on every save. Ink and undo history live only in memory for now: InkKit encodes a
+/// page as an `InkPageFile` (`.ink`), and NOT-6 writes those into the package.
 @Observable
 @MainActor
 public final class DocumentStore {

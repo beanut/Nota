@@ -60,6 +60,22 @@ public final class CanvasDocument: Identifiable {
         onChange?()
     }
 
+    /// A page holding the ink of a `.ink` file, with an empty undo history. The page takes the file's id.
+    public convenience init(file: InkPageFile, pageSize: PageSize) {
+        self.init(pageSize: pageSize, id: file.pageID)
+        strokes = file.strokes
+        preservedRecords = file.unknownRecords
+    }
+
+    /// The page's ink as it is now, ready to encode (off the main actor if need be) and write to disk.
+    /// Records from a newer format version that the page was opened with go back out with it.
+    public var inkFile: InkPageFile {
+        InkPageFile(pageID: id, strokes: strokes, unknownRecords: preservedRecords)
+    }
+
+    /// Records from the file the page was read from that this version doesn't understand.
+    private var preservedRecords: [InkPageFile.UnknownRecord] = []
+
     /// True when `point` (canvas space) is on the page.
     public func contains(_ point: CGPoint) -> Bool {
         pageBounds.contains(point)

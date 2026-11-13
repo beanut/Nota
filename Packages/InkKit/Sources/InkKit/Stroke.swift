@@ -17,14 +17,14 @@ enum EraserMode: String, CaseIterable, Identifiable {
 }
 
 /// How a stored stroke composites onto the page.
-enum InkKind: Equatable {
+enum InkKind: Hashable, Sendable {
     case pen // normal source-over
     case pencil // textured graphite source-over
     case highlighter // multiply, so ink underneath stays readable
     case pixelEraser // destination-out, removes pixels of strokes drawn before it
 }
 
-struct RGBA: Equatable, Hashable {
+struct RGBA: Hashable, Sendable {
     var r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat = 1
 
     func cgColor(alpha: CGFloat = 1) -> CGColor {
@@ -48,7 +48,7 @@ struct RGBA: Equatable, Hashable {
 }
 
 /// One raw Pencil sample. `location` is in canvas space (independent of pan/zoom).
-struct StrokePoint {
+struct StrokePoint: Equatable, Sendable {
     var location: CGPoint
     var force: CGFloat // normalised 0...1 (force / maximumPossibleForce)
     var altitude: CGFloat // radians; π/2 = perpendicular to the screen
@@ -57,7 +57,7 @@ struct StrokePoint {
 }
 
 /// Snapshot of the brush settings when the stroke began, so later slider changes don't restyle old ink.
-struct BrushStyle: Equatable {
+struct BrushStyle: Hashable, Sendable {
     var width: CGFloat // width at full pressure, canvas units
     var minWidthRatio: CGFloat // width at zero pressure = width * minWidthRatio
     var pressureGamma: CGFloat // response curve: pressure' = pressure ^ gamma
@@ -65,10 +65,14 @@ struct BrushStyle: Equatable {
     var tiltEnabled: Bool
 }
 
-struct Stroke: Identifiable {
+struct Stroke: Identifiable, Equatable, Sendable {
     let id: UUID
     var tool: InkKind
     var color: RGBA
     var style: BrushStyle
     var points: [StrokePoint]
+    /// Wall-clock time the stroke was begun, so ink can later be replayed against an audio recording.
+    /// (`StrokePoint.timestamp` is touch uptime, which doesn't survive a relaunch.) Pieces a pixel eraser
+    /// cuts a stroke into keep the original's.
+    var createdAt = Date()
 }

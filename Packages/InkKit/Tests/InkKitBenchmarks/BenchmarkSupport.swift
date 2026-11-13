@@ -171,6 +171,30 @@ final class Corpus {
     }
 }
 
+extension Corpus {
+    /// Like `page(strokes:)`, but each copy of the corpus is stretched, sheared and pressed a little
+    /// differently, so no two copies have the same point deltas. For measuring compressed sizes: a
+    /// compressor would otherwise encode most of a tiled page as references to the first copy.
+    func distinctPage(strokes count: Int) -> [Stroke] {
+        let perCopy = max(strokes.count, 1)
+        return page(strokes: count).enumerated().map { i, stroke in
+            let copy = Double(i / perCopy)
+            let scale = 1 + 0.12 * sin(copy * 1.7), shear = 0.08 * cos(copy * 2.3)
+            let press = 0.9 + 0.1 * sin(copy * 0.9), lean = 0.04 * cos(copy * 1.3)
+            var stroke = stroke
+            let origin = stroke.points.first?.location ?? .zero
+            for j in stroke.points.indices {
+                let d = CGPoint(x: stroke.points[j].location.x - origin.x, y: stroke.points[j].location.y - origin.y)
+                stroke.points[j].location = CGPoint(x: origin.x + d.x * scale + d.y * shear, y: origin.y + d.y * scale)
+                stroke.points[j].force *= press
+                stroke.points[j].altitude += lean
+                stroke.points[j].timestamp *= scale
+            }
+            return stroke
+        }
+    }
+}
+
 // MARK: - Results
 
 /// Collects each benchmark's numbers. They're printed, and when `INK_BENCH_RESULTS` names a file (pass
