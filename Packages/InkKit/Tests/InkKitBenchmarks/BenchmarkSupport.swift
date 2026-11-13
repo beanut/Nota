@@ -14,6 +14,11 @@ enum Bench {
         CGRect(origin: .zero, size: screen)
     }
 
+    /// The committed bitmap's size for `screen`.
+    static var pixelSize: CGSize {
+        CGSize(width: screen.width * displayScale, height: screen.height * displayScale)
+    }
+
     /// Budgets only hold for optimized code; a Debug build still runs and reports, but asserts nothing.
     static var optimized: Bool {
         #if DEBUG
@@ -41,6 +46,13 @@ enum Bench {
 
     static func milliseconds(since start: UInt64) -> Double {
         Double(now() - start) / 1_000_000
+    }
+
+    /// `footprint()` after returning every free malloc page to the system: the starting point for a
+    /// memory measurement that doesn't depend on which tests ran before it.
+    static func settledFootprint() -> UInt64 {
+        malloc_zone_pressure_relief(nil, 0)
+        return footprint()
     }
 
     /// The process's physical footprint (what jetsam counts), in bytes.

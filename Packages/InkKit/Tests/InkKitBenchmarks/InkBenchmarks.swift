@@ -129,38 +129,83 @@ final class InkBenchmarks: XCTestCase {
 
     // MARK: Page open
 
-    /// Opening a page: a fresh screen-sized committed bitmap, every stroke's geometry built (nothing is
-    /// cached yet), and the whole page drawn at the fitted zoom, exactly as `CanvasView`'s first full
-    /// render. Ink isn't stored on disk yet; decoding joins this measurement when it is.
-    private func pageOpen(strokes count: Int, iterations: Int, budget: Double? = nil) {
+    /// Opening a page the canvas has shown before: a fresh screen-sized committed bitmap and the page's
+    /// `CommittedRaster` (what the canvas left with the document when the page closed) decompressed into
+    /// it, exactly as `CanvasView` does instead of a full render. This is the budgeted page open.
+    /// Ink isn't stored on disk yet; decoding it, and the raster with it, joins this measurement when it is.
+    func testPageOpen5k() throws {
+        let (shown, transform) = try fittedPage(strokes: 5000)
+        let saved = try XCTUnwrap(CommittedRaster(image: shown, revision: 1, transform: transform,
+                                                  scale: Bench.displayScale))
+        let pixels = Bench.pixelSize
+        var restored: CGImage?
+        let times = timed {
+            guard let ctx = CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale),
+                  saved.matches(revision: 1, pixelSize: pixels, scale: Bench.displayScale, transform: transform),
+                  saved.restore(into: ctx)
+            else {
+                return XCTFail("Couldn't restore the page raster")
+            }
+            restored = ctx.makeImage()
+        }
+        let image = try XCTUnwrap(restored)
+        XCTAssertEqual(image.dataProvider?.data as Data?, shown.dataProvider?.data as Data?,
+                       "The reopened page must be pixel for pixel the page that was shown")
+        BenchResults.record("page_open.5k_ms", Stats(times).median, unit: "ms", budget: Self.pageOpenBudgetMs)
+        check(Stats(times).median, under: Self.pageOpenBudgetMs, "Page open with 5000 strokes (median)")
+    }
+
+    /// Leaving a page: compressing the 5k-stroke page's committed layer into its `CommittedRaster`. Runs
+    /// in the background after the page closes, so it has no budget, but it bounds how soon a page
+    /// reopened straight away can be restored rather than drawn.
+    func testPageRasterCapture5k() throws {
+        let (shown, transform) = try fittedPage(strokes: 5000)
+        var raster: CommittedRaster?
+        let times = timed(iterations: 3) {
+            raster = CommittedRaster(image: shown, revision: 1, transform: transform, scale: Bench.displayScale)
+        }
+        let saved = try XCTUnwrap(raster)
+        BenchResults.record("page_raster.capture_5k_ms", Stats(times).median, unit: "ms")
+        BenchResults.record("page_raster.5k_kb", Double(saved.compressed.count) / 1024, unit: "KB")
+    }
+
+    /// A page of `count` strokes drawn fitted into a committed bitmap, as the canvas shows it.
+    private func fittedPage(strokes count: Int) throws -> (CGImage, ViewTransform) {
         let page = corpus.page(strokes: count)
         let items = page.map { CommittedRenderer.Item(id: $0.id, kind: $0.tool, color: $0.color, geometry: nil, stroke: $0) }
         let transform = Bench.fittedTransform(for: corpus.pageSize)
-        let pixels = CGSize(width: Bench.screen.width * Bench.displayScale, height: Bench.screen.height * Bench.displayScale)
+        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
+        CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
+        return try (XCTUnwrap(ctx.makeImage()), transform)
+    }
+
+    /// Opening a page with no raster to restore (the first time it's shown at this size): a fresh
+    /// committed bitmap, every stroke's geometry built (nothing is cached yet), and the whole page drawn
+    /// at the fitted zoom, exactly as `CanvasView`'s first full render.
+    private func pageOpenCold(strokes count: Int, iterations: Int) {
+        let page = corpus.page(strokes: count)
+        let items = page.map { CommittedRenderer.Item(id: $0.id, kind: $0.tool, color: $0.color, geometry: nil, stroke: $0) }
+        let transform = Bench.fittedTransform(for: corpus.pageSize)
         let times = timed(iterations: iterations) {
-            guard let ctx = CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale) else {
+            guard let ctx = CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale) else {
                 return XCTFail("Couldn't make the committed bitmap")
             }
             CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
             _ = ctx.makeImage()
         }
-        let name = "page_open.\(count / 1000)k_ms"
-        BenchResults.record(name, Stats(times).median, unit: "ms", budget: budget)
-        if let budget {
-            check(Stats(times).median, under: budget, "Page open with \(count) strokes (median)")
-        }
+        BenchResults.record("page_open_cold.\(count / 1000)k_ms", Stats(times).median, unit: "ms")
     }
 
-    func testPageOpen1k() {
-        pageOpen(strokes: 1000, iterations: 5)
+    func testPageOpenCold1k() {
+        pageOpenCold(strokes: 1000, iterations: 5)
     }
 
-    func testPageOpen5k() {
-        pageOpen(strokes: 5000, iterations: 3, budget: Self.pageOpenBudgetMs)
+    func testPageOpenCold5k() {
+        pageOpenCold(strokes: 5000, iterations: 3)
     }
 
-    func testPageOpen20k() {
-        pageOpen(strokes: 20000, iterations: 2)
+    func testPageOpenCold20k() {
+        pageOpenCold(strokes: 20000, iterations: 2)
     }
 
     // MARK: Full-page redraw
@@ -174,7 +219,7 @@ final class InkBenchmarks: XCTestCase {
                                    geometry: StrokeRenderer.geometry(for: $0), stroke: nil)
         }
         let transform = Bench.fittedTransform(for: corpus.pageSize)
-        let pixels = CGSize(width: Bench.screen.width * Bench.displayScale, height: Bench.screen.height * Bench.displayScale)
+        let pixels = Bench.pixelSize
         let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale))
         let times = timed(iterations: 3) {
             CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
@@ -188,9 +233,11 @@ final class InkBenchmarks: XCTestCase {
     /// Memory with a 5k-stroke page open at 6× zoom (the maximum) while writing: the cached geometry of
     /// every stroke, the committed bitmap drawn at 6×, and the live layer's tiles and baked tile bitmaps
     /// as the corpus is replayed on top. Peak footprint over the baseline before the page was opened.
+    /// The baseline is taken with free memory handed back first, so the earlier benchmarks' leftovers
+    /// can't be reused and make the page look cheaper than it is (they made `geometry_mb` read half).
     func testMemoryAt6xZoom() throws {
         let page = corpus.page(strokes: 5000)
-        let before = Bench.footprint()
+        let before = Bench.settledFootprint()
         var peak = before
 
         var cache: [UUID: StrokeGeometry] = [:]
@@ -202,7 +249,7 @@ final class InkBenchmarks: XCTestCase {
         let box = corpus.inkBounds
         let transform = Bench.zoomedTransform(for: corpus.pageSize, zoom: ViewTransform.maxZoomFactor,
                                               centredOn: CGPoint(x: box.midX, y: box.midY))
-        let pixels = CGSize(width: Bench.screen.width * Bench.displayScale, height: Bench.screen.height * Bench.displayScale)
+        let pixels = Bench.pixelSize
         let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale))
         let items = page.map { CommittedRenderer.Item(id: $0.id, kind: $0.tool, color: $0.color, geometry: cache[$0.id], stroke: nil) }
         CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)

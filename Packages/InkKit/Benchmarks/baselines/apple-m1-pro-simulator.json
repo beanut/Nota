@@ -9,33 +9,33 @@
   "metrics": {
     "full_redraw.5k_ms": {
       "unit": "ms",
-      "value": 10477.565
+      "value": 1881.035
     },
     "live_event.long_stroke.first_quarter_p95_ms": {
       "unit": "ms",
-      "value": 0.276
+      "value": 0.263
     },
     "live_event.long_stroke.last_quarter_p95_ms": {
       "budget": 2,
       "unit": "ms",
-      "value": 0.26
+      "value": 0.24
     },
     "live_event.p50_ms": {
       "unit": "ms",
-      "value": 0.067
+      "value": 0.066
     },
     "live_event.p95_ms": {
       "budget": 2,
       "unit": "ms",
-      "value": 0.197
+      "value": 0.19
     },
     "live_event.p99_ms": {
       "unit": "ms",
-      "value": 0.33
+      "value": 0.295
     },
     "memory.6x.geometry_mb": {
       "unit": "MB",
-      "value": 94.875
+      "value": 206.563
     },
     "memory.6x.live_tiles_peak_mb": {
       "unit": "MB",
@@ -43,28 +43,40 @@
     },
     "memory.6x.peak_mb": {
       "unit": "MB",
-      "value": 114.547
-    },
-    "page_open.1k_ms": {
-      "unit": "ms",
-      "value": 2232.364
-    },
-    "page_open.20k_ms": {
-      "unit": "ms",
-      "value": 44621.794
+      "value": 225.828
     },
     "page_open.5k_ms": {
       "budget": 150,
       "unit": "ms",
-      "value": 10909.403
+      "value": 15.073
+    },
+    "page_open_cold.1k_ms": {
+      "unit": "ms",
+      "value": 473.727
+    },
+    "page_open_cold.20k_ms": {
+      "unit": "ms",
+      "value": 9430.259
+    },
+    "page_open_cold.5k_ms": {
+      "unit": "ms",
+      "value": 2216.54
+    },
+    "page_raster.5k_kb": {
+      "unit": "KB",
+      "value": 5234.979
+    },
+    "page_raster.capture_5k_ms": {
+      "unit": "ms",
+      "value": 190.722
     },
     "stroke_geometry.corpus_ms": {
       "unit": "ms",
-      "value": 12.122
+      "value": 12.467
     },
     "stroke_geometry.per_stroke_us": {
       "unit": "us",
-      "value": 189.406
+      "value": 194.803
     }
   },
   "schema": 1

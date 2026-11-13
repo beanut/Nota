@@ -112,6 +112,21 @@ final class CanvasView: UIView {
     private var fullRenderInFlight = false
     private var fullRenderRequested = false
     private var modifiedSinceSnapshot = Set<UUID>()
+    /// Strokes whose geometry was dropped while `warmGeometry` was building it in the background.
+    private var modifiedSinceWarmup = Set<UUID>()
+    /// The document revision the committed bitmap holds once every job queued on `renderQueue` has run,
+    /// or nil when it holds something no revision describes: strokes mid-erase or mid-drag, a finished
+    /// stroke not drawn into it yet, an edit that's waiting for a full render.
+    private var bitmapRevision: Int?
+    /// The newest published image known to hold the whole page, fitted, at `revision`. When the page
+    /// closes it becomes the document's `CommittedRaster`, so reopening the page needn't fill every stroke.
+    private var rasterCandidate: RenderedPage?
+    private struct RenderedPage {
+        let image: CGImage
+        let revision: Int
+        let transform: ViewTransform
+    }
+
     private var gestureStartTransform = ViewTransform()
     private var activeGestureCount = 0
     private var didTransformInTouchSequence = false
@@ -148,13 +163,19 @@ final class CanvasView: UIView {
         var deadline: CFTimeInterval
         var submitted = false
         var geometryDirty = false
+        /// The document's revision before the stroke was added, and with it added (and every estimate
+        /// update since applied): drawing it takes a bitmap at the first to the second.
+        let revisionBefore: Int
+        var revisionAfter: Int
 
-        init(live: LiveStroke, geometry: StrokeGeometry, deadline: CFTimeInterval, submitted: Bool = false) {
+        init(live: LiveStroke, geometry: StrokeGeometry, deadline: CFTimeInterval, revisionBefore: Int,
+             revisionAfter: Int) {
             self.live = live
             self.geometry = geometry
             bounds = geometry.bounds
             self.deadline = deadline
-            self.submitted = submitted
+            self.revisionBefore = revisionBefore
+            self.revisionAfter = revisionAfter
         }
     }
 
@@ -258,6 +279,14 @@ final class CanvasView: UIView {
         .none
     }
 
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        // Before leaving the window, while the fitted transform still sees the real safe area.
+        if newWindow == nil, window != nil {
+            saveCommittedRaster()
+        }
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
         guard window != nil else { return }
@@ -307,7 +336,10 @@ final class CanvasView: UIView {
         committedLayer.contentsScale = scale
         CATransaction.commit()
         makeBitmap()
-        requestFullRender()
+        bitmapRevision = nil
+        if !restoreCommittedRaster() {
+            requestFullRender()
+        }
     }
 
     // MARK: - Committed bitmap
@@ -318,6 +350,13 @@ final class CanvasView: UIView {
         renderQueue.sync {
             self.bitmap = CommittedRenderer.makeBitmap(pixelSize: pixelSize, scale: scale)
         }
+    }
+
+    /// Drops a stroke's cached geometry after the stroke changed.
+    private func forgetGeometry(_ id: UUID) {
+        geometryCache[id] = nil
+        modifiedSinceSnapshot.insert(id)
+        modifiedSinceWarmup.insert(id)
     }
 
     private func geometry(for stroke: Stroke) -> StrokeGeometry {
@@ -348,12 +387,10 @@ final class CanvasView: UIView {
         let targetTransform = bitmapTransform
 
         let unsubmittedIDs = Set(pending.filter { !$0.submitted }.map(\.live.stroke.id))
-        let itemsToRender = document.strokes.compactMap { stroke -> CommittedRenderer.Item? in
-            guard !unsubmittedIDs.contains(stroke.id) else { return nil }
-            let cached = geometryCache[stroke.id]
-            return CommittedRenderer.Item(id: stroke.id, kind: stroke.tool, color: stroke.color,
-                                          geometry: cached, stroke: cached == nil ? stroke : nil)
-        }
+        let renderedRevision = unsubmittedIDs.isEmpty && eraseSession == nil && lassoSession == nil
+            ? document.revision : nil
+        bitmapRevision = renderedRevision
+        let itemsToRender = committedItems(skipping: unsubmittedIDs)
 
         let coveredPending = pending.filter(\.submitted)
 
@@ -385,6 +422,9 @@ final class CanvasView: UIView {
                         invalidateLive(canvasRect: item.bounds)
                     }
                     liveView.invalidateAll()
+                    if let image {
+                        noteRendered(image, revision: renderedRevision, transform: targetTransform)
+                    }
                 }
                 fullRenderInFlight = false
                 if fullRenderRequested {
@@ -421,6 +461,113 @@ final class CanvasView: UIView {
         liveView.underlay = image
     }
 
+    // MARK: - Page raster
+
+    /// Called with every image published from a render job that drew the page at `revision` (nil: not
+    /// a whole revision). Keeps the newest whole, fitted one as the page's raster-to-be.
+    private func noteRendered(_ image: CGImage, revision: Int?, transform: ViewTransform) {
+        if let revision, revision == document.revision, bitmapRevision == revision, pending.isEmpty,
+           !fullRenderRequested, transform == fittedTransform() {
+            rasterCandidate = RenderedPage(image: image, revision: revision, transform: transform)
+        } else if rasterCandidate?.revision != document.revision {
+            rasterCandidate = nil // an older revision: no use to anyone, and it holds a screenful of pixels
+        }
+    }
+
+    /// Puts the document's `CommittedRaster` into the fresh bitmap instead of a full render, when it
+    /// shows the page as it is now at the transform and size the bitmap is for. Returns false if it can't.
+    private func restoreCommittedRaster() -> Bool {
+        guard let raster = document.committedRaster, !fullRenderInFlight, pending.isEmpty,
+              raster.matches(revision: document.revision, pixelSize: bitmapPixelSize, scale: bitmapScale,
+                             transform: viewTransform)
+        else { return false }
+        generation &+= 1
+        let currentGeneration = generation
+        let transform = viewTransform
+        bitmapTransform = transform
+        bitmapRevision = raster.revision
+        renderQueue.async { [weak self] in
+            guard let self, let ctx = bitmap else { return }
+            let image = raster.restore(into: ctx) ? ctx.makeImage() : nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, generation == currentGeneration else { return }
+                guard let image else {
+                    // Undecodable: draw the page the slow way after all.
+                    document.committedRaster = nil
+                    bitmapRevision = nil
+                    requestFullRender()
+                    return
+                }
+                publish(image: image, transform: transform)
+                liveView.invalidateAll()
+                noteRendered(image, revision: raster.revision, transform: transform)
+                warmGeometry()
+            }
+        }
+        return true
+    }
+
+    /// Builds, in the background, the geometry of every stroke that has none cached: a page opened from
+    /// its raster drew none, and erasing, the lasso and the next full render all need it.
+    private func warmGeometry() {
+        let strokes = document.strokes.filter { geometryCache[$0.id] == nil }
+        guard !strokes.isEmpty else { return }
+        modifiedSinceWarmup.removeAll()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let geometries = CommittedRenderer.geometries(for: strokes)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                for (stroke, geometry) in zip(strokes, geometries)
+                    where geometryCache[stroke.id] == nil && !modifiedSinceWarmup.contains(stroke.id) {
+                    geometryCache[stroke.id] = geometry
+                }
+            }
+        }
+    }
+
+    /// The page is going away: leaves its committed layer with the document as a `CommittedRaster` for
+    /// the next time it opens. The pixels on screen are used when they're known to be the whole page as
+    /// it is; otherwise the page is drawn again, fitted, in the background.
+    private func saveCommittedRaster() {
+        let revision = document.revision
+        let transform = fittedTransform()
+        let pixelSize = bitmapPixelSize, scale = bitmapScale
+        let document = document
+        guard pixelSize.width > 0, pixelSize.height > 0,
+              !(document.committedRaster?.matches(revision: revision, pixelSize: pixelSize, scale: scale,
+                                                  transform: transform) ?? false)
+        else { return }
+        let store: (CommittedRaster?) -> Void = { raster in
+            DispatchQueue.main.async {
+                guard let raster, document.revision == raster.revision else { return }
+                document.committedRaster = raster
+            }
+        }
+        if let candidate = rasterCandidate, candidate.revision == revision, candidate.transform == transform,
+           eraseSession == nil, lassoSession == nil, pending.isEmpty, live == nil {
+            DispatchQueue.global(qos: .utility).async {
+                store(CommittedRaster(image: candidate.image, revision: revision, transform: transform, scale: scale))
+            }
+            return
+        }
+        guard document.strokes.contains(where: { $0.tool != .pixelEraser }) else { return }
+        let items = committedItems()
+        DispatchQueue.global(qos: .utility).async {
+            store(CommittedRaster(rendering: items, pixelSize: pixelSize, scale: scale, transform: transform,
+                                  revision: revision))
+        }
+    }
+
+    /// The document's strokes to render, with their cached geometry where there is some.
+    private func committedItems(skipping skipped: Set<UUID> = []) -> [CommittedRenderer.Item] {
+        document.strokes.compactMap { stroke in
+            guard !skipped.contains(stroke.id) else { return nil }
+            let cached = geometryCache[stroke.id]
+            return CommittedRenderer.Item(id: stroke.id, kind: stroke.tool, color: stroke.color,
+                                          geometry: cached, stroke: cached == nil ? stroke : nil)
+        }
+    }
+
     private func submitPendingStroke(_ item: PendingStroke) {
         item.submitted = true
         let geom = item.live.geometry()
@@ -433,6 +580,9 @@ final class CanvasView: UIView {
         let color = item.live.stroke.color
         let targetTransform = bitmapTransform
         let currentGeneration = generation
+        let isNext = bitmapRevision != nil && bitmapRevision == item.revisionBefore && item.revisionAfter >= 0
+        bitmapRevision = isNext ? item.revisionAfter : nil
+        let renderedRevision = bitmapRevision
 
         renderQueue.async { [weak self] in
             guard let self, let ctx = bitmap else { return }
@@ -456,6 +606,7 @@ final class CanvasView: UIView {
                 }
                 invalidateLive(canvasRect: bounds)
                 CATransaction.commit()
+                noteRendered(image, revision: renderedRevision, transform: targetTransform)
             }
         }
     }
@@ -668,8 +819,7 @@ final class CanvasView: UIView {
         let ids = document.lastMovedIDs
         guard !ids.isEmpty else { return }
         for id in ids {
-            geometryCache[id] = nil
-            modifiedSinceSnapshot.insert(id)
+            forgetGeometry(id)
         }
         // Moved strokes may still be waiting in `pending` with stale geometry; the full render redraws them.
         pending.removeAll { ids.contains($0.live.stroke.id) }
@@ -698,8 +848,7 @@ final class CanvasView: UIView {
         guard !selection.isEmpty else { return }
         let ids = selection
         for id in ids {
-            geometryCache[id] = nil
-            modifiedSinceSnapshot.insert(id)
+            forgetGeometry(id)
         }
         document.recordErase(document.remove(ids: ids))
         dropOrphanedPendingStrokes() // also prunes the selection
@@ -736,7 +885,7 @@ final class CanvasView: UIView {
             let d = p - last
             guard d != .zero else { return }
             for id in selection {
-                geometryCache[id] = nil; modifiedSinceSnapshot.insert(id)
+                forgetGeometry(id)
             }
             document.translate(ids: selection, by: d)
             selectionBounds = selectionBounds.offsetBy(dx: d.x, dy: d.y)
@@ -770,7 +919,7 @@ final class CanvasView: UIView {
             } else if total != .zero {
                 document.translate(ids: selection, by: CGPoint(x: -total.x, y: -total.y))
                 for id in selection {
-                    geometryCache[id] = nil; modifiedSinceSnapshot.insert(id)
+                    forgetGeometry(id)
                 }
                 requestFullRender()
             }
@@ -872,7 +1021,10 @@ final class CanvasView: UIView {
             } else if let pendingStroke = pending.first(where: { $0.live.stroke.id == ref.strokeID && !$0.submitted }),
                       pendingStroke.live.stroke.points.indices.contains(ref.index) {
                 apply(&pendingStroke.live.stroke.points[ref.index])
+                let wasCurrent = pendingStroke.revisionAfter == document.revision
                 _ = document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply)
+                // Only while nothing else changed since: otherwise drawing it can't bring the bitmap level.
+                pendingStroke.revisionAfter = wasCurrent ? document.revision : -1
                 let r = pendingStroke.live.refreshPoint(ref.index)
                 liveView.geometryChanged(of: pendingStroke.live, fromSegment: ref.index - 1, canvasRect: r.dirty)
                 var dirty = r.dirty
@@ -881,11 +1033,9 @@ final class CanvasView: UIView {
                 }
                 pendingDirty = pendingDirty.union(dirty)
                 pendingStroke.geometryDirty = true
-                geometryCache[ref.strokeID] = nil
-                modifiedSinceSnapshot.insert(ref.strokeID)
+                forgetGeometry(ref.strokeID)
             } else if document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply) {
-                geometryCache[ref.strokeID] = nil
-                modifiedSinceSnapshot.insert(ref.strokeID)
+                forgetGeometry(ref.strokeID)
                 requestFullRender()
             }
             if touch.estimatedPropertiesExpectingUpdates.isEmpty {
@@ -912,8 +1062,7 @@ final class CanvasView: UIView {
             let newGeom = p.live.geometry()
             p.geometry = newGeom
             p.bounds = newGeom.bounds
-            geometryCache[p.live.stroke.id] = nil
-            modifiedSinceSnapshot.insert(p.live.stroke.id)
+            forgetGeometry(p.live.stroke.id)
         }
         if !pendingDirty.isNull {
             invalidateLive(canvasRect: pendingDirty)
@@ -1068,9 +1217,11 @@ final class CanvasView: UIView {
                 geometryCache[live.stroke.id] = geom
                 let splits = live.stroke.tool == .pixelEraser
                     ? splits(cutBy: live.stroke, hulls: live.allHulls) : []
+                let revisionBefore = document.revision
                 document.add(live.stroke, splits: splits)
                 let deadline = CACurrentMediaTime() + 0.25
-                pending.append(PendingStroke(live: live, geometry: geom, deadline: deadline))
+                pending.append(PendingStroke(live: live, geometry: geom, deadline: deadline,
+                                             revisionBefore: revisionBefore, revisionAfter: document.revision))
                 schedulePendingCommit()
             } else {
                 liveView.invalidateAll() // clears the live layer
@@ -1145,8 +1296,7 @@ final class CanvasView: UIView {
         }
         if !hits.isEmpty {
             for id in hits {
-                geometryCache[id] = nil
-                modifiedSinceSnapshot.insert(id)
+                forgetGeometry(id)
             }
             session.removals += document.remove(ids: hits)
             dropOrphanedPendingStrokes()
