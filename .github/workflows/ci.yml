@@ -1,9 +1,12 @@
 name: CI
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  # Temporarily manual-only to save Actions minutes (NOT-88). Run it from the Actions tab or with
+  # `gh workflow run ci.yml --ref <branch>`. To turn automatic runs back on, uncomment these and re-add
+  # "Lint" and "Build & Test" as required status checks on main (removed while CI is manual-only).
+  # pull_request:
+  # push:
+  #   branches: [main]
   workflow_dispatch:
 
 concurrency:

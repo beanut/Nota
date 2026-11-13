@@ -18,14 +18,15 @@ on:
         description: Also save this run as a baseline artifact to commit
         type: boolean
         default: false
-  pull_request:
-    # Changes to the benchmarks themselves get a run, so the harness is proven before it reaches nightly.
-    paths:
-      - Packages/InkKit/Tests/InkKitBenchmarks/**
-      - Packages/InkKit/Benchmarks/**
-      - scripts/run-benchmarks.sh
-      - scripts/bench-compare.py
-      - .github/workflows/benchmarks.yml
+  # Pull-request runs also temporarily disabled to save Actions minutes (NOT-88).
+  # pull_request:
+  #   # Changes to the benchmarks themselves get a run, so the harness is proven before it reaches nightly.
+  #   paths:
+  #     - Packages/InkKit/Tests/InkKitBenchmarks/**
+  #     - Packages/InkKit/Benchmarks/**
+  #     - scripts/run-benchmarks.sh
+  #     - scripts/bench-compare.py
+  #     - .github/workflows/benchmarks.yml
 
 concurrency:
   group: benchmarks-${{ github.ref }}
