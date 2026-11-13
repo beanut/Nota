@@ -5,7 +5,7 @@ import SwiftData
 // tested without a UI; the app only adds icons and layout.
 
 /// What the sidebar has selected: a smart collection or a folder.
-public enum LibrarySection: Hashable, Sendable {
+public enum LibrarySection: Hashable, Codable, Sendable {
     case all, recents, favorites, shared, deleted
     case folder(PersistentIdentifier)
 

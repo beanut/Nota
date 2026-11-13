@@ -31,7 +31,8 @@ struct CanvasDocumentPageTests {
     @Test func resizingNotifiesOnlyOnRealChange() {
         let doc = CanvasDocument()
         var calls = 0
-        doc.onPageSizeChange = { calls += 1 }
+        let owner = NSObject()
+        doc.addObserver(owner, onChange: { _ in }, onPageSizeChange: { calls += 1 })
         doc.pageSize = .letter
         #expect(calls == 0)
         doc.pageSize = .a4
@@ -288,7 +289,8 @@ struct NotebookTemplateTests {
     @Test func templateChangesNotifyTheCanvasOnce() {
         let page = CanvasDocument()
         var calls = 0
-        page.onTemplateChange = { calls += 1 }
+        let owner = NSObject()
+        page.addObserver(owner, onChange: { _ in }, onTemplateChange: { calls += 1 })
         page.setTemplate(.preset(.smallGrid), artwork: nil)
         #expect(calls == 1)
     }

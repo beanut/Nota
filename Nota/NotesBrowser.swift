@@ -13,6 +13,7 @@ struct NotesBrowser: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(DocumentStore.self) private var documents
     @Environment(ThumbnailStore.self) private var thumbnails
+    @Environment(\.openWindow) private var openWindow
     @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
     @Query(sort: \Folder.sortIndex) private var folders: [Folder]
 
@@ -124,7 +125,10 @@ struct NotesBrowser: View {
                 NoteCard(note: note)
             }
             .buttonStyle(.plain)
+            .hoverEffect(.lift)
             .contextMenu { noteMenu(for: note) }
+            // Dropped at the side or edge of the screen, the system opens the note in a new window.
+            .onDrag { itemProvider(opening: note) }
         }
     }
 
@@ -183,6 +187,12 @@ struct NotesBrowser: View {
 
     @ViewBuilder
     private func noteMenu(for note: Note) -> some View {
+        Button {
+            openWindow(id: NoteWindow.sceneID, value: note.id)
+        } label: {
+            Label("Open in New Window", systemImage: "macwindow.badge.plus")
+        }
+        Divider()
         Button {
             note.isFavorite.toggle()
         } label: {
@@ -255,6 +265,14 @@ struct NotesBrowser: View {
     }
 
     // MARK: Actions
+
+    /// A drag that carries the note's `NoteActivity`, which the system turns into a new window.
+    private func itemProvider(opening note: Note) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.suggestedName = note.title
+        provider.registerObject(NoteActivity.make(noteID: note.id, title: note.title), visibility: .all)
+        return provider
+    }
 
     private func createNote(template: PageTemplate, size: PageSize) {
         let note = Note(title: String(localized: "Untitled Note"),

@@ -24,7 +24,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | --- | --- |
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
 | `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes |
-| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`) |
+| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
 | `PageTemplate.swift` | `PageTemplate` (pattern, spacing, margins, paper colour, custom background), the built-in presets, `PaperColor` / `PaperPalette` |
 | `TemplateLayout.swift` | Each pattern's measurements, and `lineMetrics(on:)`: baselines, line spacing, writing area and regions for the handwriting layout engine |
@@ -33,7 +33,8 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `TemplateView.swift` | The canvas layer that redraws the template at the current zoom, between the paper and the ink |
 | `TemplateMenu.swift` | The page bar's template pill: built-ins, paper colour, PDF or image, use for all pages |
 | `ViewTransform.swift` | Canvas → view mapping, zoom limits and page-swipe detection |
-| `CanvasView.swift` | `UIView` that handles raw touches, gestures, `UIPencilInteraction` and hover. Owns the page, the cached committed bitmap and the lasso overlay, plus the `UIViewRepresentable` bridge |
+| `CanvasView.swift` | `UIView` that handles raw touches, gestures, `UIPencilInteraction` and hover. Owns the page, the cached committed bitmap and the lasso overlay. Redraws from the document when another canvas on the same page changes it |
+| `CanvasRepresentable.swift` | The `UIViewRepresentable` bridge from `InkCanvasEditor` to `CanvasView` |
 | `CanvasView+ZoomWindow.swift` | The zoom window on the canvas: showing the panel and box, mapping panel touches onto the page, moving the box, rendering the panel; the hover and eraser cursors |
 | `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through |
 | `ZoomWindow.swift` | `WritingLines` (a page's ruling) and `ZoomWindow`, the box's geometry: auto-advance, line return, dragging and resizing |
