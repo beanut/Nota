@@ -39,7 +39,36 @@ extension CanvasView {
         return splits
     }
 
-    /// Stroke eraser: removes the ink strokes the eraser sweeps through.
+    struct EraseSession {
+        /// Which ink it erases.
+        var target: EraserTarget
+        /// For a standard erase (which cuts strokes rather than removing them), the strokes as they were
+        /// when it began, for its undo command; nil for a stroke erase.
+        var before: [Stroke]?
+        var removals: [CanvasDocument.Removal] = []
+        var last: CGPoint?
+
+        var isStandard: Bool {
+            before != nil
+        }
+    }
+
+    /// Ends a stroke or standard erase, recording everything it changed as one undoable command.
+    func finishErasing() {
+        guard let session = eraseSession else { return }
+        editDocument {
+            if let before = session.before {
+                document.recordReplace(before: before)
+            } else {
+                document.recordErase(session.removals)
+            }
+        }
+        eraseSession = nil
+        setCursor(nil)
+    }
+
+    /// Stroke and standard erasers: removes the ink strokes the eraser sweeps through, or for a standard
+    /// erase cuts away the parts of them it passes over. Only ink the eraser's target allows is touched.
     func eraseStrokes(along point: CGPoint) {
         guard var session = eraseSession, let controller else { return }
         let radius = CGFloat(controller.current.width) / 2 / inputTransform.scale
@@ -50,10 +79,16 @@ extension CanvasView {
             .insetBy(dx: -radius, dy: -radius)
 
         var hits = Set<UUID>()
-        // Pixel-eraser strokes are invisible; removing them would resurrect ink, so they're skipped.
-        for stroke in document.strokes where stroke.tool != .pixelEraser {
+        var cuts: [(id: UUID, pieces: [Stroke])] = []
+        for stroke in document.strokes where session.target.erases(stroke.tool) {
             let bounds = geometry(for: stroke).bounds
             guard bounds.intersects(sweep) else { continue }
+            if session.isStandard {
+                if let pieces = StrokeSplitter.remainder(of: stroke, erasedFrom: from, to: point, radius: radius) {
+                    cuts.append((stroke.id, pieces))
+                }
+                continue
+            }
             for k in 0 ... steps {
                 let t = CGFloat(k) / CGFloat(steps)
                 if StrokeRenderer.hitTest(stroke, bounds: bounds, point: from + (point - from) * t, radius: radius) {
@@ -67,13 +102,24 @@ extension CanvasView {
                 forgetGeometry(id)
             }
             session.removals += document.remove(ids: hits)
+        }
+        for cut in cuts {
+            forgetGeometry(cut.id)
+            document.replace(id: cut.id, with: cut.pieces)
+        }
+        if !hits.isEmpty || !cuts.isEmpty {
             dropOrphanedPendingStrokes()
             requestFullRender()
         }
         session.last = point
         eraseSession = session
+        showEraserCursor(at: point)
+    }
 
-        let c = inputTransform.toView(point), r = radius * inputTransform.scale
+    /// The eraser's outline at `point` (canvas space), at its on-screen size, while it's erasing.
+    func showEraserCursor(at point: CGPoint) {
+        guard let controller else { return }
+        let c = inputTransform.toView(point), r = CGFloat(controller.current.width) / 2
         setCursor(CGPath(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r), transform: nil),
                   inZoomPanel: inputInZoomPanel)
     }

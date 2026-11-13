@@ -214,12 +214,7 @@ struct ToolOptionsView: View {
 
             switch tool {
             case .eraser:
-                Picker("Erase", selection: $controller.eraserMode) {
-                    Text("Whole Stroke").tag(EraserMode.stroke)
-                    Text("Pixel").tag(EraserMode.pixel)
-                }
-                .pickerStyle(.segmented)
-                widthControls
+                EraserOptions(controller: controller) { widthControls }
             case .lasso:
                 Picker("Shape", selection: $controller.lassoMode) {
                     Text("Freeform").tag(LassoMode.freeform)
@@ -286,6 +281,75 @@ struct ToolOptionsView: View {
         guard tool.usesInk else { return theme.color(\.textSecondary) }
         let inks = theme.inks(for: tool)
         return inks[min(max(settings.colorIndex, 0), inks.count - 1)].color
+    }
+}
+
+/// The eraser's options: mode, size (`sizes`), which ink it erases, switching back afterwards, and
+/// Clear Page.
+private struct EraserOptions<Sizes: View>: View {
+    @ObservedObject var controller: CanvasController
+    @ViewBuilder let sizes: () -> Sizes
+    @State private var confirmClear = false
+    @Environment(\.inkTheme) private var theme
+
+    var body: some View {
+        Picker("Mode", selection: $controller.eraserMode) {
+            Text("Precision").tag(EraserMode.precision)
+            Text("Standard").tag(EraserMode.standard)
+            Text("Stroke").tag(EraserMode.stroke)
+        }
+        .pickerStyle(.segmented)
+        Text(modeDescription)
+            .font(theme.footnoteFont)
+            .foregroundStyle(theme.color(\.textSecondary))
+            .fixedSize(horizontal: false, vertical: true)
+
+        sizes()
+
+        VStack(alignment: .leading, spacing: InkSpacing.xxs) {
+            Picker("Erase", selection: $controller.eraserTarget) {
+                Text("All Ink").tag(EraserTarget.all)
+                Text("Highlighter").tag(EraserTarget.highlighter)
+                Text("Pencil").tag(EraserTarget.pencil)
+            }
+            .pickerStyle(.segmented)
+            .disabled(!controller.eraserMode.canTarget)
+            Text(controller.eraserMode.canTarget
+                ? "Highlighter or Pencil leaves every other kind of ink alone."
+                : "Precision erases all ink. Use Standard or Stroke to erase only highlighter or pencil.")
+                .font(theme.footnoteFont)
+                .foregroundStyle(theme.color(\.textSecondary))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Toggle("Switch back after erasing", isOn: $controller.switchBackAfterErasing)
+            .font(theme.bodyFont)
+            .foregroundStyle(theme.color(\.textPrimary))
+            .tint(theme.color(\.accent))
+
+        Button(role: .destructive) { confirmClear = true } label: {
+            HStack(spacing: InkSpacing.xs) {
+                InkIconView(.delete, size: 16)
+                Text("Clear Page")
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(InkSecondaryButtonStyle())
+        .disabled(!controller.canUndo && !controller.canRedo)
+        .confirmationDialog("Clear the page?", isPresented: $confirmClear) {
+            Button("Clear Page", role: .destructive) { controller.clear() }
+        } message: {
+            Text("You can undo this.")
+        }
+        .padding(.bottom, InkSpacing.s)
+    }
+
+    private var modeDescription: LocalizedStringKey {
+        switch controller.eraserMode {
+        case .precision: "Erases exactly what's under it."
+        case .standard: "Erases the parts of strokes it passes over."
+        case .stroke: "Erases whole strokes."
+        }
     }
 }
 
