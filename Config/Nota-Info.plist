@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Keys the INFOPLIST_KEY_* build settings can't express. Everything else is generated. -->
+	<key>NSUserActivityTypes</key>
+	<array>
+		<!-- NoteActivity.activityType: a note dragged out of the library opens in a new window. -->
+		<string>com.bernard.nota.openNote</string>
+	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

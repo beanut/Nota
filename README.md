@@ -26,14 +26,18 @@ Or open `Nota.xcodeproj`, pick an iPad simulator and Run. On first launch the li
 Nota/
 ├── Nota.xcodeproj
 ├── Nota/                     App target: composition, navigation and scenes only
-│   ├── NotaApp.swift         Entry point, SwiftData container, stores
-│   ├── LibraryView.swift     NavigationSplitView root, sidebar icons
+│   ├── NotaApp.swift         Entry point: library and note window scenes, shared container and stores
+│   ├── LibraryView.swift     NavigationSplitView root, sidebar icons, the window's open notes
 │   ├── SidebarView.swift     Smart collections + folders
-│   ├── NotesBrowser.swift    Filter chips, grid, search, menus
+│   ├── NotesBrowser.swift    Filter chips, grid, search, menus, drag to a new window
 │   ├── NoteCard.swift        Card + PaperThumbnail
 │   ├── NewNoteSheet.swift    Paper and page size for a new note
-│   ├── NoteEditorView.swift  Hosts InkCanvasEditor, saves the note
+│   ├── NoteEditorView.swift  Hosts InkCanvasEditor, saves the note, window menu
+│   ├── NoteSplitView.swift   Two notes side by side in one window
+│   ├── NoteWindow.swift      A note in a window of its own
+│   ├── NoteCommands.swift    Keyboard shortcuts for windows and split notes
 │   └── Theme/                InkTheme.nota, model colours → NotaUI inks
+├── Config/Nota-Info.plist    Info.plist keys the build settings can't express (merged with the generated one)
 └── Packages/
     ├── InkKit/               Drawing engine: input, brushes, rendering, pages, editor view
     ├── NotaCore/             Domain: Note, Folder, library filters and sorting, DocumentStore, note package + manifest, sample data
@@ -56,6 +60,16 @@ Nota (app)                  ← the only place that sees everything
 Each package's `Package.swift` lists exactly these dependencies, so breaking the rule is a build error, and CI runs `scripts/check-dependency-rule.sh` to catch imports that would only compile inside the app build. InkKit's editor is themed with `InkTheme` rather than importing NotaUI; the app supplies `InkTheme.nota`. More feature packages from the architecture doc (NotaAudio, NotaSync, NotaIntelligence, NotaAI, NotaHandwriting) are created when their first code lands.
 
 The InkCanvas prototype ([beanut/InkCanvas](https://github.com/beanut/InkCanvas)) is a thin demo app on this InkKit, referenced by local path: check it out next to this repository (`../Nota/Packages/InkKit`).
+
+## Windows
+
+Nota supports multiple windows, so it works in Split View, Slide Over and Stage Manager:
+
+- **Library windows** show the sidebar and grid. Each keeps its own section and open notes and restores them with its scene (`@SceneStorage`, through NotaCore's `NoteWorkspace`).
+- **Two notes in one window:** the editor's window menu (the split icon) opens another note beside the open one; each side has its own Pen Case and a close button.
+- **A note in its own window:** *Open in New Window* from a note's context menu or the editor's window menu, or drag a note card to the side or edge of the screen (the drag carries a `NoteActivity`).
+- **The same note open twice stays in step:** every window shares one SwiftData container and one `DocumentStore`, so both show the same `InkNotebook`, and each canvas on a page redraws when another one changes it.
+- **Keyboard:** ⌥⌘O opens the note in a new window, ⌥⌘\\ swaps the two notes, ⇧⌘W closes the note (⌘N is still New Note). Hold ⌘ to list them.
 
 ## Design system
 
@@ -96,7 +110,9 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 - Pages are shown one at a time; there's no continuous vertical scroll or page-thumbnail sidebar yet.
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
-- No PDF import/viewer, sharing or sync yet.
+- No PDF import/viewer, sharing or sync yet. A PDF-kind note opens beside a notebook like any other note, but shows the canvas until the PDF viewer lands.
+- A note open in two places shares its current page and undo history: turning the page or undoing in one turns or undoes it in the other.
+- The two notes in a split window always take half the width each.
 
 ## Next steps
 

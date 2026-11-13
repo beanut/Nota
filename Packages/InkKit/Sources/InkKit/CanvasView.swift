@@ -151,6 +151,8 @@ final class CanvasView: UIView {
     private let liveView = LiveInkView()
     private let renderQueue = DispatchQueue(label: "InkCanvas.render", qos: .userInteractive)
     private var generation: UInt64 = 0
+    /// True while this view is changing the document itself (see `editDocument`).
+    private var isEditingDocument = false
     private var bitmap: CGContext?
     private var bitmapPixelSize = CGSize.zero
     private var bitmapScale: CGFloat = 2
@@ -258,11 +260,11 @@ final class CanvasView: UIView {
         pencil.delegate = self
         addInteraction(pencil)
 
-        document.onChange = { [weak self] in
-            guard let self else { return }
-            controller?.documentDidChange(canUndo: self.document.canUndo, canRedo: self.document.canRedo)
-        }
-        document.onPageSizeChange = { [weak self] in self?.resetView() }
+        document.addObserver(self, onChange: { [weak self] change in
+            self?.documentDidChange(change)
+        }, onPageSizeChange: { [weak self] in
+            self?.resetView()
+        })
     }
 
     @available(*, unavailable)
@@ -736,28 +738,49 @@ final class CanvasView: UIView {
 
     // MARK: - Commands
 
-    @discardableResult
-    func undo() -> Bool {
-        guard live == nil, lassoSession == nil, document.undo() else { return false }
+    /// Runs a change this view makes to the document, so its own notification isn't taken for another
+    /// view's edit.
+    private func editDocument<T>(_ body: () -> T) -> T {
+        isEditingDocument = true
+        defer { isEditingDocument = false }
+        return body()
+    }
+
+    private func documentDidChange(_ change: CanvasDocument.Change) {
+        if !isEditingDocument {
+            // Another view showing the same page (the note open in a second window) changed it.
+            redrawFromDocument()
+        }
+        if change == .edited {
+            controller?.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
+        }
+    }
+
+    /// Redraws the committed layer from the document after it changed under the view (an undo, a redo,
+    /// or an edit made in another view).
+    private func redrawFromDocument() {
         generation &+= 1
         invalidateMoved()
         dropOrphanedPendingStrokes()
         requestFullRender()
+    }
+
+    @discardableResult
+    func undo() -> Bool {
+        guard live == nil, lassoSession == nil, editDocument({ document.undo() }) else { return false }
+        redrawFromDocument()
         return true
     }
 
     @discardableResult
     func redo() -> Bool {
-        guard live == nil, lassoSession == nil, document.redo() else { return false }
-        generation &+= 1
-        invalidateMoved()
-        dropOrphanedPendingStrokes()
-        requestFullRender()
+        guard live == nil, lassoSession == nil, editDocument({ document.redo() }) else { return false }
+        redrawFromDocument()
         return true
     }
 
     func clearCanvas() {
-        document.clear()
+        editDocument { document.clear() }
         generation &+= 1
         dropOrphanedPendingStrokes()
         requestFullRender()
@@ -816,7 +839,7 @@ final class CanvasView: UIView {
     // MARK: - Lasso
 
     private func invalidateMoved() {
-        let ids = document.lastMovedIDs
+        let ids = document.lastReshapedIDs
         guard !ids.isEmpty else { return }
         for id in ids {
             forgetGeometry(id)
@@ -850,7 +873,7 @@ final class CanvasView: UIView {
         for id in ids {
             forgetGeometry(id)
         }
-        document.recordErase(document.remove(ids: ids))
+        editDocument { document.recordErase(document.remove(ids: ids)) }
         dropOrphanedPendingStrokes() // also prunes the selection
         requestFullRender()
     }
@@ -915,7 +938,7 @@ final class CanvasView: UIView {
             updateSelectionBounds()
         case let .moving(_, total)?:
             if commit {
-                document.recordMove(ids: selection, by: total)
+                editDocument { document.recordMove(ids: selection, by: total) }
             } else if total != .zero {
                 document.translate(ids: selection, by: CGPoint(x: -total.x, y: -total.y))
                 for id in selection {
@@ -1022,7 +1045,7 @@ final class CanvasView: UIView {
                       pendingStroke.live.stroke.points.indices.contains(ref.index) {
                 apply(&pendingStroke.live.stroke.points[ref.index])
                 let wasCurrent = pendingStroke.revisionAfter == document.revision
-                _ = document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply)
+                _ = editDocument { document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply) }
                 // Only while nothing else changed since: otherwise drawing it can't bring the bitmap level.
                 pendingStroke.revisionAfter = wasCurrent ? document.revision : -1
                 let r = pendingStroke.live.refreshPoint(ref.index)
@@ -1034,7 +1057,7 @@ final class CanvasView: UIView {
                 pendingDirty = pendingDirty.union(dirty)
                 pendingStroke.geometryDirty = true
                 forgetGeometry(ref.strokeID)
-            } else if document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply) {
+            } else if editDocument({ document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply) }) {
                 forgetGeometry(ref.strokeID)
                 requestFullRender()
             }
@@ -1206,7 +1229,7 @@ final class CanvasView: UIView {
             finishLasso(commit: commit)
         }
         if let session = eraseSession {
-            document.recordErase(session.removals)
+            editDocument { document.recordErase(session.removals) }
             eraseSession = nil
             setCursor(nil)
         }
@@ -1218,7 +1241,7 @@ final class CanvasView: UIView {
                 let splits = live.stroke.tool == .pixelEraser
                     ? splits(cutBy: live.stroke, hulls: live.allHulls) : []
                 let revisionBefore = document.revision
-                document.add(live.stroke, splits: splits)
+                editDocument { document.add(live.stroke, splits: splits) }
                 let deadline = CACurrentMediaTime() + 0.25
                 pending.append(PendingStroke(live: live, geometry: geom, deadline: deadline,
                                              revisionBefore: revisionBefore, revisionAfter: document.revision))
@@ -1769,31 +1792,5 @@ extension CanvasView: UIPencilInteractionDelegate {
         case .switchPrevious: controller?.switchToPrevious()
         default: controller?.toggleEraser() // .switchEraser and palette actions
         }
-    }
-}
-
-// MARK: - SwiftUI bridge
-
-struct CanvasRepresentable: UIViewRepresentable {
-    let controller: CanvasController
-    let telemetry: PencilTelemetry
-    let document: CanvasDocument
-
-    func makeUIView(context: Context) -> CanvasView {
-        let view = CanvasView(frame: .zero, document: document)
-        view.controller = controller
-        view.telemetry = telemetry
-        controller.theme = context.environment.inkTheme
-        view.apply(context.environment.inkTheme)
-        controller.canvas = view
-        // A new page: the tool palette's undo and selection state must describe this document.
-        controller.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
-        controller.selectionDidChange(false)
-        return view
-    }
-
-    func updateUIView(_ view: CanvasView, context: Context) {
-        controller.theme = context.environment.inkTheme
-        view.apply(context.environment.inkTheme)
     }
 }

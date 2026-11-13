@@ -31,7 +31,8 @@ struct CanvasDocumentPageTests {
     @Test func resizingNotifiesOnlyOnRealChange() {
         let doc = CanvasDocument()
         var calls = 0
-        doc.onPageSizeChange = { calls += 1 }
+        let owner = NSObject()
+        doc.addObserver(owner, onChange: { _ in }, onPageSizeChange: { calls += 1 })
         doc.pageSize = .letter
         #expect(calls == 0)
         doc.pageSize = .a4

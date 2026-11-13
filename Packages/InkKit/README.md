@@ -24,9 +24,10 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | --- | --- |
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
 | `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes |
-| `CanvasDocument.swift` | One page's strokes, size and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`) |
+| `CanvasDocument.swift` | One page's strokes, size and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
-| `CanvasView.swift` | `UIView` that handles raw touches, gestures, `UIPencilInteraction` and hover. Owns the page, the cached committed bitmap and the lasso overlay, plus the `UIViewRepresentable` bridge |
+| `CanvasView.swift` | `UIView` that handles raw touches, gestures, `UIPencilInteraction` and hover. Owns the page, the cached committed bitmap and the lasso overlay. Redraws from the document when another canvas on the same page changes it |
+| `CanvasRepresentable.swift` | The `UIViewRepresentable` bridge from `InkCanvasEditor` to `CanvasView` |
 | `LiveInkView.swift` | The live ink layer: a grid of tile layers showing the in-progress stroke and strokes awaiting rasterization, plus the hover/eraser cursor |
 | `StrokeRenderer.swift` | Nib model (pressure → width, tilt → ellipse + opacity), centripetal Catmull-Rom, outline geometry (tangent strips and nib stamps), drawing, hit-testing, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Graphite grain for the pencil |
