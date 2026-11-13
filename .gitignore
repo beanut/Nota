@@ -4,3 +4,5 @@ DerivedData/
 .build/
 .swiftpm/
 xcuserdata/
+CLAUDE.local.md
+bench-output/
