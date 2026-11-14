@@ -24,7 +24,8 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | --- | --- |
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
 | `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes |
-| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it |
+| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `replace` for a standard erase, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
+| `TestingSupport.swift` | `@_spi(Testing)` hooks for other packages' tests to put ink on a page (`drawTestStroke(through:)`, `undoForTesting()`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
 | `PageTemplate.swift` | `PageTemplate` (pattern, spacing, margins, paper colour, custom background), the built-in presets, `PaperColor` / `PaperPalette` |
 | `TemplateLayout.swift` | Each pattern's measurements, and `lineMetrics(on:)`: baselines, line spacing, writing area and regions for the handwriting layout engine |
@@ -39,26 +40,73 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `Scribble.swift` | Scratch-out and circle-to-select detection and their target strokes |
 | `CanvasRepresentable.swift` | The `UIViewRepresentable` bridge from `InkCanvasEditor` to `CanvasView` |
 | `CanvasView+ZoomWindow.swift` | The zoom window on the canvas: showing the panel and box, mapping panel touches onto the page, moving the box, rendering the panel; the hover and eraser cursors |
-| `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through |
+| `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through; stroke and standard erasing, and the eraser cursor |
 | `ZoomWindow.swift` | `WritingLines` (a page's ruling) and `ZoomWindow`, the box's geometry: auto-advance, line return, dragging and resizing |
 | `ZoomPanelView.swift` | The zoom window's writing panel and the box overlay drawn on the page |
 | `MultiFingerTapRecognizer.swift` | Two- and three-finger taps (undo, redo) without multi-tap delay |
 | `LiveInkView.swift` | The live ink layer: a grid of tile layers showing the in-progress stroke and strokes awaiting rasterization, plus the hover/eraser cursor |
-| `StrokeRenderer.swift` | Nib model (pressure → width, tilt → ellipse + opacity), centripetal Catmull-Rom, outline geometry (tangent strips and nib stamps), drawing, hit-testing, and the incremental `LiveStroke` |
-| `PencilTexture.swift` | Graphite grain for the pencil |
-| `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes |
+| `BrushDescriptor.swift` | `BrushDescriptor`: every brush parameter, its legal range and `clamped()`, lenient JSON, and the bundled brushes |
+| `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, and the incremental `LiveStroke` |
+| `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
+| `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
 | `Lasso.swift` | Freeform and rectangle lasso regions and hit-testing |
 | `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes built in parallel, culling, drawing in parallel bands), shared by the canvas and the benchmarks |
 | `CommittedRaster.swift` | A page's committed layer kept compressed with the page, so reopening it restores the pixels instead of re-rendering |
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
 | `PageRenderer.swift` | Renders a page snapshot (template + ink) to an image off the main actor (thumbnails), or pages to a PDF |
-| `Stroke.swift` | `Stroke`, `StrokePoint`, `BrushStyle`, tool enums, `RGBA` |
+| `Stroke.swift` | `Stroke`, `StrokePoint`, tool enums, `RGBA` |
 | `InkFile.swift` | `InkPageFile`, the `.ink` page format: encoder, decoder and `InkFileError` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit |
 | `ToolbarView.swift` | Pen Case, tool options, pressure & tilt settings, the Pencil quick palette |
 | `PageBar.swift` | Page bar (page size and template pills) and the custom page size sheet |
 | `InkTheme.swift` / `InkChrome.swift` | The theme and the controls built from it |
 | `PencilHUD.swift` | Debug HUD, throttled telemetry, sample-rate counter |
+
+## Brushes
+
+A brush is a `BrushDescriptor`: plain, `Codable` data (Architecture §4). The built-in tools are bundled
+descriptors (`.pen`, `.pencil`, `.highlighter`, `.pixelEraser`), so a built-in brush and one a user or a
+model makes go through exactly the same code. A stroke keeps a snapshot of its descriptor, with the width
+and Pressure & Tilt settings of the moment applied (`sized(_:minimumRatio:)`, `pressure`, `tilt`).
+
+```swift
+var marker = BrushDescriptor.pen.sized(6, minimumRatio: 0.6)
+marker.tip = .ellipse(aspect: 0.3, angle: .pi / 4)
+marker.taper = .init(startLength: 12, endLength: 20)
+let json = try marker.jsonData(pretty: true)        // sorted keys: equal brushes, equal bytes
+let brush = try BrushDescriptor(json: json)          // lenient and clamped
+```
+
+| Parameter | Legal range | What it does |
+| --- | --- | --- |
+| `tip` | `round`, or `ellipse(aspect 0.05…1, angle)` | Nib cross-section; a flat nib keeps its angle |
+| `size` | upper 0.05…1000 pt, lower 0…upper | Width at no pressure … full pressure |
+| `pressure` | amount 0…1, exponent 0.1…5 | Pressure → position in `size` (`input^exponent`) |
+| `pressureOpacity` | amount 0…1, exponent 0.1…5 | Pressure → opacity (off by default) |
+| `tilt` | start 1…89°, full 0…start−1°, length 0…8, breadth 0…4, opacity loss 0…1, contact shift 0…1 | Tilt shading; a round nib follows the azimuth |
+| `velocity` | amount 0…1, exponent 0.1…5 | Thinning with speed (full at 1500 pt/s) |
+| `taper` | start, end 0…500 pt; minimum scale 0…1 | Narrow ends. The end taper is applied when the Pencil lifts |
+| `smoothing` | 0…0.95 | Stabiliser: each sample pulled toward the stroke so far |
+| `texture` | `none`, `grain(scale 0.25…8, contrast 0…1, seed)`, `bristle(count 1…64, spread 0.1…2)` | Procedural, never a bitmap |
+| `spacing` | 0, or 0.05…4 nib widths | 0 draws on the hull path; more draws stamps |
+| `jitter` | size, angle, opacity 0…1; scatter 0…2 nib widths; seed | Per-stamp variation (stamp path) |
+| `wetness` | 0…1 | Ink pools where the nib lingers, runs dry where it hurries |
+| `blend` | `normal`, `multiply`, `destinationOut` | Compositing; `destinationOut` erases |
+| `opacity` | 0.02…1 | Overall opacity |
+
+- **Clamping.** `clamped()` pulls every parameter into its range and replaces NaN with the pen's value.
+  Decoding always clamps, a missing field takes its default (a partial object like `{"tilt": {"enabled":
+  false}}` keeps the rest), and an unknown enum case falls back to the pen's, so no JSON decodes to a brush
+  the renderer can't draw. That's what makes model-generated brushes safe to render.
+- **Two render paths**, picked from the descriptor (`renderPath`). `spacing == 0` without a bristle texture
+  is the **hull path**: the nib swept continuously, exactly as before descriptors (see Stroke geometry).
+  Otherwise the **stamp path**: nib stamps spread evenly over each spline segment about `spacing` nib widths
+  apart, moved by `jitter` with a generator seeded by the stamp's place in the stroke, and split into
+  bristle dots by a bristle texture. Segments never depend on each other, so live and committed strokes
+  match and nothing grows with stroke length.
+- **Built-in tools look the same.** `Tests/InkKitTests/Snapshots/` holds golden images rendered by the
+  engine before descriptors; the bundled descriptors match them pixel for pixel. Re-record with
+  `TEST_RUNNER_INK_SNAPSHOT_RECORD=1` only for an intended change.
 
 ## Page templates
 
@@ -95,7 +143,7 @@ let pdf = PageRenderer.pdf(of: notebook.pages.map { $0.snapshot() }) { theme.pal
 ### Data model
 
 - `StrokePoint { location, force, altitude, azimuth, timestamp }`: `location` is in **canvas space**, independent of zoom and pan. `force` is normalised to 0…1 (`force / maximumPossibleForce`).
-- `Stroke { id, tool, color, style, points, createdAt }`: `tool` is an `InkKind` (`pen`, `pencil`, `highlighter` or `pixelEraser`). `style` is a **snapshot** of the brush settings taken when the stroke began, so later slider changes never restyle existing ink. `createdAt` is wall-clock time (point timestamps are touch uptime), for replaying ink against audio later; pieces a pixel eraser cuts keep it.
+- `Stroke { id, color, brush, points, createdAt }`: `brush` is a **snapshot** of the `BrushDescriptor` taken when the stroke began (see Brushes), so later brush or slider changes never restyle existing ink. `createdAt` is wall-clock time (point timestamps are touch uptime), for replaying ink against audio later; pieces a pixel eraser cuts keep it.
 - View transform: canvas → view is a uniform scale plus translation with no rotation, so azimuth angles are the same in both spaces.
 
 ### Ink file format
@@ -122,11 +170,11 @@ Layout (v1, little-endian):
 
 Each record is `type u8 · payload length (varint) · payload`:
 
-- **1, brush table** (first): every distinct `InkKind` + `BrushStyle` on the page, stored once. Per brush: kind code, flags (bit 0 tilt), then width, min width ratio, pressure gamma and opacity as f64.
+- **1, brush table** (first): every distinct `BrushDescriptor` on the page, clamped and stored once. Per brush: its JSON length (varint), then the JSON with sorted keys, so the same brush always writes the same bytes. JSON keeps the table readable across versions (a reader ignores fields it doesn't know and defaults the ones that are missing); a brush that isn't a JSON object is `corrupt`. (Before NOT-16 this record held a fixed kind code and five numbers; no file was ever written in that layout.)
 - **2, stroke**, in drawing order: id (16 bytes), brush index (varint), colour (4 × f32), `createdAt` (f64 seconds since 2001), the first point's timestamp (f64), point count (varint), then six columns of zigzag varints. Points are quantised (location to 1/64 pt, force to 1/1024, altitude and azimuth to 1/1024 rad, time to 1/4096 s) and delta-encoded: x, y and time as second-order deltas (the change in step, near zero for smooth, regularly sampled input), force, altitude and azimuth as first-order. Every step is a power of two, so a decoded page re-encodes to the same bytes.
 - **Any other type** is kept as it is, with its position among the strokes, and written back on save. A newer minor version adds data that must survive older apps as new record types; fields it appends to a known record are skipped by older readers (and lost if they re-save).
 
-Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size may be at most 256× the stored size, so a reader can bound its allocation. Decoding checks every length, count and index against what's left and rejects non-finite numbers, so damaged or truncated input throws an `InkFileError` (`notAnInkFile`, `unsupportedVersion`, `truncated`, `checksumMismatch`, `corrupt`) and never traps. Nothing writes these files yet; NOT-6 stores one per page in the note package.
+Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size may be at most 256× the stored size, so a reader can bound its allocation. Decoding checks every length, count and index against what's left and rejects non-finite numbers, so damaged or truncated input throws an `InkFileError` (`notAnInkFile`, `unsupportedVersion`, `truncated`, `checksumMismatch`, `corrupt`) and never traps. Nota stores one per page with ink in the note package (`pages/<page id>.ink`, written by NotaCore's `DocumentStore`).
 
 ### Rendering pipeline
 
@@ -144,14 +192,16 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 
 - Samples are smoothed with **centripetal Catmull-Rom**, which avoids cusps and overshoot when samples are unevenly spaced.
 - Each segment is cut into straight steps by **curvature, not distance**: enough to stay within 0.02 canvas points of the spline, to keep each step's turn small, and to keep the nib from changing more than about 10% per step, but never denser than half a nib width. A fast, nearly straight segment is one or two steps however long it is.
-- At every sub-step the nib is an **ellipse**:
-  - Pressure sets the width: `width = max × (minRatio + (1 − minRatio) × pressure^γ)`.
-  - When tilt is on, the ellipse stretches along azimuth, widens and loses opacity as altitude drops (shading starts below 60° and saturates at 15°).
+- At every sub-step the nib is an **ellipse**, from the stroke's `BrushDescriptor`:
+  - Pressure sets the width across `size`: `width = upper × (ratio + (1 − ratio) × pressure^exponent)`, `ratio = lower / upper`. Taper and speed (`velocity`, `wetness`) then scale it, when the brush uses them.
+  - When tilt is on, the ellipse stretches along azimuth, widens and loses opacity as altitude drops (for the built-in brushes shading starts below 60° and saturates at 15°). A flat (`ellipse`) tip keeps its own angle.
 - The ink of each step is the **convex hull of two consecutive nib ellipses**. It is emitted as the quad between the ellipses' common tangents, with consecutive quads welded into one **strip** polygon. The nib ellipse itself (a **stamp**) is added only where the strips alone would leave a gap: the stroke's two caps, sharp bends, fast tapers, and wherever a strip has to break (a change of alpha, or a new chunk).
 - This matters for speed: Core Graphics' fill time follows vertex count and overlap depth, not pixel count. Emitting every hull whole gave about 8× the vertices, all overlapping.
 - Pieces with the same alpha are unioned into one non-zero-winding path, so overlapping joints never double up. When tilt varies alpha along a stroke, runs are drawn with `.copy` inside a transparency layer. This prevents seams.
-- **Highlighter** composites with *multiply*, so ink underneath stays readable. The **pixel eraser** is a `destinationOut` stroke in the same list, so it's undoable.
+- **Highlighter** composites with *multiply* (`blend`), so ink underneath stays readable. The **pixel eraser** is a `destinationOut` stroke in the same list, so it's undoable. A grain texture fills with a pattern colour whose phase is pinned to the page.
+- Everything above is the **hull path**. The **stamp path** (textured brushes) emits only stamps, spread over each segment; see Brushes.
 - **Pixel erasing splits strokes.** When a pixel-eraser stroke is committed, every ink stroke under it is checked: wherever the ink's whole cross-section (the nib's extent across the direction of travel) lies inside the union of the pixel erasers above it, the stroke is cut. Each cut strictly inside a stroke replaces it with separate `Stroke`s (fresh IDs, same style snapshot), so the stroke eraser removes only the piece it touches. Erasing a stroke's end only shortens it. The split is part of the eraser's `add` command, so one undo restores the original stroke. Partial erases that only together sever a line count as a cut too.
+- **Eraser modes.** *Precision* is the pixel eraser above. *Standard* cuts away the parts of strokes the eraser passes over as it moves: each touched stroke is replaced in place (same z-order) by the runs of its spline the eraser didn't reach (`StrokeSplitter.remainder`), counting the nib's radius so the pieces' round caps stop at the eraser's edge. The whole gesture is one `replace(before:after:)` command. *Stroke* removes whole strokes (`erase`). Standard and stroke erasing can be limited to highlighter or to pencil ink (`EraserTarget`), so highlighting over handwriting comes off without touching the writing; precision erasing always takes everything, since its stroke composites over all the ink below it. The eraser shows its outline at its on-screen size while erasing, and can switch back to the previous tool when the stroke ends.
 
 ### Zoom window
 
@@ -237,6 +287,8 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `full_redraw.5k_ms` | Re-rendering a 5k-stroke page with geometry cached (undo, erase, end of zoom) | – |
 | `ink_file.5k_kb`, `ink_file.bytes_per_point` | Size of a 5k-stroke page's `.ink` file. Each corpus copy is stretched a little so the compressor can't match copies against each other | < 1024 KB |
 | `ink_file.encode_5k_ms` / `decode_5k_ms` | Encoding that page, and decoding it back (which joins page open in NOT-6) | decode < 50 ms |
+| `stroke_geometry.stamp.*` | `stroke_geometry.*` with every stroke drawn by a stamp brush (bristles, jitter) | – (baseline only) |
+| `live_event.stamp.p50/p95/p99_ms` | `live_event.*` with the same stamp brush | – (baseline only) |
 | `memory.6x.*` | Physical footprint with a 5k page open at 6× zoom while the corpus is written on top: cached geometry, committed bitmap, live tiles. Measured from a settled baseline (free memory returned first), so earlier benchmarks don't change it | – |
 
 ### Recorded input

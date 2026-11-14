@@ -236,11 +236,10 @@ struct InkNotebookTests {
 }
 
 func makeStroke(at point: CGPoint) -> Stroke {
-    let style = BrushStyle(width: 4, minWidthRatio: 0.25, pressureGamma: 0.6, opacity: 1, tiltEnabled: false)
     let points = [point, CGPoint(x: point.x + 5, y: point.y + 5)].enumerated().map { i, p in
         StrokePoint(location: p, force: 0.5, altitude: .pi / 2, azimuth: 0, timestamp: Double(i))
     }
-    return Stroke(id: UUID(), tool: .pen, color: RGBA.swatches[0], style: style, points: points)
+    return Stroke(id: UUID(), color: RGBA.swatches[0], brush: TestBrush.pen.brush(width: 4), points: points)
 }
 
 @MainActor

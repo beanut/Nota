@@ -129,7 +129,7 @@ extension CanvasView {
 
     /// A stroke just ended. If it was written in the panel and reached the advance zone, the box moves on.
     func followWriting(_ bounds: CGRect, of stroke: Stroke) {
-        guard inputInZoomPanel, stroke.tool != .pixelEraser, var window = zoomWindow,
+        guard inputInZoomPanel, !stroke.brush.erases, var window = zoomWindow,
               window.strokeEnded(bounds: bounds) != .stayed else { return }
         setZoomWindow(window)
     }
@@ -172,7 +172,7 @@ extension CanvasView {
     /// written.
     private func zoomLiveEntries() -> [LiveInkView.Entry] {
         (zoomHeld + (live.map { [$0] } ?? [])).map {
-            LiveInkView.Entry(stroke: $0, previewFill: $0.stroke.tool == .pixelEraser ? paperColor.cgColor : nil)
+            LiveInkView.Entry(stroke: $0, previewFill: $0.stroke.brush.erases ? paperColor.cgColor : nil)
         }
     }
 
@@ -206,11 +206,11 @@ extension CanvasView {
         let items: [CommittedRenderer.Item] = document.strokes.compactMap { stroke in
             if let geometry = geometryCache[stroke.id] {
                 guard geometry.bounds.intersects(visible) else { return nil }
-                return CommittedRenderer.Item(id: stroke.id, kind: stroke.tool, color: stroke.color,
+                return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
                                               geometry: geometry, stroke: nil)
             }
             guard Self.roughBounds(of: stroke).intersects(visible) else { return nil }
-            return CommittedRenderer.Item(id: stroke.id, kind: stroke.tool, color: stroke.color,
+            return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
                                           geometry: nil, stroke: stroke)
         }
         let included = Set(zoomHeld.map { ObjectIdentifier($0) })
@@ -253,7 +253,7 @@ extension CanvasView {
             minY = min(minY, point.location.y)
             maxY = max(maxY, point.location.y)
         }
-        let r = stroke.style.width * 2
+        let r = stroke.brush.maxWidth * 2
         return CGRect(x: minX - r, y: minY - r, width: maxX - minX + 2 * r, height: maxY - minY + 2 * r)
     }
 
@@ -298,9 +298,9 @@ extension CanvasView {
             let c = transform.toView(canvasPoint)
             path.addEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
         } else {
-            let style = controller.strokeTemplate(viewScale: transform.scale).style
+            let brush = controller.strokeTemplate(viewScale: transform.scale).brush
             let sample = StrokePoint(location: canvasPoint, force: 1, altitude: altitude, azimuth: azimuth, timestamp: 0)
-            let poly = StrokeRenderer.polygon(for: StrokeRenderer.tip(for: sample, style: style))
+            let poly = StrokeRenderer.polygon(for: StrokeRenderer.tip(for: sample, brush: brush))
             path.addLines(between: poly, transform: transform.affine)
             path.closeSubpath()
         }

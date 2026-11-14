@@ -9,19 +9,53 @@ enum Tool: String, CaseIterable, Identifiable {
     }
 }
 
+/// How the eraser removes ink.
 enum EraserMode: String, CaseIterable, Identifiable {
-    case stroke, pixel
+    /// Pixel eraser: an invisible `pixelEraser` stroke punches out exactly the pixels under it, from
+    /// every kind of ink.
+    case precision
+    /// Cuts away the parts of strokes the eraser passes over, leaving the rest as separate strokes.
+    case standard
+    /// Removes every stroke the eraser touches, whole.
+    case stroke
     var id: String {
         rawValue
     }
+
+    /// Whether the mode can be limited to one kind of ink (`EraserTarget`). A precision erase is a
+    /// stroke of its own that composites over everything drawn before it, so it can't pick.
+    var canTarget: Bool {
+        self != .precision
+    }
 }
 
-/// How a stored stroke composites onto the page.
-enum InkKind: Hashable, Sendable {
-    case pen // normal source-over
-    case pencil // textured graphite source-over
-    case highlighter // multiply, so ink underneath stays readable
-    case pixelEraser // destination-out, removes pixels of strokes drawn before it
+/// Which ink the eraser removes, so highlighting can be erased without touching the writing under it.
+enum EraserTarget: String, CaseIterable, Identifiable {
+    case all, highlighter, pencil
+    var id: String {
+        rawValue
+    }
+
+    /// Whether ink drawn with `brush` is erased. Pixel-eraser strokes are never erased: they're invisible, and
+    /// removing one would bring back the ink it erased.
+    func erases(_ brush: BrushDescriptor) -> Bool {
+        if brush.erases {
+            return false
+        }
+        switch self {
+        case .all:
+            return true
+        case .highlighter:
+            return brush.blend == .multiply
+        case .pencil:
+            return brush.usesPattern
+        }
+    }
+
+    /// Whether `stroke` is erased.
+    func erases(_ stroke: Stroke) -> Bool {
+        erases(stroke.brush)
+    }
 }
 
 struct RGBA: Hashable, Sendable {
@@ -56,20 +90,12 @@ struct StrokePoint: Equatable, Sendable {
     var timestamp: TimeInterval
 }
 
-/// Snapshot of the brush settings when the stroke began, so later slider changes don't restyle old ink.
-struct BrushStyle: Hashable, Sendable {
-    var width: CGFloat // width at full pressure, canvas units
-    var minWidthRatio: CGFloat // width at zero pressure = width * minWidthRatio
-    var pressureGamma: CGFloat // response curve: pressure' = pressure ^ gamma
-    var opacity: CGFloat
-    var tiltEnabled: Bool
-}
-
 struct Stroke: Identifiable, Equatable, Sendable {
     let id: UUID
-    var tool: InkKind
     var color: RGBA
-    var style: BrushStyle
+    /// Snapshot of the brush when the stroke began (with the width and pressure settings of the time), so
+    /// later changes to the brush or the sliders don't restyle old ink.
+    var brush: BrushDescriptor
     var points: [StrokePoint]
     /// Wall-clock time the stroke was begun, so ink can later be replayed against an audio recording.
     /// (`StrokePoint.timestamp` is touch uptime, which doesn't survive a relaunch.) Pieces a pixel eraser

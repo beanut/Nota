@@ -39,7 +39,7 @@ struct PageRendererTests {
     @Test func inkIsDrawnOverTheBackground() throws {
         let doc = CanvasDocument(pageSize: PageSize(width: 100, height: 100))
         var stroke = makeStroke(at: CGPoint(x: 20, y: 50))
-        stroke.style.width = 20
+        stroke.brush = stroke.brush.sized(20, minimumRatio: 0.25)
         stroke.points.append(StrokePoint(location: CGPoint(x: 80, y: 50), force: 1, altitude: .pi / 2,
                                          azimuth: 0, timestamp: 2))
         doc.add(stroke)
@@ -55,12 +55,12 @@ struct PageRendererTests {
     @Test func pixelEraserRemovesInkButNotPaper() throws {
         let doc = CanvasDocument(pageSize: PageSize(width: 100, height: 100))
         var ink = makeStroke(at: CGPoint(x: 20, y: 50))
-        ink.style.width = 20
+        ink.brush = ink.brush.sized(20, minimumRatio: 0.25)
         ink.points.append(StrokePoint(location: CGPoint(x: 80, y: 50), force: 1, altitude: .pi / 2,
                                       azimuth: 0, timestamp: 2))
         doc.add(ink)
-        var eraser = Stroke(id: UUID(), tool: .pixelEraser, color: ink.color, style: ink.style, points: ink.points)
-        eraser.style.width = 40
+        let eraser = Stroke(id: UUID(), color: ink.color, brush: TestBrush.pixelEraser.brush(width: 40),
+                            points: ink.points)
         doc.add(eraser)
         let white = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
         let image = try #require(PageRenderer.image(of: doc.snapshot(), pixelWidth: 100) { ctx, size in

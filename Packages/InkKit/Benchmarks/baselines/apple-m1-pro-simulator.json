@@ -33,6 +33,18 @@
       "unit": "ms",
       "value": 0.295
     },
+    "live_event.stamp.p50_ms": {
+      "unit": "ms",
+      "value": 0.237
+    },
+    "live_event.stamp.p95_ms": {
+      "unit": "ms",
+      "value": 0.901
+    },
+    "live_event.stamp.p99_ms": {
+      "unit": "ms",
+      "value": 2.226
+    },
     "memory.6x.geometry_mb": {
       "unit": "MB",
       "value": 206.563
@@ -77,6 +89,14 @@
     "stroke_geometry.per_stroke_us": {
       "unit": "us",
       "value": 194.803
+    },
+    "stroke_geometry.stamp.corpus_ms": {
+      "unit": "ms",
+      "value": 54.385
+    },
+    "stroke_geometry.stamp.per_stroke_us": {
+      "unit": "us",
+      "value": 849.759
     }
   },
   "schema": 1

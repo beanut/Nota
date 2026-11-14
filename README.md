@@ -91,7 +91,7 @@ InkCanvasEditor(notebook: notebook)
 - **Pages** – `InkNotebook` is an ordered list of `CanvasDocument`s with add / insert / remove / move and navigation. Each page has its own paper size, ink and undo history. A notebook always keeps at least one page.
 - **Page size** – `PageSize` is in points (1/72 in) and defaults to Letter. Custom sizes can be given in inches, millimetres or points. Resizing a page keeps the ink where it is; ink past the new edge is hidden, not deleted.
 - **Templates** – each page has a `PageTemplate`: blank, narrow / college / wide ruled, small and large grid, dotted, Cornell, music staff, isometric, to-do, weekly and monthly planners, or any PDF or image, on white, cream or dark paper. Templates are drawn as vectors (crisp at every zoom, real lines in an exported PDF) and expose their line metrics for handwriting layout. The page bar's template pill changes this page or every page; the library's Template menu changes a whole note.
-- **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page.
+- **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page. The eraser erases pixel by pixel (Precision), the parts of strokes it passes over (Standard) or whole strokes, optionally only highlighter or only pencil ink, and can switch back to the previous tool afterwards.
 - **Zoom window** – More › Zoom Window opens a magnified writing panel above the page bar for a box on the page, for small, neat handwriting. Every tool works in it. Writing into the panel's shaded right-hand zone moves the box along the line, and at the end of the line on to the next one, following the page template's ruling. Drag the box by its tab, resize it (and so the magnification) by its corner knob, or use the panel's back, on and new-line buttons.
 
 Run the package tests on an iPad simulator (InkKit and NotaCore have test targets). The library's rules (smart collections, filter chips, search, sorting, Recently Deleted, folder order and `Date.libraryLabel`) live in NotaCore's `Library.swift` rather than the app's views, so NotaCore's tests cover them against an in-memory SwiftData store:
@@ -108,8 +108,14 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 
 ## Known limitations
 
-- Ink isn't saved to disk yet; strokes last until the app quits. InkKit can encode a page as a `.ink` file
-  (NOT-5), but nothing writes one until NOT-6. Note metadata is persisted with SwiftData.
+- Each note is a `.nota` package (manifest + one `.ink` file per page with ink) that `DocumentStore` autosaves
+  about a second after each change, when the editor closes and when the app leaves the screen. Undo history
+  isn't saved. Pages load a whole note at a time (decoded off the main thread); the 8 most recent notes stay
+  in memory. Loading individual pages on demand waits for continuous scroll (NOT-26).
+- A note's cover is re-rendered when its editor closes, so a note whose editor was open when the app was
+  killed shows its previous cover until it's next opened and closed.
+- The library index (SwiftData) is rebuilt from packages at launch if notes are missing from it, with title,
+  dates, page count and template; folders, favourites and tints aren't in packages, so they're lost then.
 - Pages are shown one at a time; there's no continuous vertical scroll or page-thumbnail sidebar yet.
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
@@ -122,6 +128,5 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 
 ## Next steps
 
-1. Per-note ink persistence: write each page's `.ink` file into the note package (NOT-6).
-2. Real thumbnails from the committed bitmap.
-3. PDF import and annotation, page thumbnails and drag-to-reorder.
+1. Real thumbnails from the committed bitmap.
+2. PDF import and annotation, page thumbnails and drag-to-reorder.

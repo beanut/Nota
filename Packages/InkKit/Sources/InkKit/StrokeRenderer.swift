@@ -69,13 +69,151 @@ struct Tip {
     var alpha: CGFloat
 }
 
-extension InkKind {
-    var blendMode: CGBlendMode {
-        switch self {
-        case .pen, .pencil: .normal
-        case .highlighter: .multiply
-        case .pixelEraser: .destinationOut
+/// Inputs to the nib at one point beyond the sample itself: how fast the stroke moves there and how much
+/// it's tapered. The identity for brushes that use neither.
+struct NibContext {
+    var speed: CGFloat = 0 // canvas points per second
+    var taper: CGFloat = 1 // width multiplier
+
+    func mix(_ other: NibContext, _ t: CGFloat) -> NibContext {
+        NibContext(speed: speed + (other.speed - speed) * t, taper: taper + (other.taper - taper) * t)
+    }
+}
+
+/// The parts of a `BrushDescriptor` that geometry reads, without its id and name. Nothing in it is
+/// reference-counted, so the ink path copies it freely; passing the whole descriptor (a `String` inside)
+/// through the per-nib functions cost retain/release traffic on every sub-step.
+struct BrushModel {
+    let tip: BrushDescriptor.TipShape
+    let size: ClosedRange<CGFloat>
+    let pressure: BrushDescriptor.ResponseCurve
+    let pressureOpacity: BrushDescriptor.ResponseCurve
+    let tilt: BrushDescriptor.TiltResponse
+    let velocity: BrushDescriptor.ResponseCurve
+    let taper: BrushDescriptor.Taper
+    let texture: BrushDescriptor.Texture
+    let jitter: BrushDescriptor.Jitter
+    let wetness: CGFloat
+    let opacity: CGFloat
+    let usesSpeed: Bool
+    let renderPath: BrushDescriptor.RenderPath
+    let stampSpacing: CGFloat
+
+    init(_ b: BrushDescriptor) {
+        tip = b.tip
+        size = b.size
+        pressure = b.pressure
+        pressureOpacity = b.pressureOpacity
+        tilt = b.tilt
+        velocity = b.velocity
+        taper = b.taper
+        texture = b.texture
+        jitter = b.jitter
+        wetness = b.wetness
+        opacity = b.opacity
+        usesSpeed = b.usesSpeed
+        renderPath = b.renderPath
+        stampSpacing = b.stampSpacing
+    }
+}
+
+/// What building a stroke's geometry needs besides its points: the brush, and for brushes whose nib
+/// depends on where in the stroke it is (taper), the arc length so far and, once the stroke has ended,
+/// its total length.
+struct StrokeContext {
+    let brush: BrushModel
+    /// Stroke index of `pts[0]` in the points passed alongside (the live tail passes the end of the stroke).
+    var firstIndex = 0
+    /// Arc length (along the samples) at each stroke point, by stroke index, when the brush tapers.
+    /// Points past its end (predicted samples) continue from its last entry in a straight line.
+    var distances: [CGFloat] = []
+    /// The stroke's whole length once it has ended; nil while it's drawn, so there's no end taper yet.
+    var totalLength: CGFloat?
+
+    init(brush: BrushDescriptor, firstIndex: Int = 0, distances: [CGFloat] = [], totalLength: CGFloat? = nil) {
+        self.brush = BrushModel(brush)
+        self.firstIndex = firstIndex
+        self.distances = distances
+        self.totalLength = totalLength
+        plain = !brush.usesSpeed && !brush.taper.isActive
+    }
+
+    /// A finished stroke's context: distances measured, total length known.
+    init(finished points: [StrokePoint], brush: BrushDescriptor) {
+        let distances = brush.taper.isActive ? Self.distances(along: points) : []
+        self.init(brush: brush, distances: distances, totalLength: distances.last)
+    }
+
+    /// True when every nib is the identity context: the common case, kept free of extra work.
+    let plain: Bool
+
+    static func distances(along points: [StrokePoint]) -> [CGFloat] {
+        var result: [CGFloat] = []
+        result.reserveCapacity(points.count)
+        var total: CGFloat = 0
+        for (i, p) in points.enumerated() {
+            if i > 0 {
+                total += points[i - 1].location.distance(to: p.location)
+            }
+            result.append(total)
         }
+        return result
+    }
+
+    /// Samples over which the speed at a point is averaged (the point and the ones before it). Raw 240 Hz
+    /// samples are too noisy to use one step alone.
+    static let speedWindow = 3
+
+    /// The nib context at `pts[k]`.
+    func nib(at k: Int, in pts: [StrokePoint]) -> NibContext {
+        guard !plain else { return NibContext() }
+        var nib = NibContext()
+        if brush.usesSpeed {
+            let first = max(0, k - Self.speedWindow)
+            if k > first {
+                var length: CGFloat = 0
+                for j in first ..< k {
+                    length += pts[j].location.distance(to: pts[j + 1].location)
+                }
+                let dt = CGFloat(pts[k].timestamp - pts[first].timestamp)
+                nib.speed = dt > 1e-4 ? length / dt : 0
+            }
+        }
+        if brush.taper.isActive {
+            nib.taper = taperScale(at: distance(at: k, in: pts))
+        }
+        return nib
+    }
+
+    /// The nib at `pts[k]`.
+    func tip(at k: Int, in pts: [StrokePoint]) -> Tip {
+        StrokeRenderer.tip(for: pts[k], brush: brush, nib: nib(at: k, in: pts))
+    }
+
+    private func distance(at k: Int, in pts: [StrokePoint]) -> CGFloat {
+        let s = firstIndex + k
+        if s < distances.count {
+            return distances[s]
+        }
+        guard let last = distances.last else { return 0 }
+        let known = distances.count - 1 - firstIndex
+        return known >= 0 && known < pts.count ? last + pts[known].location.distance(to: pts[k].location) : last
+    }
+
+    private func taperScale(at d: CGFloat) -> CGFloat {
+        let taper = brush.taper
+        func ease(_ x: CGFloat) -> CGFloat {
+            let x = min(max(x, 0), 1)
+            return taper.minimumScale + (1 - taper.minimumScale) * x * (2 - x)
+        }
+        var scale: CGFloat = 1
+        if taper.startLength > 0 {
+            scale = min(scale, ease(d / taper.startLength))
+        }
+        if taper.endLength > 0, let totalLength {
+            scale = min(scale, ease((totalLength - d) / taper.endLength))
+        }
+        return scale
     }
 }
 
@@ -96,13 +234,9 @@ enum StrokeRenderer {
     /// common tangents are ill-conditioned; both stamps are emitted as well.
     static let steepTaper: CGFloat = 0.9
 
-    // Tilt shading kicks in below `tiltStart` and saturates at `tiltFull`.
-    static let tiltStart: CGFloat = 60 * .pi / 180
-    static let tiltFull: CGFloat = 15 * .pi / 180
-
     private static let circles: [Int: [(CGFloat, CGFloat)]] = {
         var table: [Int: [(CGFloat, CGFloat)]] = [:]
-        for n in [16, 32, 64] {
+        for n in [8, 16, 32, 64] {
             table[n] = (0 ..< n).map { i in
                 let t = CGFloat(i) / CGFloat(n) * 2 * .pi
                 return (cos(t), sin(t))
@@ -113,33 +247,75 @@ enum StrokeRenderer {
 
     // MARK: Nib model
 
-    static func tiltAmount(altitude: CGFloat) -> CGFloat {
-        let x = min(max((tiltStart - altitude) / (tiltStart - tiltFull), 0), 1)
+    /// How tilted the nib is, 0…1: 0 above `tilt.startAltitude`, 1 at `tilt.fullAltitude` and below, eased.
+    static func tiltAmount(altitude: CGFloat, tilt: BrushDescriptor.TiltResponse) -> CGFloat {
+        let start = tilt.startAltitude * .pi / 180, full = tilt.fullAltitude * .pi / 180
+        let x = min(max((start - altitude) / (start - full), 0), 1)
         return x * x * (3 - 2 * x) // smoothstep
     }
 
-    static func tip(for p: StrokePoint, style: BrushStyle) -> Tip {
-        let pressure = pow(min(max(p.force, 0), 1), style.pressureGamma)
-        let width = style.width * (style.minWidthRatio + (1 - style.minWidthRatio) * pressure)
-        let radius = max(width * 0.5, 0.2)
-        guard style.tiltEnabled else {
-            return Tip(center: p.location, major: radius, minor: radius, angle: 0, alpha: style.opacity)
-        }
-        let t = tiltAmount(altitude: p.altitude)
-        let minor = radius * (1 + 0.6 * t)
-        let major = radius * (1 + 3.5 * t)
-        // The lead's contact patch grows from the tip toward the barrel, i.e. along +azimuth.
-        let shift = (major - minor) * 0.35
-        let center = CGPoint(x: p.location.x + cos(p.azimuth) * shift,
-                             y: p.location.y + sin(p.azimuth) * shift)
-        return Tip(center: center, major: major, minor: minor, angle: p.azimuth,
-                   alpha: style.opacity * (1 - 0.6 * t))
+    /// The nib at sample `p` for `brush`: pressure sets the width across `brush.size`, then taper and
+    /// speed scale it; tilt stretches it along the azimuth, moves its contact patch and lightens it.
+    static func tip(for p: StrokePoint, brush: BrushDescriptor, nib: NibContext = NibContext()) -> Tip {
+        tip(for: p, brush: BrushModel(brush), nib: nib)
     }
 
-    static func polygon(for tip: Tip) -> [CGPoint] {
-        // Stamps are only emitted at stroke ends and sharp bends, so they can afford enough sides to stay
-        // within ~0.05 pt of the true ellipse that the tangent quads are built from.
-        let sides = tip.major < 2 ? 16 : (tip.major < 10 ? 32 : 64)
+    static func tip(for p: StrokePoint, brush: BrushModel, nib: NibContext = NibContext()) -> Tip {
+        let upper = brush.size.upperBound
+        let ratio = upper > 0 ? brush.size.lowerBound / upper : 1
+        let pressure = brush.pressure.value(p.force)
+        var width = upper * (ratio + (1 - ratio) * pressure)
+        var alpha = brush.opacity
+        if brush.pressureOpacity.isActive {
+            alpha *= brush.pressureOpacity.value(p.force)
+        }
+        if nib.taper != 1 {
+            width *= nib.taper
+        }
+        if brush.usesSpeed {
+            let fast = min(nib.speed / BrushDescriptor.ResponseCurve.fastSpeed, 1)
+            width *= brush.velocity.value(1 - fast)
+            if brush.wetness > 0 {
+                // Ink pools where the nib lingers and runs dry where it hurries.
+                let slow = 1 - fast
+                width *= 1 + 0.25 * brush.wetness * slow * slow * slow
+                alpha *= 1 - 0.4 * brush.wetness * fast
+            }
+        }
+        let radius = max(width * 0.5, 0.2)
+        var minor = radius, angle: CGFloat = 0
+        if case let .ellipse(aspect, a) = brush.tip {
+            minor = max(radius * aspect, 0.1)
+            angle = a
+        }
+        let tilt = brush.tilt
+        guard tilt.enabled else {
+            return Tip(center: p.location, major: radius, minor: minor, angle: angle, alpha: alpha)
+        }
+        let t = tiltAmount(altitude: p.altitude, tilt: tilt)
+        let shift: CGFloat, major: CGFloat
+        if case .round = brush.tip {
+            minor = radius * (1 + tilt.breadth * t)
+            major = radius * (1 + tilt.length * t)
+            angle = p.azimuth // a round nib's patch stretches along the Pencil
+            shift = (major - minor) * tilt.contactShift
+        } else {
+            // A flat nib keeps its angle; tilt still widens and lightens it.
+            major = radius * (1 + tilt.length * t)
+            minor *= 1 + tilt.breadth * t
+            shift = radius * (tilt.length - tilt.breadth) * t * tilt.contactShift
+        }
+        // The lead's contact patch grows from the tip toward the barrel, i.e. along +azimuth.
+        let center = CGPoint(x: p.location.x + cos(p.azimuth) * shift,
+                             y: p.location.y + sin(p.azimuth) * shift)
+        return Tip(center: center, major: major, minor: minor, angle: angle,
+                   alpha: alpha * (1 - tilt.opacityLoss * t))
+    }
+
+    /// The nib as a polygon. `sides` defaults to enough to stay within ~0.05 pt of the true ellipse:
+    /// on the hull path stamps are only emitted at stroke ends and sharp bends, so they can afford it.
+    static func polygon(for tip: Tip, sides: Int? = nil) -> [CGPoint] {
+        let sides = sides ?? (tip.major < 2 ? 16 : (tip.major < 10 ? 32 : 64))
         let c = cos(tip.angle), s = sin(tip.angle)
         return circles[sides]!.map { ux, uy in
             let x = ux * tip.major, y = uy * tip.minor
@@ -185,8 +361,8 @@ enum StrokeRenderer {
         return lower + upper
     }
 
-    static func dotHull(_ p: StrokePoint, style: BrushStyle) -> Hull {
-        let t = tip(for: p, style: style)
+    static func dotHull(_ p: StrokePoint, context: StrokeContext) -> Hull {
+        let t = tip(for: p, brush: context.brush, nib: context.nib(at: 0, in: [p]))
         return makeHull(polygon(for: t), alpha: t.alpha)
     }
 
@@ -315,16 +491,26 @@ enum StrokeRenderer {
     /// At a point shared by two segments, each side measures its turn and alpha against a reference both
     /// compute identically from the points they share (`referenceNormals`), so a segment never needs
     /// its neighbour's geometry.
-    static func segmentHulls(_ pts: [StrokePoint], segment i: Int, style: BrushStyle,
+    static func segmentHulls(_ pts: [StrokePoint], segment i: Int, context: StrokeContext,
                              leadingStamp: Bool = false) -> [Hull] {
+        switch context.brush.renderPath {
+        case .hull: sweptHulls(pts, segment: i, context: context, leadingStamp: leadingStamp)
+        case .stamp: stampHulls(pts, segment: i, context: context)
+        }
+    }
+
+    /// The hull path: the nib swept continuously along segment `i`. See `segmentHulls`.
+    private static func sweptHulls(_ pts: [StrokePoint], segment i: Int, context: StrokeContext,
+                                   leadingStamp: Bool) -> [Hull] {
         let a = pts[i], b = pts[i + 1]
         let p1 = a.location, p2 = b.location
         let p0 = i > 0 ? pts[i - 1].location : p1 * 2 - p2
         let p3 = i + 2 < pts.count ? pts[i + 2].location : p2 * 2 - p1
         let (c1, c2) = centripetalControls(p0, p1, p2, p3)
-        let startTip = tip(for: a, style: style)
+        let nibA = context.nib(at: i, in: pts), nibB = context.nib(at: i + 1, in: pts)
+        let startTip = context.tip(at: i, in: pts)
         var prev = Nib(startTip)
-        let endTip = tip(for: b, style: style)
+        let endTip = context.tip(at: i + 1, in: pts)
         let steps = stepCount(p1, c1, c2, p2, tips: (prev.tip, endTip))
 
         var hulls: [Hull] = []
@@ -353,7 +539,7 @@ enum StrokeRenderer {
             hulls.append(prev.stamp) // start cap, or overlap with the previous fill
             prevStamped = true
         } else if let (nL, nR) = referenceNormals(at: prev, tangent: c1 - p1, chord: p2 - p1,
-                                                  before: tip(for: pts[i - 1], style: style), after: endTip) {
+                                                  before: context.tip(at: i - 1, in: pts), after: endTip) {
             lastNL = nL
             lastNR = nR
             lastL = prev.support(nL)
@@ -375,7 +561,8 @@ enum StrokeRenderer {
         for s in 1 ... steps {
             let t = CGFloat(s) / CGFloat(steps)
             let loc = s == steps ? p2 : bezier(p1, c1, c2, p2, t)
-            let next = Nib(tip(for: interpolate(a, b, t, at: loc), style: style))
+            let next = Nib(tip(for: interpolate(a, b, t, at: loc), brush: context.brush,
+                               nib: context.plain ? nibA : nibA.mix(nibB, t)))
             defer {
                 prev = next
                 tolerance = joinTolerance
@@ -444,7 +631,7 @@ enum StrokeRenderer {
             if !isLast, lastQuantum == (prev.tip.alpha * alphaSteps).rounded(),
                let lastL, let lastR,
                let (n, nR) = referenceNormals(at: prev, tangent: p2 - c2, chord: p2 - p1,
-                                              before: startTip, after: tip(for: pts[i + 2], style: style)) {
+                                              before: startTip, after: context.tip(at: i + 2, in: pts)) {
                 if !welds(lastL, prev.support(n), lastNL, n, length: lastDist)
                     || !welds(lastR, prev.support(nR), lastNR, nR, length: lastDist) {
                     hulls.append(prev.stamp)
@@ -456,13 +643,92 @@ enum StrokeRenderer {
         return hulls
     }
 
-    static func hulls(for points: [StrokePoint], style: BrushStyle) -> [Hull] {
+    /// The stamp path: separate nib stamps along segment `i`, about `brush.stampSpacing` nib widths
+    /// apart, each moved by the brush's jitter and split into bristles by a bristle texture. Stamps are
+    /// spread evenly over each segment, so a segment needs nothing from its neighbours and the live and
+    /// committed strokes match. The random variation is seeded by the stamp's place in the stroke.
+    private static func stampHulls(_ pts: [StrokePoint], segment i: Int, context: StrokeContext) -> [Hull] {
+        let brush = context.brush
+        let a = pts[i], b = pts[i + 1]
+        let p1 = a.location, p2 = b.location
+        let p0 = i > 0 ? pts[i - 1].location : p1 * 2 - p2
+        let p3 = i + 2 < pts.count ? pts[i + 2].location : p2 * 2 - p1
+        let (c1, c2) = centripetalControls(p0, p1, p2, p3)
+        let nibA = context.nib(at: i, in: pts), nibB = context.nib(at: i + 1, in: pts)
+        let tipA = tip(for: a, brush: brush, nib: nibA), tipB = tip(for: b, brush: brush, nib: nibB)
+        // Arc length: between the chord and the control polygon.
+        let length = (p1.distance(to: p2) + p1.distance(to: c1) + c1.distance(to: c2) + c2.distance(to: p2)) / 2
+        let step = max(brush.stampSpacing * (tipA.minor + tipB.minor), 0.25)
+        let count = min(max(Int((length / step).rounded(.up)), 1), maxStampsPerSegment)
+        let strokeIndex = context.firstIndex + i
+        let chord = p2 - p1
+        let normal = unitNormal(chord) ?? CGPoint(x: 0, y: 1)
+        let bristles = bristleOffsets(for: brush)
+
+        var hulls: [Hull] = []
+        hulls.reserveCapacity((count + 1) * max(bristles.count, 1))
+        for k in (strokeIndex == 0 ? 0 : 1) ... count {
+            let t = CGFloat(k) / CGFloat(count)
+            let loc = k == count ? p2 : (k == 0 ? p1 : bezier(p1, c1, c2, p2, t))
+            var stamp = tip(for: interpolate(a, b, t, at: loc), brush: brush,
+                            nib: context.plain ? nibA : nibA.mix(nibB, t))
+            var random = StampRandom(seed: brush.jitter.seed, stroke: strokeIndex, stamp: k)
+            let jitter = brush.jitter
+            let (rSize, rAngle, rScatter, rOpacity) = (random.next(), random.next(), random.next(), random.next())
+            if jitter.isActive {
+                let scale = 1 + jitter.size * (rSize - 0.5)
+                stamp.major *= scale
+                stamp.minor *= scale
+                stamp.angle += jitter.angle * .pi * (2 * rAngle - 1)
+                let offset = jitter.scatter * 2 * stamp.minor * (2 * rScatter - 1)
+                stamp.center.x += normal.x * offset
+                stamp.center.y += normal.y * offset
+                stamp.alpha *= 1 - jitter.opacity * rOpacity
+            }
+            guard !bristles.isEmpty else {
+                hulls.append(Hull(stamp: polygon(for: stamp), alpha: stamp.alpha))
+                continue
+            }
+            let c = cos(stamp.angle), s = sin(stamp.angle)
+            let dot = max(stamp.minor / CGFloat(bristles.count).squareRoot() * 1.2, 0.2)
+            for bristle in bristles {
+                let x = bristle.x * stamp.major, y = bristle.y * stamp.minor
+                let center = CGPoint(x: stamp.center.x + x * c - y * s, y: stamp.center.y + x * s + y * c)
+                let tip = Tip(center: center, major: dot, minor: dot, angle: 0, alpha: stamp.alpha * bristle.alpha)
+                hulls.append(Hull(stamp: polygon(for: tip, sides: dot < 2 ? 8 : 16), alpha: tip.alpha))
+            }
+        }
+        return hulls
+    }
+
+    /// Most stamps one segment emits, so a huge, sparse segment can't explode.
+    static let maxStampsPerSegment = 256
+
+    /// Each bristle's place in the nib (in nib radii, inside the unit disc scaled by the spread) and its
+    /// opacity, fixed for the brush so bristles trail as streaks.
+    private static func bristleOffsets(for brush: BrushModel) -> [Bristle] {
+        guard case let .bristle(count, spread) = brush.texture else { return [] }
+        var random = StampRandom(seed: brush.jitter.seed, stroke: -1, stamp: count)
+        return (0 ..< count).map { _ in
+            let r = random.next().squareRoot() * spread, theta = random.next() * 2 * .pi
+            return Bristle(x: r * cos(theta), y: r * sin(theta), alpha: 0.55 + 0.45 * random.next())
+        }
+    }
+
+    private struct Bristle {
+        let x: CGFloat
+        let y: CGFloat
+        let alpha: CGFloat
+    }
+
+    static func hulls(for points: [StrokePoint], brush: BrushDescriptor) -> [Hull] {
+        let context = StrokeContext(finished: points, brush: brush)
         switch points.count {
-        case 0: []
-        case 1: [dotHull(points[0], style: style)]
+        case 0: return []
+        case 1: return [dotHull(points[0], context: context)]
         default:
-            (0 ..< (points.count - 1)).flatMap {
-                segmentHulls(points, segment: $0, style: style,
+            return (0 ..< (points.count - 1)).flatMap {
+                segmentHulls(points, segment: $0, context: context,
                              leadingStamp: $0 % LiveStroke.chunkSize == 0)
             }
         }
@@ -513,7 +779,7 @@ enum StrokeRenderer {
     }
 
     static func geometry(for stroke: Stroke) -> StrokeGeometry {
-        let hulls = hulls(for: stroke.points, style: stroke.style)
+        let hulls = hulls(for: stroke.points, brush: stroke.brush)
         let bounds = hulls.reduce(CGRect.null) { $0.union($1.bounds) }
         return StrokeGeometry(runs: runs(from: hulls), bounds: bounds)
     }
@@ -525,20 +791,14 @@ enum StrokeRenderer {
     /// *replaces* (`.copy`) what's under it, so overlapping joints never accumulate alpha; the layer
     /// then composites once with the stroke's blend mode.
     /// `liveEraserColor`: preview pixel-erasing by painting paper colour (the live layer can't punch holes).
-    static func draw(runs: [StrokeRun], clip: CGRect, kind: InkKind, color: RGBA,
+    static func draw(runs: [StrokeRun], clip: CGRect, brush: BrushDescriptor, color: RGBA,
                      in ctx: CGContext, liveEraserColor: CGColor? = nil) {
         guard !runs.isEmpty else { return }
         let fill: (CGFloat) -> CGColor = { alpha in
-            if let liveEraserColor {
-                return liveEraserColor
-            }
-            if kind == .pencil {
-                return PencilTexture.fillColor(for: color, alpha: alpha)
-            }
-            return color.cgColor(alpha: alpha)
+            liveEraserColor ?? fillColor(for: brush, color: color, alpha: alpha)
         }
         ctx.saveGState()
-        ctx.setBlendMode(liveEraserColor == nil ? kind.blendMode : .normal)
+        ctx.setBlendMode(liveEraserColor == nil ? brush.blend.cgBlendMode : .normal)
         if runs.count == 1 {
             ctx.setFillColor(fill(runs[0].alpha))
             ctx.addPath(runs[0].path)
@@ -563,13 +823,24 @@ enum StrokeRenderer {
         ctx.restoreGState()
     }
 
+    /// The fill for a run of `brush` at `alpha`: the colour, or the grain pattern for a textured brush.
+    /// A pattern needs the context's phase set (`PencilTexture.prepareContext`) so it lines up.
+    static func fillColor(for brush: BrushDescriptor, color: RGBA, alpha: CGFloat) -> CGColor {
+        if case let .grain(scale, contrast, seed) = brush.texture {
+            return PencilTexture.fillColor(for: color, alpha: alpha,
+                                           grain: PencilTexture.Grain(scale: scale, contrast: contrast, seed: seed))
+        }
+        return color.cgColor(alpha: alpha)
+    }
+
     // MARK: Hit testing (stroke eraser)
 
     static func hitTest(_ stroke: Stroke, bounds: CGRect, point: CGPoint, radius: CGFloat) -> Bool {
         guard bounds.insetBy(dx: -radius, dy: -radius).contains(point) else { return false }
         let pts = stroke.points
+        let model = BrushModel(stroke.brush)
         func reach(_ p: StrokePoint) -> CGFloat {
-            tip(for: p, style: stroke.style).major + radius
+            tip(for: p, brush: model).major + radius
         }
         guard pts.count > 1 else {
             return pts.first.map { point.distance(to: $0.location) <= reach($0) } ?? false
@@ -614,6 +885,26 @@ enum StrokeRenderer {
     }
 }
 
+/// SplitMix64, seeded by a stamp's place in the stroke, for jitter that's the same every time it's drawn.
+struct StampRandom {
+    private var state: UInt64
+
+    init(seed: UInt32, stroke: Int, stamp: Int) {
+        state = UInt64(seed) &* 0x9E37_79B9_7F4A_7C15 ^ UInt64(bitPattern: Int64(stroke)) &* 0xBF58_476D_1CE4_E5B9
+            ^ UInt64(bitPattern: Int64(stamp)) &* 0x94D0_49BB_1331_11EB
+    }
+
+    /// Uniform in 0..<1.
+    mutating func next() -> CGFloat {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        z ^= z >> 31
+        return CGFloat(z >> 11) / CGFloat(1 << 53)
+    }
+}
+
 // MARK: - In-progress stroke
 
 /// Incrementally built geometry for the stroke under the Pencil.
@@ -644,9 +935,27 @@ final class LiveStroke {
 
     private var chunks: [Chunk] = []
 
+    /// Arc length at each point, kept only when the brush tapers (see `StrokeContext.distances`).
+    private var distances: [CGFloat] = []
+    /// Set by `finish()`, for the end taper.
+    private var totalLength: CGFloat?
+    private(set) var isFinished = false
+
     init(stroke: Stroke) {
         self.stroke = stroke
+        if stroke.brush.taper.isActive {
+            distances = StrokeContext.distances(along: stroke.points)
+        }
     }
+
+    /// Context for geometry over `stroke.points[firstIndex...]`.
+    private func context(firstIndex: Int = 0) -> StrokeContext {
+        StrokeContext(brush: stroke.brush, firstIndex: firstIndex, distances: distances, totalLength: totalLength)
+    }
+
+    /// Samples a tail rebuild reaches back before the first unfinalized segment: the segment's own
+    /// neighbour, plus the history the speed at a point is averaged over.
+    private static let tailHistory = 1 + StrokeContext.speedWindow
 
     /// Number of finalized spline segments.
     var finalizedCount: Int {
@@ -662,12 +971,63 @@ final class LiveStroke {
     /// then the result is nil. The canvas and the benchmark replay both feed samples through here.
     @discardableResult
     func append(_ point: StrokePoint, minSpacing: CGFloat) -> Int? {
-        if let last = stroke.points.last, last.location.distance(to: point.location) < minSpacing {
-            stroke.points[stroke.points.count - 1].force = point.force
-            return nil
+        var point = point
+        if let last = stroke.points.last {
+            point.location = smoothed(point.location, after: last.location)
+            if last.location.distance(to: point.location) < minSpacing {
+                stroke.points[stroke.points.count - 1].force = point.force
+                return nil
+            }
+            if !distances.isEmpty || stroke.brush.taper.isActive {
+                distances.append((distances.last ?? 0) + last.location.distance(to: point.location))
+            }
+        } else if stroke.brush.taper.isActive {
+            distances = [0]
         }
         stroke.points.append(point)
         return stroke.points.count - 1
+    }
+
+    /// The brush's stabiliser: `location` pulled toward `previous` by `smoothing`.
+    private func smoothed(_ location: CGPoint, after previous: CGPoint) -> CGPoint {
+        let smoothing = stroke.brush.smoothing
+        guard smoothing > 0 else { return location }
+        return previous + (location - previous) * (1 - smoothing)
+    }
+
+    /// Applies what depends on where the stroke ends (the brush's end taper): rebuilds the segments near
+    /// the end and the tail. Call once when the Pencil lifts, before taking the final `geometry()`.
+    /// Returns the first segment whose geometry changed and the canvas rect to redraw, or nil if the
+    /// brush has no end taper.
+    @discardableResult
+    func finish() -> (fromSegment: Int, dirty: CGRect)? {
+        guard !isFinished else { return nil }
+        isFinished = true
+        lastPredicted = []
+        let taper = stroke.brush.taper
+        guard taper.isActive, taper.endLength > 0, let total = distances.last,
+              distances.count == stroke.points.count else { return nil }
+        totalLength = total
+        // Points within the taper change; a segment's nibs reach one point either side of it.
+        var firstPoint = distances.count - 1
+        while firstPoint > 0, total - distances[firstPoint - 1] < taper.endLength {
+            firstPoint -= 1
+        }
+        let firstSegment = max(0, firstPoint - 2)
+        var dirty = CGRect.null
+        var modified = Set<Int>()
+        for seg in firstSegment ..< finalized.count {
+            dirty = finalized[seg].reduce(dirty) { $0.union($1.bounds) }
+            finalized[seg] = StrokeRenderer.segmentHulls(stroke.points, segment: seg, context: context(),
+                                                         leadingStamp: seg % Self.chunkSize == 0)
+            dirty = finalized[seg].reduce(dirty) { $0.union($1.bounds) }
+            modified.insert(seg / Self.chunkSize)
+        }
+        for c in modified {
+            rebuildChunkBounds(c)
+        }
+        dirty = dirty.union(rebuildTail(predicted: []))
+        return (firstSegment, dirty)
     }
 
     /// The per-event step after appending an event's samples: finalizes every segment that now has its
@@ -684,7 +1044,7 @@ final class LiveStroke {
         var dirty = CGRect.null
         while finalized.count + 2 < stroke.points.count {
             let segIndex = finalized.count
-            let hulls = StrokeRenderer.segmentHulls(stroke.points, segment: segIndex, style: stroke.style,
+            let hulls = StrokeRenderer.segmentHulls(stroke.points, segment: segIndex, context: context(),
                                                     leadingStamp: segIndex % Self.chunkSize == 0)
             var segBounds = CGRect.null
             for h in hulls {
@@ -713,24 +1073,32 @@ final class LiveStroke {
     @discardableResult
     func rebuildTail(predicted: [StrokePoint]) -> CGRect {
         lastPredicted = predicted
+        var predicted = predicted
+        if stroke.brush.smoothing > 0, var previous = stroke.points.last?.location {
+            for k in predicted.indices {
+                predicted[k].location = smoothed(predicted[k].location, after: previous)
+                previous = predicted[k].location
+            }
+        }
         var dirty = tailBounds
         let totalCount = stroke.points.count + predicted.count
         var hulls: [Hull] = []
 
         if totalCount == 1 {
             if let pt = stroke.points.first ?? predicted.first {
-                hulls = [StrokeRenderer.dotHull(pt, style: stroke.style)]
+                hulls = [StrokeRenderer.dotHull(pt, context: context())]
             }
         } else if totalCount > 1 {
-            let start = max(0, finalized.count - 1)
+            let start = max(0, finalized.count - Self.tailHistory)
             let slice = start < stroke.points.count ? stroke.points[start...] : stroke.points[...]
             let localPts = Array(slice) + predicted
+            let context = context(firstIndex: start)
             for i in finalized.count ..< (totalCount - 1) {
                 let localIndex = i - start
                 guard localIndex >= 0, localIndex + 1 < localPts.count else { continue }
                 // The tail is filled apart from the last chunk, so its first segment overlaps it.
                 hulls.append(contentsOf: StrokeRenderer.segmentHulls(
-                    localPts, segment: localIndex, style: stroke.style,
+                    localPts, segment: localIndex, context: context,
                     leadingStamp: i == finalized.count || i % Self.chunkSize == 0
                 ))
             }
@@ -761,7 +1129,7 @@ final class LiveStroke {
             for h in finalized[seg] {
                 dirty = dirty.union(h.bounds)
             }
-            let newHulls = StrokeRenderer.segmentHulls(stroke.points, segment: seg, style: stroke.style,
+            let newHulls = StrokeRenderer.segmentHulls(stroke.points, segment: seg, context: context(),
                                                        leadingStamp: seg % Self.chunkSize == 0)
             for h in newHulls {
                 dirty = dirty.union(h.bounds)
@@ -771,20 +1139,25 @@ final class LiveStroke {
         }
 
         for c in modifiedChunks {
-            guard c < chunks.count else { continue }
-            chunks[c].runs = nil
-            let startSeg = c * Self.chunkSize
-            let endSeg = min((c + 1) * Self.chunkSize, finalized.count)
-            var b = CGRect.null
-            for s in startSeg ..< endSeg {
-                for h in finalized[s] {
-                    b = b.union(h.bounds)
-                }
-            }
-            chunks[c].bounds = b
+            rebuildChunkBounds(c)
         }
 
         return (dirty, touchesTail)
+    }
+
+    /// Drops chunk `c`'s cached runs and recomputes its bounds from its segments.
+    private func rebuildChunkBounds(_ c: Int) {
+        guard c < chunks.count else { return }
+        chunks[c].runs = nil
+        let startSeg = c * Self.chunkSize
+        let endSeg = min((c + 1) * Self.chunkSize, finalized.count)
+        var b = CGRect.null
+        for s in startSeg ..< endSeg {
+            for h in finalized[s] {
+                b = b.union(h.bounds)
+            }
+        }
+        chunks[c].bounds = b
     }
 
     /// Chunks below this index are complete and settled: no point they depend on is still waiting for

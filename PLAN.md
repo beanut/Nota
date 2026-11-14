@@ -4,7 +4,7 @@ A short summary of where Nota is going, so agents and new contributors don't hav
 out. **[Linear](https://linear.app/nota-on-inkkit/project/nota) is the source of truth**: if this file and
 Linear disagree, Linear wins, and this file should be fixed.
 
-_Last updated: 2026-11-12._
+_Last updated: 2026-11-13._
 
 ## Milestones
 
@@ -21,20 +21,21 @@ _Last updated: 2026-11-12._
 ## Current: M0 · Foundations
 
 Done: design system (NOT-15), real thumbnails (NOT-8), persisted page sizes (NOT-7), packages (NOT-9),
-CI (NOT-10), ink benchmarks and budgets (NOT-13), library tests (NOT-11), the `.ink` file format (NOT-5).
+CI (NOT-10), ink benchmarks and budgets (NOT-13), library tests (NOT-11), the `.ink` file format (NOT-5),
+note packages on disk with autosave (NOT-6).
 
 Next, in order:
 
-1. [NOT-6](https://linear.app/nota-on-inkkit/issue/NOT-6) · Note packages on disk: `DocumentStore` with autosave replaces `InkStore`.
-2. [NOT-12](https://linear.app/nota-on-inkkit/issue/NOT-12) · Verify and tune on a physical iPad with Apple Pencil.
-3. [NOT-14](https://linear.app/nota-on-inkkit/issue/NOT-14) · Release pipeline: signing and automated TestFlight builds.
-4. [NOT-85](https://linear.app/nota-on-inkkit/issue/NOT-85) · Decide the minimum iPadOS version and supported devices.
+1. [NOT-12](https://linear.app/nota-on-inkkit/issue/NOT-12) · Verify and tune on a physical iPad with Apple Pencil.
+2. [NOT-14](https://linear.app/nota-on-inkkit/issue/NOT-14) · Release pipeline: signing and automated TestFlight builds.
+3. [NOT-85](https://linear.app/nota-on-inkkit/issue/NOT-85) · Decide the minimum iPadOS version and supported devices.
 
 Also open: the editor redesign in progress outside the milestones,
 [NOT-86](https://linear.app/nota-on-inkkit/issue/NOT-86) and [NOT-87](https://linear.app/nota-on-inkkit/issue/NOT-87).
 
-After M0, M1 starts with the brush engine ([NOT-16](https://linear.app/nota-on-inkkit/issue/NOT-16)) and the
-page object model ([NOT-19](https://linear.app/nota-on-inkkit/issue/NOT-19)).
+M1's first issue, the data-driven brush engine ([NOT-16](https://linear.app/nota-on-inkkit/issue/NOT-16)),
+landed early. After M0, M1 continues with the page object model ([NOT-19](https://linear.app/nota-on-inkkit/issue/NOT-19))
+and the built-in brush set ([NOT-17](https://linear.app/nota-on-inkkit/issue/NOT-17)).
 
 ## Keeping this current
 

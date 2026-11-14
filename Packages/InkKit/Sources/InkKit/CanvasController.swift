@@ -11,6 +11,10 @@ final class CanvasController: ObservableObject {
     @Published private(set) var tool: Tool = .pen
     private(set) var previousTool: Tool = .pen
     @Published var eraserMode: EraserMode = .stroke
+    /// Which ink the eraser removes. Only standard and stroke erasing can be limited (`EraserMode.canTarget`).
+    @Published var eraserTarget: EraserTarget = .all
+    /// Goes back to the previous tool when an eraser stroke ends.
+    @Published var switchBackAfterErasing = false
     @Published var lassoMode: LassoMode = .freeform
     @Published private(set) var hasSelection = false
     @Published var settings: [Tool: ToolSettings] = [
@@ -186,6 +190,17 @@ final class CanvasController: ObservableObject {
         }
     }
 
+    /// The ink the eraser removes in the current mode.
+    var effectiveEraserTarget: EraserTarget {
+        eraserMode.canTarget ? eraserTarget : .all
+    }
+
+    /// Called by the canvas when an eraser stroke ends; goes back to the previous tool if that's on.
+    func eraserStrokeDidEnd() {
+        guard switchBackAfterErasing, tool == .eraser, previousTool != .eraser else { return }
+        switchToPrevious()
+    }
+
     // MARK: Commands
 
     func undo() {
@@ -253,11 +268,20 @@ final class CanvasController: ObservableObject {
 
     // MARK: Stroke template
 
-    /// What a new stroke is built from: its ink kind, colour and brush style.
+    /// What a new stroke is built from: its colour and brush.
     struct StrokeTemplate {
-        let kind: InkKind
         let color: RGBA
-        let style: BrushStyle
+        let brush: BrushDescriptor
+    }
+
+    /// The bundled brush each tool draws with, before the width and pressure settings are applied.
+    static func baseBrush(for tool: Tool) -> BrushDescriptor {
+        switch tool {
+        case .pen, .lasso: .pen
+        case .pencil: .pencil
+        case .highlighter: .highlighter
+        case .eraser: .pixelEraser
+        }
     }
 
     /// Brush snapshot for a new stroke. `viewScale` converts the eraser's on-screen size to canvas units.
@@ -265,26 +289,16 @@ final class CanvasController: ObservableObject {
         let s = current
         let inks = theme.inks(for: tool)
         let color = RGBA(inks[min(max(s.colorIndex, 0), inks.count - 1)])
-        switch tool {
-        case .pen, .highlighter, .lasso:
-            let style = BrushStyle(width: CGFloat(s.width),
-                                   minWidthRatio: CGFloat(minWidthRatio),
-                                   pressureGamma: CGFloat(pressureGamma),
-                                   opacity: tool == .highlighter ? 0.38 : 1,
-                                   tiltEnabled: tiltEnabled)
-            return StrokeTemplate(kind: tool == .highlighter ? .highlighter : .pen, color: color, style: style)
-        case .pencil:
-            let style = BrushStyle(width: CGFloat(s.width),
-                                   minWidthRatio: CGFloat(minWidthRatio),
-                                   pressureGamma: CGFloat(pressureGamma),
-                                   opacity: 0.85,
-                                   tiltEnabled: tiltEnabled)
-            return StrokeTemplate(kind: .pencil, color: color, style: style)
-        case .eraser:
-            let style = BrushStyle(width: CGFloat(s.width) / viewScale, minWidthRatio: 1,
-                                   pressureGamma: 1, opacity: 1, tiltEnabled: false)
-            return StrokeTemplate(kind: .pixelEraser, color: RGBA(r: 0, g: 0, b: 0), style: style)
+        var brush = Self.baseBrush(for: tool)
+        if tool == .eraser {
+            return StrokeTemplate(color: RGBA(r: 0, g: 0, b: 0),
+                                  brush: brush.sized(CGFloat(s.width) / viewScale, minimumRatio: 1))
         }
+        // Pressure & Tilt settings apply to every ink brush.
+        brush = brush.sized(CGFloat(s.width), minimumRatio: CGFloat(minWidthRatio))
+        brush.pressure.exponent = CGFloat(pressureGamma)
+        brush.tilt.enabled = tiltEnabled
+        return StrokeTemplate(color: color, brush: brush)
     }
 
     var simulatedAltitude: CGFloat {

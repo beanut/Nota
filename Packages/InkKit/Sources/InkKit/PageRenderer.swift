@@ -14,7 +14,7 @@ public struct PageSnapshot: Sendable {
 
     /// True when the page has no ink to draw.
     public var isBlank: Bool {
-        !strokes.contains { $0.tool != .pixelEraser }
+        !strokes.contains { !$0.brush.erases }
     }
 }
 
@@ -45,7 +45,7 @@ public enum PageRenderer {
             let geometry = StrokeRenderer.geometry(for: stroke)
             guard geometry.bounds.intersects(page.pageSize.bounds) else { continue }
             StrokeRenderer.draw(runs: geometry.runs, clip: geometry.bounds.insetBy(dx: -2, dy: -2),
-                                kind: stroke.tool, color: stroke.color, in: ctx)
+                                brush: stroke.brush, color: stroke.color, in: ctx)
         }
         ctx.endTransparencyLayer()
     }

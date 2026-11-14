@@ -1,11 +1,23 @@
 import CoreGraphics
 import UIKit
 
-/// Generates and caches seamless graphite / paper-tooth pattern colors for the pencil tool.
+/// Generates and caches seamless graphite / paper-tooth pattern colors for grain-textured brushes
+/// (`BrushDescriptor.Texture.grain`), such as the pencil.
 enum PencilTexture {
     static let patternSize = 64
     private static let lock = NSLock()
     private static var cache: [CacheKey: CGColor] = [:]
+    private static var heightMaps: [UInt32: [Float]] = [:]
+
+    /// A grain's parameters (see `BrushDescriptor.Texture.grain`).
+    struct Grain: Hashable {
+        var scale: CGFloat
+        var contrast: CGFloat
+        var seed: UInt32
+
+        /// The pencil's grain.
+        static let pencil = Grain(scale: 1, contrast: 1, seed: 42)
+    }
 
     private struct CacheKey: Hashable {
         let r: Int
@@ -13,12 +25,27 @@ enum PencilTexture {
         let b: Int
         let a: Int
         let alphaIndex: Int
+        let grain: Grain
     }
 
-    /// Precomputed 64x64 periodic paper-tooth height map in [0, 1].
-    /// Combines primary paper fiber cells, fine tooth cells, and micro-flecks,
-    /// with periodic toroidal wrapping for seamless tiling.
-    private static let heightMap: [Float] = {
+    /// The 64x64 periodic paper-tooth height map for `seed`, in [0, 1], built once per seed.
+    private static func heightMap(seed: UInt32) -> [Float] {
+        lock.lock()
+        if let map = heightMaps[seed] {
+            lock.unlock()
+            return map
+        }
+        lock.unlock()
+        let map = makeHeightMap(seed: seed)
+        lock.lock()
+        heightMaps[seed] = map
+        lock.unlock()
+        return map
+    }
+
+    /// Combines primary paper fiber cells, fine tooth cells, and micro-flecks, with periodic toroidal
+    /// wrapping for seamless tiling. The seed places the cells; the flecks are the same for every seed.
+    private static func makeHeightMap(seed initialSeed: UInt32) -> [Float] {
         let w = patternSize
         let h = patternSize
         var map = [Float](repeating: 0, count: w * h)
@@ -37,7 +64,7 @@ enum PencilTexture {
         }
 
         // Deterministic pseudo-random number generator for consistent paper tooth across launches
-        var seed: UInt64 = 42
+        var seed = UInt64(initialSeed)
         func nextRandom() -> Float {
             seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
             return Float((seed >> 32) & 0x7FFF_FFFF) / Float(0x7FFF_FFFF)
@@ -92,7 +119,7 @@ enum PencilTexture {
             }
         }
         return map
-    }()
+    }
 
     /// Prepares the graphics context with the proper pattern phase in device coordinates,
     /// ensuring seamless alignment across tile boundaries and during canvas panning.
@@ -103,9 +130,9 @@ enum PencilTexture {
         ctx.setPatternPhase(CGSize(width: px, height: py))
     }
 
-    /// Returns a seamless pattern CGColor representing the pencil graphite stroke texture
-    /// for the given base color and run alpha.
-    static func fillColor(for color: RGBA, alpha: CGFloat) -> CGColor {
+    /// Returns a seamless pattern CGColor representing the graphite stroke texture
+    /// for the given base color, run alpha and grain.
+    static func fillColor(for color: RGBA, alpha: CGFloat, grain: Grain = .pencil) -> CGColor {
         let clampedAlpha = min(max(alpha, 0.0), 1.0)
         let alphaIndex = Int((clampedAlpha * StrokeRenderer.alphaSteps).rounded())
 
@@ -114,7 +141,8 @@ enum PencilTexture {
             g: Int(round(color.g * 255)),
             b: Int(round(color.b * 255)),
             a: Int(round(color.a * 255)),
-            alphaIndex: alphaIndex
+            alphaIndex: alphaIndex,
+            grain: grain
         )
 
         lock.lock()
@@ -136,11 +164,15 @@ enum PencilTexture {
         // As alpha drops (e.g. tilted shading), paper tooth gaps become more pronounced;
         // as alpha increases, graphite fills more of the tooth.
         let expFactor = 1.4 - 0.6 * a
+        // Contrast 1 is the pencil: 15% of the ink everywhere, the rest where the tooth is high.
+        let contrast = Float(grain.contrast)
+        let floor = 0.15 + 0.85 * (1 - contrast), gain = 0.85 * contrast
+        let heightMap = heightMap(seed: grain.seed)
 
         for i in 0 ..< (w * h) {
             let heightVal = heightMap[i]
             let tooth = pow(heightVal, expFactor)
-            let pixelAlpha = a * (0.15 + 0.85 * tooth)
+            let pixelAlpha = a * (floor + gain * tooth)
 
             // Premultiplied RGBA byte order
             let offset = i * 4
@@ -169,7 +201,9 @@ enum PencilTexture {
             return color.cgColor(alpha: clampedAlpha)
         }
 
-        let uiImage = UIImage(cgImage: cgImage)
+        // A larger grain is the same tile drawn bigger.
+        let uiImage = grain.scale == 1 ? UIImage(cgImage: cgImage)
+            : UIImage(cgImage: cgImage, scale: 1 / grain.scale, orientation: .up)
         let patternColor = UIColor(patternImage: uiImage).cgColor
 
         lock.lock()

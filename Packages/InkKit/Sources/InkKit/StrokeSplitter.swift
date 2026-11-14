@@ -121,10 +121,11 @@ enum StrokeSplitter {
 
         var samples = splineSamples(pts)
         guard samples.count > 2 else { return nil }
+        let brush = BrushModel(stroke.brush)
         for k in samples.indices {
             let prev = samples[max(k - 1, 0)].point.location
             let next = samples[min(k + 1, samples.count - 1)].point.location
-            samples[k].cut = isCut(samples[k].point, direction: next - prev, style: stroke.style, coverage: coverage)
+            samples[k].cut = isCut(samples[k].point, direction: next - prev, brush: brush, coverage: coverage)
         }
 
         // Interior runs of cut samples → (first, last) sample indices of each run.
@@ -155,6 +156,40 @@ enum StrokeSplitter {
         return pieces
     }
 
+    /// What's left of `stroke` after a standard erase along the segment `from`–`to` with an eraser of
+    /// `radius`: the runs of the stroke's spline the eraser doesn't touch, as pieces with fresh IDs. Nil
+    /// when the eraser misses the ink; empty when nothing is left. A sample counts as touched when the
+    /// eraser comes within the nib's radius of it, so the pieces' round end caps stop at the eraser's edge
+    /// instead of reaching back into the gap.
+    static func remainder(of stroke: Stroke, erasedFrom from: CGPoint, to: CGPoint, radius: CGFloat) -> [Stroke]? {
+        let pts = stroke.points
+        guard !pts.isEmpty else { return nil }
+        func erased(_ p: StrokePoint) -> Bool {
+            p.location.distance(toSegment: from, to) <= radius + StrokeRenderer.tip(for: p, brush: stroke.brush).major
+        }
+        guard pts.count > 1 else {
+            return erased(pts[0]) ? [] : nil
+        }
+        let samples = splineSamples(pts)
+        let cut = samples.map { erased($0.point) }
+        guard cut.contains(true) else { return nil }
+
+        var pieces: [Stroke] = []
+        var k = 0
+        while k < samples.count {
+            guard !cut[k] else { k += 1; continue }
+            let start = k
+            while k < samples.count, !cut[k] {
+                k += 1
+            }
+            // A lone sample left between two erased runs is a dot of ink nobody meant to keep.
+            if k - 1 > start {
+                pieces.append(piece(of: stroke, from: samples[start], to: samples[k - 1]))
+            }
+        }
+        return pieces
+    }
+
     /// Samples along the centripetal Catmull-Rom spline, matching `StrokeRenderer.segmentHulls`.
     /// Real points appear with t = 0; the stroke's last point is (count - 1, 0).
     private static func splineSamples(_ pts: [StrokePoint]) -> [Sample] {
@@ -178,8 +213,8 @@ enum StrokeSplitter {
     }
 
     /// True when the nib's full extent across `direction` is inside the eraser coverage.
-    private static func isCut(_ p: StrokePoint, direction: CGPoint, style: BrushStyle, coverage: Coverage) -> Bool {
-        let tip = StrokeRenderer.tip(for: p, style: style)
+    private static func isCut(_ p: StrokePoint, direction: CGPoint, brush: BrushModel, coverage: Coverage) -> Bool {
+        let tip = StrokeRenderer.tip(for: p, brush: brush)
         guard coverage.contains(tip.center) else { return false }
         let len = hypot(direction.x, direction.y)
         guard len > 1e-6 else { return false }
@@ -215,7 +250,7 @@ enum StrokeSplitter {
         if b.t > 0 {
             pts.append(b.point)
         }
-        return Stroke(id: UUID(), tool: stroke.tool, color: stroke.color, style: stroke.style, points: pts,
+        return Stroke(id: UUID(), color: stroke.color, brush: stroke.brush, points: pts,
                       createdAt: stroke.createdAt)
     }
 }

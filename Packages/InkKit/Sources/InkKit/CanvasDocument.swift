@@ -118,6 +118,7 @@ public final class CanvasDocument: Identifiable {
         case add(Stroke, splits: [Split]) // splits: strokes the added pixel-eraser stroke cut apart
         case erase([Removal]) // in removal order; undo re-inserts in reverse
         case clear([Stroke])
+        case replace(before: [Stroke], after: [Stroke]) // a standard erase: strokes cut into what's left
         case move(Set<UUID>, CGPoint) // translate strokes by a canvas-space delta
     }
 
@@ -157,6 +158,18 @@ public final class CanvasDocument: Identifiable {
 
     func removeObserver(_ owner: AnyObject) {
         observers.removeAll { $0.owner == nil || $0.owner === owner }
+    }
+
+    /// Calls `onChange` after every change worth saving: each edit, undo, redo and refinement of the ink,
+    /// and each change of size, template or background, until `owner` is released or
+    /// `stopObservingChanges(_:)` is called. It's never called during a stroke, only once it's committed,
+    /// so it's cheap to use for autosave. Observing again with the same owner replaces the handler.
+    public func observeChanges(_ owner: AnyObject, onChange: @escaping () -> Void) {
+        addObserver(owner, onChange: { _ in onChange() }, onPageSizeChange: onChange, onTemplateChange: onChange)
+    }
+
+    public func stopObservingChanges(_ owner: AnyObject) {
+        removeObserver(owner)
     }
 
     /// Number of views observing the page.
@@ -219,6 +232,20 @@ public final class CanvasDocument: Identifiable {
         push(.erase(removals))
     }
 
+    /// Replaces a stroke, in place, with what's left of it after a standard erase (none if it's gone),
+    /// without recording a command. Call `recordReplace(before:)` once at the end of the gesture with
+    /// the strokes as they were when it began.
+    func replace(id: UUID, with pieces: [Stroke]) {
+        guard let i = strokes.firstIndex(where: { $0.id == id }) else { return }
+        strokes.replaceSubrange(i ... i, with: pieces)
+    }
+
+    /// Records the standard-erase gesture that changed `before` into the current strokes, as one command.
+    func recordReplace(before: [Stroke]) {
+        guard before.map(\.id) != strokes.map(\.id) else { return }
+        push(.replace(before: before, after: strokes))
+    }
+
     /// Translates strokes immediately (live dragging) without recording a command.
     func translate(ids: Set<UUID>, by d: CGPoint) {
         for i in strokes.indices where ids.contains(strokes[i].id) {
@@ -270,6 +297,9 @@ public final class CanvasDocument: Identifiable {
         case let .clear(saved):
             strokes = saved
             redoStack.append(.clear(saved))
+        case let .replace(before, after):
+            strokes = before
+            redoStack.append(.replace(before: before, after: after))
         case let .move(ids, d):
             translate(ids: ids, by: CGPoint(x: -d.x, y: -d.y))
             lastReshapedIDs = ids
@@ -295,6 +325,9 @@ public final class CanvasDocument: Identifiable {
         case .clear:
             undoStack.append(.clear(strokes))
             strokes.removeAll()
+        case let .replace(before, after):
+            strokes = after
+            undoStack.append(.replace(before: before, after: after))
         case let .move(ids, d):
             translate(ids: ids, by: d)
             lastReshapedIDs = ids

@@ -10,6 +10,7 @@ struct NotaApp: App {
     private let container: ModelContainer
     @State private var documents = DocumentStore()
     @State private var thumbnails = ThumbnailStore()
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         do {
@@ -28,6 +29,11 @@ struct NotaApp: App {
         }
         .modelContainer(container)
         .commands { NoteCommands() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                saveOpenNotes()
+            }
+        }
         // Note activities go to note windows, never here.
         .handlesExternalEvents(matching: ["nota-library"])
 
@@ -39,5 +45,36 @@ struct NotaApp: App {
         }
         .modelContainer(container)
         .handlesExternalEvents(matching: [NoteActivity.targetContentIdentifier])
+    }
+
+    /// Saves every open note when the app leaves the screen, where it can be killed without warning, and
+    /// asks for the time to finish writing.
+    private func saveOpenNotes() {
+        documents.saveAll()
+        let task = BackgroundTask()
+        task.begin()
+        Task {
+            await documents.flush()
+            task.end()
+        }
+    }
+}
+
+/// Extra time to finish work after the app leaves the screen, ended when the work is done or the time
+/// runs out, whichever comes first.
+@MainActor
+private final class BackgroundTask {
+    private var id = UIBackgroundTaskIdentifier.invalid
+
+    func begin() {
+        id = UIApplication.shared.beginBackgroundTask(withName: "Save notes") { [weak self] in
+            MainActor.assumeIsolated { self?.end() }
+        }
+    }
+
+    func end() {
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
     }
 }

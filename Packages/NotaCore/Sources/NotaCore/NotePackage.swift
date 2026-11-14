@@ -3,8 +3,9 @@ import InkKit
 
 /// Where a note's files live: one `<id>.nota` directory per note under Application Support.
 ///
-/// Each holds `manifest.json` (the page layout, see `NoteManifest`), `thumbs/` and `templates/` (custom
-/// template backgrounds); NOT-6 adds page files alongside them.
+/// Each holds `manifest.json` (the title and page layout, see `NoteManifest`), `pages/` (one `.ink` file per
+/// page that has ink, named by page id), `thumbs/` and `templates/` (custom template backgrounds).
+/// `DocumentStore` reads and writes them; every file is replaced atomically (see `PackageFiles`).
 public enum NotePackage {
     public static var libraryURL: URL {
         URL.applicationSupportDirectory.appending(path: "Notes", directoryHint: .isDirectory)
@@ -16,6 +17,22 @@ public enum NotePackage {
 
     public static func manifestURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
         url(for: noteID, in: library).appending(path: "manifest.json")
+    }
+
+    /// The folder of the note's page files.
+    public static func pagesURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
+        url(for: noteID, in: library).appending(path: "pages", directoryHint: .isDirectory)
+    }
+
+    /// The `.ink` file holding a page's strokes. A page without one has no ink.
+    public static func pageURL(for pageID: UUID, noteID: UUID, in library: URL = libraryURL) -> URL {
+        pagesURL(for: noteID, in: library).appending(path: "\(pageID.uuidString).\(InkPageFile.fileExtension)")
+    }
+
+    /// The note an `<id>.nota` package directory belongs to, or nil for anything else in the library.
+    public static func noteID(ofPackage url: URL) -> UUID? {
+        guard url.pathExtension == "nota" else { return nil }
+        return UUID(uuidString: url.deletingPathExtension().lastPathComponent)
     }
 
     public static func thumbnailsURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
