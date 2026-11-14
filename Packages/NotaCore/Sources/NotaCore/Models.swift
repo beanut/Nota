@@ -109,6 +109,9 @@ public final class Note {
     public var isShared: Bool
     /// Set when the note is moved to Recently Deleted.
     public var deletedAt: Date?
+    /// The typed text in the note's text boxes, for search. Mirrored from the note's pages by `DocumentStore`
+    /// whenever it saves or opens the note, and read from its package when the index is rebuilt.
+    public var textContent: String = ""
     public var folder: Folder?
 
     public init(title: String,

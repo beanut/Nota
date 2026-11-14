@@ -255,28 +255,34 @@ public final class DocumentStore {
     }
 
     /// Adds a `Note` to `context` for every package in the library that has none, from its manifest: its
-    /// title, dates, page count and cover template. For a library whose SwiftData store was lost or reset;
+    /// title, dates, page count, cover template and the text of its text boxes. For a library whose SwiftData store was lost or reset;
     /// folders, favourites and tints aren't in packages, so rebuilt notes start without them. Returns the
     /// notes added.
     @discardableResult
     public func rebuildIndex(in context: ModelContext) async -> [Note] {
         let library = library, files = files, tombstones = tombstones
-        let packages: [(id: UUID, manifest: NoteManifest)] = await queue.perform {
+        let packages: [(id: UUID, manifest: NoteManifest, text: String)] = await queue.perform {
             let contents = (try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)) ?? []
             return contents.compactMap { url in
                 guard let id = NotePackage.noteID(ofPackage: url), !tombstones.contains(id),
                       let manifest = Self.readManifest(at: NotePackage.manifestURL(for: id, in: library), files: files)
                 else { return nil }
-                return (id, manifest)
+                let text = Self.text(of: manifest.pages.map { page in
+                    let url = NotePackage.objectsURL(for: page.id, noteID: id, in: library)
+                    guard let data = try? Data(contentsOf: url), let file = try? PageObjectsFile(data: data) else { return "" }
+                    return file.text
+                })
+                return (id, manifest, text)
             }
         }
         let known = Set(((try? context.fetch(FetchDescriptor<Note>())) ?? []).map(\.id))
         var added: [Note] = []
-        for (id, manifest) in packages where !known.contains(id) {
+        for (id, manifest, text) in packages where !known.contains(id) {
             let note = Note(title: manifest.title ?? String(localized: "Untitled Note"),
                             pageCount: manifest.pageCount, modifiedAt: manifest.modifiedAt,
                             template: manifest.coverTemplate, id: id)
             note.createdAt = manifest.createdAt
+            note.textContent = text
             context.insert(note)
             manifests[id] = manifest
             added.append(note)
@@ -326,6 +332,7 @@ public final class DocumentStore {
         }
         let entry = OpenNote(note: note, notebook: notebook)
         open[id] = entry
+        mirrorText(of: notebook, onto: note)
         observe(entry)
         touch(id)
         evictIfNeeded()
@@ -435,6 +442,9 @@ public final class DocumentStore {
                 objectFiles.append(page.objectsFile)
             }
         }
+        if !objectFiles.isEmpty {
+            mirrorText(of: notebook, onto: note)
+        }
         let inkChanged = !pageFiles.isEmpty || !objectFiles.isEmpty
         let layoutChanged = !new.hasSameLayout(as: old)
         guard inkChanged || layoutChanged || new.title != old.title || entry.needsFullSave else { return }
@@ -493,6 +503,18 @@ public final class DocumentStore {
             data[background.id] = artworks[background.id]?.data
         }
         return data
+    }
+
+    /// Copies the text of the notebook's text boxes onto the note, for search.
+    private func mirrorText(of notebook: InkNotebook, onto note: Note) {
+        let text = Self.text(of: notebook.pages.map(\.text))
+        if note.textContent != text {
+            note.textContent = text
+        }
+    }
+
+    nonisolated static func text(of pages: [String]) -> String {
+        pages.filter { !$0.isEmpty }.joined(separator: "\n")
     }
 
     private func mirror(_ manifest: NoteManifest, onto note: Note) {

@@ -137,13 +137,19 @@ final class CanvasView: UIView {
 
     /// A stroke snapped to a shape while the Pencil is still down (hold-to-snap); see `CanvasView+Shapes`.
     var shapeSnap: ShapeSnap?
+    /// The text box being edited, while one is (see `CanvasView+Text`).
+    var textEditor: TextBoxEditor?
+    /// A text tool touch in progress.
+    var textGesture: TextGesture?
+    /// A finger tap with the text tool when fingers don't draw, or on the page while a box is edited.
+    lazy var textTap = UITapGestureRecognizer(target: self, action: #selector(handleTextFingerTap(_:)))
 
     var lassoPending = false // lasso touch began, first sample not yet seen
     var lassoSession: LassoSession?
     var selection = PageSelection.empty
     var selectionBox: SelectionBox? // canvas space; nil when nothing is selected
     let objectLayer = ObjectLayerView()
-    private let lassoOverlayView = LassoOverlayView()
+    let lassoOverlayView = LassoOverlayView()
     /// How many times each clip has been pasted on this page in its own place, so the next paste of it
     /// lands a step further along (see `PastePlacement`).
     var pasteCounts: [UUID: Int] = [:]
@@ -188,8 +194,8 @@ final class CanvasView: UIView {
 
     // Scribble gestures
     /// Checks for circle-and-hold while ink is being drawn; runs only while a stroke is live.
-    private var holdTimer: Timer?
-    private var lastMovement: (location: CGPoint, time: TimeInterval)?
+    var holdTimer: Timer?
+    var lastMovement: (location: CGPoint, time: TimeInterval)?
     lazy var feedback = UICanvasFeedbackGenerator(view: self)
 
     // Zoom window: the box on the page, the writing panel that magnifies it, and the panel's renders.
@@ -285,6 +291,9 @@ final class CanvasView: UIView {
         super.willMove(toWindow: newWindow)
         // Before leaving the window, while the fitted transform still sees the real safe area.
         // Embedded pages come and go as they scroll by, at whatever transform they were at: no raster.
+        if newWindow == nil, window != nil {
+            endEditingText()
+        }
         if newWindow == nil, window != nil, !isEmbedded {
             saveCommittedRaster()
         }
@@ -711,7 +720,10 @@ final class CanvasView: UIView {
     /// Shows the document's objects as they are now.
     func refreshObjects() {
         let preview: [any PageObject] = shapeSnap.map { [$0.shape] } ?? []
-        objectLayer.show(document.objects + preview, pageBounds: document.pageBounds)
+        // The box being edited is shown by its text view instead.
+        let editing = textEditor?.objectID
+        let objects = editing.map { id in document.objects.filter { $0.id != id } } ?? document.objects
+        objectLayer.show(objects + preview, pageBounds: document.pageBounds)
     }
 
     /// Drops the stroke being drawn without committing it (it became a shape or a selection).
@@ -748,6 +760,7 @@ final class CanvasView: UIView {
         if let box = displayedSelectionBox {
             drawSelection(box, accent: accent, in: ctx)
         }
+        drawTextDraft(in: ctx, accent: accent)
         if case let .drawing(pts)? = lassoSession,
            let polygon = LassoGeometry.region(mode: controller?.lassoMode ?? .freeform, points: pts)
            ?? (pts.count >= 2 ? pts : nil) {
@@ -861,6 +874,7 @@ final class CanvasView: UIView {
 
     @discardableResult
     func undo() -> Bool {
+        endEditingText()
         let inkRevision = document.revision
         guard live == nil, lassoSession == nil, shapeSnap == nil, editDocument({ document.undo() }) else { return false }
         redrawFromDocument(ink: document.revision != inkRevision)
@@ -869,6 +883,7 @@ final class CanvasView: UIView {
 
     @discardableResult
     func redo() -> Bool {
+        endEditingText()
         let inkRevision = document.revision
         guard live == nil, lassoSession == nil, shapeSnap == nil, editDocument({ document.redo() }) else { return false }
         redrawFromDocument(ink: document.revision != inkRevision)
@@ -876,6 +891,7 @@ final class CanvasView: UIView {
     }
 
     func clearCanvas() {
+        endEditingText()
         editDocument { document.clear() }
         generation &+= 1
         dropOrphanedPendingStrokes()
@@ -927,6 +943,7 @@ final class CanvasView: UIView {
         pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
         templateView.follow(viewTransform)
         objectLayer.follow(viewTransform)
+        placeTextEditor()
         inkMask.frame = inkClipView.bounds
         inkMask.path = CGPath(rect: frame, transform: nil)
         if let zoomBoxView, let zoomWindow {
@@ -961,7 +978,10 @@ final class CanvasView: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if !isFirstResponder {
+        // Touches in the text box being edited are the text view's.
+        let touches = touches.filter { !isInTextEditor($0) }
+        guard !touches.isEmpty else { return }
+        if !isFirstResponder, textEditor == nil {
             _ = becomeFirstResponder()
         }
         for touch in touches where touch.type == .pencil {
@@ -995,6 +1015,11 @@ final class CanvasView: UIView {
             guard isDrawingTouch(touch, event: event), activeTouch == nil, activeGestureCount == 0,
                   zoomTouch == nil else { continue }
             activeTouch = touch
+            if controller?.tool != .text {
+                // Writing or erasing anywhere finishes the text box being edited.
+                controller?.canvas?.endEditingText()
+                endEditingText()
+            }
             if isEmbedded {
                 controller?.embeddedCanvasWillInk(self) // writing on a page makes it the one being worked on
             }
@@ -1137,7 +1162,9 @@ final class CanvasView: UIView {
         }
         fingerPrevious = nil
         liveView.settle(at: viewTransform)
-        if controller.tool == .lasso {
+        if controller.tool == .text {
+            beginTextGesture(at: start)
+        } else if controller.tool == .lasso {
             lassoPending = true
         } else if controller.tool == .eraser && controller.eraserMode != .precision {
             eraseSession = EraseSession(target: controller.effectiveEraserTarget,
@@ -1199,6 +1226,10 @@ final class CanvasView: UIView {
             updateShapeSnap(to: point.location)
             return
         }
+        if textGesture != nil {
+            updateTextGesture(to: point.location)
+            return
+        }
         guard let live else { return }
         let expectsUpdate = !touch.estimatedPropertiesExpectingUpdates.isEmpty
         controller?.inputRecorder?.sample(point, strokeID: live.stroke.id,
@@ -1247,6 +1278,9 @@ final class CanvasView: UIView {
         }
         if shapeSnap != nil {
             finishShapeSnap(commit: commit)
+        }
+        if textGesture != nil {
+            finishTextGesture(commit: commit)
         }
         var erased = eraseSession != nil && commit
         finishErasing()
@@ -1360,6 +1394,9 @@ extension CanvasView {
         lassoTap.allowedTouchTypes = direct
         lassoTap.delegate = self
         addGestureRecognizer(lassoTap)
+        textTap.allowedTouchTypes = direct
+        textTap.delegate = self
+        addGestureRecognizer(textTap)
         addInteraction(editMenu)
         selectionDragInteraction.isEnabled = false // see `updateSelectionBox()`
         addInteraction(selectionDragInteraction)
@@ -1616,12 +1653,21 @@ extension CanvasView: UIGestureRecognizerDelegate {
         if g === lassoTap {
             return controller?.tool == .lasso && !fingerDraws
         }
+        if g === textTap {
+            return !fingerDraws && (controller?.tool == .text || textEditor != nil)
+        }
         return true
     }
 
     /// Palm rejection: a resting hand never pans, zooms, swipes or taps.
     func gestureRecognizer(_: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        !isPalm(touch)
+        !isPalm(touch) && !isInTextEditor(touch)
+    }
+
+    /// Whether the touch landed in the text box being edited.
+    func isInTextEditor(_ touch: UITouch) -> Bool {
+        guard let textView = textEditor?.textView, let view = touch.view else { return false }
+        return view.isDescendant(of: textView)
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer,
@@ -1728,97 +1774,5 @@ extension CanvasView {
         #endif
         return StrokePoint(location: canvasLocation, force: force, altitude: altitude,
                            azimuth: -.pi / 4, timestamp: touch.timestamp)
-    }
-}
-
-// MARK: - Scribble gestures
-
-extension CanvasView {
-    /// Every finished ink stroke on the page as a gesture target. Pixel-eraser strokes are invisible,
-    /// so gestures never act on them.
-    private func scribbleCandidates(excluding excluded: UUID?) -> [Scribble.Candidate] {
-        document.strokes.compactMap { stroke in
-            guard !stroke.brush.erases, stroke.id != excluded else { return nil }
-            let points = stroke.points.map(\.location)
-            return Scribble.Candidate(id: stroke.id, points: points, bounds: LassoGeometry.bounds(of: points))
-        }
-    }
-
-    /// Called as a finished ink stroke is about to be committed. If it scratched out ink, erases that
-    /// ink instead and returns true (the stroke is dropped).
-    func scratchOut(with stroke: LiveStroke) -> Bool {
-        guard controller?.pencilSettings.scratchOutToErase == true, !stroke.stroke.brush.erases else {
-            return false
-        }
-        let points = stroke.stroke.points.map(\.location)
-        guard Scribble.isScratchOut(points, minSize: 24 / inputTransform.scale) else { return false }
-        let ids = Scribble.scratchOutTargets(points, candidates: scribbleCandidates(excluding: stroke.stroke.id),
-                                             pad: stroke.stroke.brush.maxWidth)
-        guard !ids.isEmpty else { return false } // shading or a zigzag over blank paper: keep it as ink
-        for id in ids {
-            forgetGeometry(id)
-        }
-        editDocument { document.recordErase(document.remove(ids: ids)) }
-        dropOrphanedPendingStrokes() // also prunes the selection and clears the live layer
-        requestFullRender()
-        if let last = points.last {
-            feedback.pathCompleted(at: inputTransform.toView(last))
-        }
-        return true
-    }
-
-    /// Starts watching the live stroke for circle-and-hold.
-    func startHoldWatch(at location: CGPoint, time: TimeInterval) {
-        stopHoldWatch()
-        guard let controller, live != nil,
-              controller.pencilSettings.circleToSelect || snapsShapesOnHold(controller) else { return }
-        lastMovement = (location, time)
-        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.checkHold() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        holdTimer = timer
-    }
-
-    func stopHoldWatch() {
-        holdTimer?.invalidate()
-        holdTimer = nil
-        lastMovement = nil
-    }
-
-    /// Records Pencil movement for the hold check. Movement under 3 points doesn't count.
-    func noteMovement(at location: CGPoint, time: TimeInterval) {
-        guard holdTimer != nil, let last = lastMovement, last.location.distance(to: location) > 3 else { return }
-        lastMovement = (location, time)
-    }
-
-    /// The Pencil has been still for a moment: if the live stroke is a loop around ink, select that ink;
-    /// otherwise, if it's a shape, snap it to one.
-    private func checkHold() {
-        guard let last = lastMovement, let live, let controller,
-              ProcessInfo.processInfo.systemUptime - last.time >= 0.45 else { return }
-        stopHoldWatch() // one check per stroke once it's held
-        let loop = live.stroke.points.map(\.location)
-        let ids: Set<UUID> = controller.pencilSettings.circleToSelect && controller.tool != .shape
-            && Scribble.isClosedLoop(loop, minSize: 24 / inputTransform.scale)
-            ? Scribble.loopSelection(loop, candidates: scribbleCandidates(excluding: live.stroke.id)) : []
-        guard !ids.isEmpty else {
-            if snapsShapesOnHold(controller) {
-                snapToShape(live, holdingAt: inputTransform.toCanvas(last.location))
-            }
-            return
-        }
-        // The loop becomes a selection: drop its ink, switch to the lasso and keep the Pencil down to
-        // drag what it caught.
-        self.live = nil
-        invalidateAllLive()
-        controller.select(.lasso)
-        pending.removeAll { ids.contains($0.live.stroke.id) } // they're redrawn where they move to
-        select(PageSelection(strokeIDs: ids))
-        if let box = selectionBox {
-            lassoSession = .transforming(SelectionDrag(handle: .move, start: inputTransform.toCanvas(last.location),
-                                                       box: box, session: document.beginTransform(selection)))
-        }
-        feedback.alignmentOccurred(at: last.location)
     }
 }

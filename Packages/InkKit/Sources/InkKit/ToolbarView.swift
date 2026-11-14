@@ -9,6 +9,7 @@ extension Tool {
         case .eraser: .eraser
         case .lasso: .lasso
         case .shape: .shapes
+        case .text: .text
         }
     }
 
@@ -20,13 +21,14 @@ extension Tool {
         case .eraser: "Eraser"
         case .lasso: "Lasso"
         case .shape: "Shapes"
+        case .text: "Text"
         }
     }
 
     /// Whether the tool draws in a colour picked from the Pen Case.
     var usesInk: Bool {
         switch self {
-        case .pen, .pencil, .highlighter, .shape: true
+        case .pen, .pencil, .highlighter, .shape, .text: true
         case .eraser, .lasso: false
         }
     }
@@ -367,6 +369,8 @@ struct ToolOptionsView: View {
                     .foregroundStyle(theme.color(\.textSecondary))
                     .fixedSize(horizontal: false, vertical: true)
                 widthControls
+            case .text:
+                TextToolOptions(controller: controller)
             case .pen, .pencil, .highlighter:
                 BrushPicker(controller: controller, tool: tool)
                 Button {

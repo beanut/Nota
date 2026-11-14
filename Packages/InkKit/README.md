@@ -68,6 +68,11 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `PageObject.swift` | `PageObject` (frame, transform, z-order, drawing), `PageObjectPlacement` (the shared JSON keys), `PlaceholderObject` (the test object), objects of unknown kinds |
 | `ShapeObject.swift` | `ShapeObject`: lines, arrows, rectangles, ellipses, triangles, polygons and curves, their handles and snap anchors, drawing (fill, solid / dashed / dotted outline) and lenient JSON; `ShapeStyle` |
 | `ShapeRecognizer.swift` | The on-device recogniser: a rough stroke to the shape it was meant to be, with angle, upright, square/circle and shape-to-shape snapping |
+| `RichText.swift` | `RichText`: a text box's paragraphs of styled runs (`TextStyle`, `TextFont`), alignment, lists, checkboxes and indent; lenient JSON; round-tripping through `NSAttributedString`; list numbering (`TextMarker`) |
+| `TextObject.swift` | `TextObject` (a text box: rewraps rather than stretches when resized, ticks checkboxes), `TextLayout` (TextKit 1 layout and list markers shared by drawing and the editor), page text for search |
+| `TextBoxEditor.swift` / `CanvasView+Text.swift` | Editing a text box in place (`InkTextView`, formatting, Return and Tab in lists) and the text tool on the canvas (tap or drag to make a box, tap to edit, tap a checkbox to tick it) |
+| `TextFormatBar.swift` | The format bar shown while a box is edited, and the text tool's options |
+| `CanvasView+Scribble.swift` | Scratch-out and circle-to-select |
 | `CanvasView+Shapes.swift` | The shape tool, draw-and-hold to snap (and sizing the snapped shape before lifting), dragging a selected shape's handles, restyling selected shapes |
 | `PageObjectsFile.swift` | `PageObjectsFile`, a page's objects as `pages/<page id>.json`: format version, reading, writing |
 | `Selection.swift` | `PageSelection`, `SelectionBox` and `SelectionGeometry`: lasso and tap selection of strokes and objects, the box's handles and the transforms they make; `Stroke.applying(_:)` |
@@ -274,8 +279,10 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 A page holds objects as well as ink (Architecture §5): shapes, text boxes, images and tape as they land.
 Every object is a `PageObject`: an `id`, a `frame` in its own space, a `transform` (`CGAffineTransform`)
 that puts the frame on the page, and a `zIndex`. Each type only draws itself and encodes its own fields; the
-lasso, the handles, undo and storage work on that placement. There are two types: `ShapeObject` (see
-Shapes below) and `PlaceholderObject` (More › Add Test Object), a rectangle with a cross that exercises the layer.
+lasso, the handles, undo and storage work on that placement. There are three types: `ShapeObject` (see
+Shapes below), `TextObject` (see Text boxes below) and `PlaceholderObject` (More › Add Test Object), a
+rectangle with a cross that exercises the layer. A type that needs to move differently overrides
+`applying(_:)` (a text box keeps its letters' size).
 
 ```swift
 page.addObject(PlaceholderObject(frame: CGRect(x: 72, y: 72, width: 200, height: 120), color: PenColor(rgb: 0x2563EB)))
@@ -400,6 +407,38 @@ in the same frame; a bad colour or width takes the default).
 - **Limits.** Tap-to-select and the lasso hit a shape anywhere in its bounds, so a diagonal line is
   selectable in the empty corners of its box. Recognition thresholds are tuned on synthetic strokes; they
   still need tuning with real handwriting on a physical iPad (NOT-12).
+
+#### Text boxes
+
+`TextObject` (file kind `"text"`) is rich text (`RichText`) wrapped at `frame.width`; `frame.height` always
+follows the text. Its one field is `text`: `{"paragraphs": [{"runs": [{"text", "font", "size", "color",
+"bold", "italic", "underline"}], "alignment", "list", "checked", "indent"}]}`, with defaults left out. Fonts
+are the system font's four designs (sans serif, serif, rounded, monospaced); lists are bullets (•, ◦, ▪ by
+level), numbers (counted per level, restarting under each item and after anything else) and checkboxes, up to
+six levels deep. Reading is lenient: unknown fonts, lists or alignments and out-of-range sizes take the
+default, so text is never lost.
+
+- **Making and editing.** With the text tool, tap the page for a box `TextObject.defaultWidth` (320 pt) wide
+  with the caret at the tap, or drag to set its width; tap a box to edit it with the caret where you tapped,
+  or tap one of its checkboxes to tick it without opening it. New text takes the tool's typeface and size
+  (Tool Options) and the Pen Case colour. While a box is edited (`TextBoxEditor`) a `UITextView` set up exactly
+  like `TextLayout` sits over it at its scale and rotation, rendering sharply at the current zoom, and the
+  box is hidden from the object layer, so nothing moves when editing starts or ends. Keyboard and Scribble
+  both write into it; Bold / Italic / Underline (⌘B / ⌘I / ⌘U) work too, and pasted text takes the box's
+  style. Return continues a list (a new checklist item starts unticked); Return on an empty item steps out a
+  level, then ends the list; Tab and ⇧Tab indent and outdent. Tapping elsewhere, Done, another tool, undo or
+  leaving the page finishes editing as one undoable edit: the box is added, changed, or removed if it was
+  emptied. UIKit drops custom attributes from typed text now and then, so after every change the editor gives
+  each paragraph one layout again (`repairParagraphs`).
+- **Drawing.** TextKit 1 (`NSLayoutManager`) both draws the box and lays out the editor, with list markers
+  drawn in the margin by `TextLayout.drawMarkers`. Layouts are cached on the main thread (the object layer
+  redraws every box on every frame of a pan); thumbnails and PDFs, drawn elsewhere, lay out afresh. In a PDF
+  the glyphs are real text, so it can be searched and copied.
+- **Selecting.** The lasso moves, rotates, layers, recolours (every run), copies and deletes text boxes like
+  any object. Resizing one rewraps it: `applying(_:)` keeps the text's scale and turns the stretch into a new
+  wrap width (at least `minimumWidth`, 40 pt).
+- **Search.** `CanvasDocument.text` and `PageObjectsFile.text` are the plain text of a page's boxes; NotaCore
+  copies them onto `Note.textContent`, which the library's search matches.
 
 ### Rendering pipeline
 

@@ -395,6 +395,31 @@ struct DocumentStoreTests {
         #expect(try reopened.objectsFile.encoded() == page.objectsFile.encoded())
     }
 
+    @Test func textBoxTextIsKeptOnTheNoteForSearch() async throws {
+        let store = DocumentStore(library: library)
+        let note = Note(title: "Test")
+        store.create(note, size: .letter, template: .noteDefault)
+        let notebook = await store.notebook(for: note)
+        notebook.addPage()
+        let box = TextObject(origin: CGPoint(x: 40, y: 40), width: 300, text: RichText("Groceries\nEggs"))
+        notebook.pages[0].addObject(box)
+        notebook.pages[1].addObject(TextObject(origin: CGPoint(x: 40, y: 40), width: 300, text: RichText("Page two")))
+        store.save(note)
+        await store.flush()
+        #expect(note.textContent == "Groceries\nEggs\nPage two")
+
+        // Removing the box takes its text out of the index.
+        notebook.pages[1].undoForTesting()
+        store.save(note)
+        #expect(note.textContent == "Groceries\nEggs")
+
+        // A store that's lost its index gets the text back from the package.
+        await store.flush()
+        let context = try makeContext()
+        _ = await relaunch().rebuildIndex(in: context)
+        #expect(try #require(context.note(withID: note.id)).textContent == "Groceries\nEggs")
+    }
+
     @Test func removingTheLastObjectRemovesItsFile() async {
         let store = DocumentStore(library: library)
         let note = Note(title: "Test")

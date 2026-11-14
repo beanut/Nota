@@ -70,7 +70,8 @@ public enum LibraryFilter: String, CaseIterable, Identifiable, Sendable {
 public enum Library {
     /// The notes the grid shows for a section, filter chip and search text, most recently modified first.
     ///
-    /// Search ignores surrounding whitespace, case and diacritics, and matches anywhere in the title.
+    /// Search ignores surrounding whitespace, case and diacritics, and matches anywhere in the title or in
+    /// the text typed into the note's text boxes (`Note.textContent`).
     /// Notes modified at the same moment are ordered by title, so the grid doesn't reshuffle between renders.
     public static func visibleNotes(_ notes: [Note],
                                     in section: LibrarySection,
@@ -83,7 +84,8 @@ public enum Library {
             .filter { note in
                 section.contains(note, now: now, calendar: calendar)
                     && filter.contains(note)
-                    && (query.isEmpty || note.title.localizedStandardContains(query))
+                    && (query.isEmpty || note.title.localizedStandardContains(query)
+                        || note.textContent.localizedStandardContains(query))
             }
             .sorted(by: isOrderedBefore)
     }

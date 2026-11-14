@@ -33,6 +33,10 @@ public protocol PageObject: Codable, Sendable {
     /// The object drawn in `color`, for the lasso's Color menu. The default keeps the object as it is,
     /// for kinds that have no colour of their own (an image).
     func recolored(_ color: PenColor) -> Self
+
+    /// The object with `t` applied after its own transform: moved, scaled or rotated on the page. The default
+    /// concatenates `t` onto `transform`; a text box keeps its letters' size and rewraps instead.
+    func applying(_ t: CGAffineTransform) -> Self
 }
 
 public extension PageObject {
@@ -63,7 +67,6 @@ public extension PageObject {
             .contains(point.applying(transform.inverted()))
     }
 
-    /// The object with `t` applied after its own transform: moved, scaled or rotated on the page.
     func applying(_ t: CGAffineTransform) -> Self {
         var copy = self
         copy.transform = transform.concatenating(t)
@@ -343,7 +346,8 @@ enum PageObjectKinds {
     /// Every kind this version reads. Add new object types here.
     static let known: [String: any PageObject.Type] = [
         PlaceholderObject.kind: PlaceholderObject.self,
-        ShapeObject.kind: ShapeObject.self
+        ShapeObject.kind: ShapeObject.self,
+        TextObject.kind: TextObject.self
     ]
 
     /// Whether objects of this type can be seen and selected (objects of unknown kinds can't).
