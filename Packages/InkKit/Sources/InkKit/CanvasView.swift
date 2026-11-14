@@ -37,7 +37,7 @@ final class CanvasView: UIView {
     private(set) var bitmapTransform =
         ViewTransform() // transform the bitmap is / will be rendered at once queued jobs run; pending strokes draw with this
     private(set) var displayedTransform = ViewTransform() // transform of the image currently in committedLayer.contents
-    private var fullRenderInFlight = false
+    private(set) var fullRenderInFlight = false
     private var fullRenderRequested = false
     private var modifiedSinceSnapshot = Set<UUID>()
     /// Strokes whose geometry was dropped while `warmGeometry` was building it in the background.
@@ -328,7 +328,7 @@ final class CanvasView: UIView {
         updateZoomWindow()
         updatePageChrome()
         let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
-        let pixels = CGSize(width: (bounds.width * scale).rounded(.up), height: (bounds.height * scale).rounded(.up))
+        let pixels = Self.pixelSize(of: bounds.size, scale: scale)
         guard pixels != bitmapPixelSize || scale != bitmapScale else { return }
         bitmapPixelSize = pixels
         bitmapScale = scale
@@ -346,6 +346,10 @@ final class CanvasView: UIView {
     }
 
     // MARK: - Committed bitmap
+
+    private static func pixelSize(of size: CGSize, scale: CGFloat) -> CGSize {
+        CGSize(width: (size.width * scale).rounded(.up), height: (size.height * scale).rounded(.up))
+    }
 
     private func makeBitmap() {
         let pixelSize = bitmapPixelSize
@@ -372,6 +376,12 @@ final class CanvasView: UIView {
     }
 
     func requestFullRender() {
+        // No bitmap for this size yet (a new view, or one just resized): making one (`layoutSubviews`)
+        // renders, and rendering now would only fill the old one.
+        guard bitmapPixelSize != .zero, bitmapPixelSize == Self.pixelSize(of: bounds.size, scale: bitmapScale) else {
+            setNeedsLayout()
+            return
+        }
         if fullRenderInFlight {
             fullRenderRequested = true
         } else {

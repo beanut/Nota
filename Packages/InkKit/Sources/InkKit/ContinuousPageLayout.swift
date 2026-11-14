@@ -111,6 +111,49 @@ struct ContinuousPageLayout: Equatable {
         return min(max(frames[index].minY - topInset, 0), maxOffset)
     }
 
+    // MARK: Render windows
+
+    /// How far a page's canvas reaches past the viewport on each side, as a fraction of the viewport.
+    static let renderOverscan = CGSize(width: 0.25, height: 0.5)
+    /// How close the viewport may come to the edge of a page's canvas, as a fraction of the viewport,
+    /// before the canvas moves (and renders again) to keep ahead of it.
+    static let renderMargin = CGSize(width: 0.125, height: 0.25)
+
+    /// Where a page's canvas goes, in scroll content points at the current zoom: the part of `page` its
+    /// ink is rendered for. Scrolling moves the canvas with the content, so the ink only renders again
+    /// when the canvas moves or changes size, never just because the view scrolled.
+    ///
+    /// The window is the viewport plus `renderOverscan`, cut to the page, so a page that fits in that is
+    /// covered whole and never renders again while scrolling. `current` is kept while it still covers the
+    /// viewport plus `renderMargin`; otherwise the window centres on the viewport, inside the page.
+    /// `keepingSize` (mid-pinch) keeps `current`'s size so the canvas doesn't make a new bitmap every frame.
+    static func renderWindow(forPage page: CGRect, viewport: CGRect, current: CGRect?,
+                             keepingSize: Bool = false) -> CGRect {
+        let size: CGSize
+        if keepingSize, let current {
+            size = current.size
+        } else {
+            let o = renderOverscan
+            size = CGSize(width: min(page.width, viewport.width * (1 + 2 * o.width)).rounded(.up),
+                          height: min(page.height, viewport.height * (1 + 2 * o.height)).rounded(.up))
+        }
+        if let current, current.size == size {
+            let m = renderMargin
+            let needed = viewport.insetBy(dx: -viewport.width * m.width, dy: -viewport.height * m.height)
+                .intersection(page)
+            if needed.isNull || current.contains(needed) {
+                return current
+            }
+        }
+        func place(_ length: CGFloat, around centre: CGFloat, within lower: CGFloat, _ upper: CGFloat) -> CGFloat {
+            guard length < upper - lower else { return ((lower + upper - length) / 2).rounded() }
+            return min(max((centre - length / 2).rounded(), lower.rounded(.up)), (upper - length).rounded(.down))
+        }
+        return CGRect(x: place(size.width, around: viewport.midX, within: page.minX, page.maxX),
+                      y: place(size.height, around: viewport.midY, within: page.minY, page.maxY),
+                      width: size.width, height: size.height)
+    }
+
     /// The first frame index for which `isPast` holds (frames are sorted top to bottom), or `frames.count`.
     private func firstIndex(where isPast: (CGRect) -> Bool) -> Int {
         var low = 0, high = frames.count
