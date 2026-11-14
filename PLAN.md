@@ -42,8 +42,9 @@ physical iPad), the pen tray with quick sizes and colours, colour picker and bru
 ([NOT-20](https://linear.app/nota-on-inkkit/issue/NOT-20), pending tuning on a physical iPad), lasso v2: cut, copy,
 paste across pages and notes, duplicate, recolour, thickness, arrange, screenshots and drag-out
 ([NOT-21](https://linear.app/nota-on-inkkit/issue/NOT-21)), and typed text boxes with rich formatting, checklists and
-search ([NOT-22](https://linear.app/nota-on-inkkit/issue/NOT-22), in review), landed early. After M0, M1 continues with
-images on the object layer and writing across page boundaries in vertical scrolling
+search ([NOT-22](https://linear.app/nota-on-inkkit/issue/NOT-22), in review), and images and stickers: insert, crop,
+resize, rotate ([NOT-23](https://linear.app/nota-on-inkkit/issue/NOT-23), in review), landed early. After M0, M1
+continues with writing across page boundaries in vertical scrolling
 ([NOT-89](https://linear.app/nota-on-inkkit/issue/NOT-89)).
 
 ## Keeping this current

@@ -91,6 +91,12 @@ InkCanvasEditor(notebook: notebook)
 - **Pages** – `InkNotebook` is an ordered list of `CanvasDocument`s with add / insert / remove / move and navigation. Each page has its own paper size, ink and undo history. A notebook always keeps at least one page.
 - **Page size** – `PageSize` is in points (1/72 in) and defaults to Letter. Custom sizes can be given in inches, millimetres or points. Resizing a page keeps the ink where it is; ink past the new edge is hidden, not deleted.
 - **Templates** – each page has a `PageTemplate`: blank, narrow / college / wide ruled, small and large grid, dotted, Cornell, music staff, isometric, to-do, weekly and monthly planners, or any PDF or image, on white, cream or dark paper. Templates are drawn as vectors (crisp at every zoom, real lines in an exported PDF) and expose their line metrics for handwriting layout. The page bar's template pill changes this page or every page; the library's Template menu changes a whole note.
+- **Pictures and stickers** – the Pen Case's Insert menu puts photos on the page from Photos, the camera or Files,
+  or pastes them; they can also be dropped onto the page. A picture's menu crops it to a rectangle or freehand
+  (and back), and sets its opacity; it's moved, resized (keeping its shape), rotated, layered and written over like any object.
+  Each picture is stored once in the note package's `assets/` and decoded at the size it's shown. Save as
+  Sticker keeps any lasso selection (ink or pictures) in an app-wide sticker collection to place again on any
+  page.
 - **Objects** – besides ink, a page holds objects (`PageObject`: shapes, text, images and tape as they land), each with a frame, a transform and a z-order, drawn between the template and the ink. Shapes (`ShapeObject`) are the first real kind: the shape tool, or drawing with a pen or pencil and holding the Pencil still, snaps a rough stroke to a line, arrow, rectangle, ellipse, triangle, polygon or curve, recognised on the device, and a selected shape is reshaped by its handles. Text boxes (`TextObject`) are typed with the keyboard or written into with the Pencil (Scribble): the text tool makes one with a tap (or a drag to set its width), and a floating format bar sets the typeface, size, bold / italic / underline, alignment, bullets, numbers, checkboxes and indent; the Pen Case's colours colour the selected text. Text boxes are moved, rotated, layered and recoloured like any object (resizing one rewraps its text), their text is found by the library's search, and an exported PDF keeps it as real text. There's also a test object, `PlaceholderObject` (More › Add Test Object). The lasso selects ink and objects together (or only one of them), by loop, rectangle or tap; the selection box's handles move, resize and rotate them, and its menu cuts, copies, pastes (onto any page of any note), duplicates, recolours, thickens or thins, brings to front or sends to back, and takes a screenshot; a selection can be dragged out to other apps as an image. Every change goes on the page's one undo stack.
 - **Scrolling** – More › Scroll Direction shows pages one at a time with sideways swipes (Horizontal) or all of them in one column scrolled vertically (Vertical), saved for every editor. In vertical scrolling only the pages in view get a canvas, so a 300-page note scrolls as smoothly as a short one; pinch to zoom, and writing near the bottom of the last page adds the next one.
 - **Page sidebar** – the page bar's pages button opens thumbnails of every page: tap one to go to it, drag to reorder, and duplicate, rotate (ink and all), delete, or copy or move pages to another note, one page from its context menu or several with Select.
@@ -112,7 +118,7 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 ## Known limitations
 
 - Each note is a `.nota` package (manifest + one `.ink` file per page with ink + one `.json` objects file per
-  page with objects) that `DocumentStore` autosaves
+  page with objects + one file per picture in `assets/`) that `DocumentStore` autosaves
   about a second after each change, when the editor closes and when the app leaves the screen. Undo history
   isn't saved. Pages load a whole note at a time (decoded off the main thread); the 8 most recent notes stay
   in memory. Vertical scrolling draws only the pages in view, but a note's pages are still all read when it
@@ -127,9 +133,14 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 - Pixel-eraser cuts belong to the page, not the strokes they cut: moving, copying or bringing to front a stroke
   that was partly pixel-erased shows it whole again in its new place (or order). The standard and stroke
   erasers don't have this problem.
-- Pasting only takes Nota's own selections; an image or text copied from another app can't be pasted onto the
-  page yet (it can be pasted into a text box being edited, as plain text).
-- Shapes (NOT-20) and text boxes (NOT-22) are the only real object types so far. Shape recognition is tuned on synthetic strokes,
+- Pasting takes Nota's own selections and pictures copied in other apps; text copied from another app can't be
+  pasted onto the page yet (it can be pasted into a text box being edited, as plain text). A selection dragged
+  out of Nota can't be dropped back onto a page (drops from inside the app are ignored).
+- Pictures (NOT-23): Take Photo needs a camera, so it's untested (disabled in the simulator); dropping and
+  picking from Photos have only been tried on the simulator. Pictures no page uses are deleted from a note's
+  `assets/` the next time it's opened, not when they're removed. Stickers are kept on this device only, like
+  the pen tray.
+- Shapes (NOT-20), text boxes (NOT-22) and pictures (NOT-23) are the only real object types so far. Shape recognition is tuned on synthetic strokes,
   not yet on real handwriting (NOT-12), and a shape is hit anywhere in its bounds, so a diagonal line can be
   selected from the empty corners of its box. The zoom window's panel doesn't show objects, and the pixel eraser's live preview paints
   paper over them until the stroke commits (objects are never erased).

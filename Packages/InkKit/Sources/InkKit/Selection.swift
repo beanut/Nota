@@ -217,9 +217,11 @@ enum SelectionGeometry {
 
     /// The transform that dragging `handle` of `box` from `start` to `current` (page space) applies to the
     /// selection. Resizing works in the box's own axes and never flips it or makes it smaller than
-    /// `minimumSize` page points a side; rotating turns it about its centre.
+    /// `minimumSize` page points a side; rotating turns it about its centre. With `keepsAspectRatio` (a
+    /// selection holding a picture, so a photo never stretches), a corner scales both axes alike, by
+    /// whichever the drag moved further.
     static func transform(for handle: SelectionHandle, box: SelectionBox, from start: CGPoint, to current: CGPoint,
-                          minimumSize: CGFloat = 4) -> CGAffineTransform {
+                          minimumSize: CGFloat = 4, keepsAspectRatio: Bool = false) -> CGAffineTransform {
         switch handle {
         case .move:
             let d = current - start
@@ -245,8 +247,12 @@ enum SelectionGeometry {
                 return max((to - anchor) / span, minimum)
             }
             let axisX = hypot(box.transform.a, box.transform.b), axisY = hypot(box.transform.c, box.transform.d)
-            let sx = factor(moved.x, grabbed.x, anchor.x, axisScale: axisX)
-            let sy = factor(moved.y, grabbed.y, anchor.y, axisScale: axisY)
+            var sx = factor(moved.x, grabbed.x, anchor.x, axisScale: axisX)
+            var sy = factor(moved.y, grabbed.y, anchor.y, axisScale: axisY)
+            if keepsAspectRatio {
+                sx = max(sx, sy)
+                sy = sx
+            }
             let local = CGAffineTransform(translationX: -anchor.x, y: -anchor.y)
                 .concatenating(CGAffineTransform(scaleX: sx, y: sy))
                 .concatenating(CGAffineTransform(translationX: anchor.x, y: anchor.y))

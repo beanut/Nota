@@ -37,6 +37,10 @@ public protocol PageObject: Codable, Sendable {
     /// The object with `t` applied after its own transform: moved, scaled or rotated on the page. The default
     /// concatenates `t` onto `transform`; a text box keeps its letters' size and rewraps instead.
     func applying(_ t: CGAffineTransform) -> Self
+
+    /// Whether `point` (page space) is on the object, or within `tolerance` page points of it, for selecting
+    /// it with a tap. The default is its frame; a picture with a freehand crop is only its outline.
+    func contains(_ point: CGPoint, tolerance: CGFloat) -> Bool
 }
 
 public extension PageObject {
@@ -347,7 +351,8 @@ enum PageObjectKinds {
     static let known: [String: any PageObject.Type] = [
         PlaceholderObject.kind: PlaceholderObject.self,
         ShapeObject.kind: ShapeObject.self,
-        TextObject.kind: TextObject.self
+        TextObject.kind: TextObject.self,
+        ImageObject.kind: ImageObject.self
     ]
 
     /// Whether objects of this type can be seen and selected (objects of unknown kinds can't).

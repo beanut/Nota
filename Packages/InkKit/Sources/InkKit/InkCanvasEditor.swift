@@ -23,6 +23,12 @@ import SwiftUI
 /// pastes (onto any page of any note), duplicates, deletes, recolours, thickens and thins, brings to front or
 /// sends to back, and takes a screenshot; a selection can also be dragged out to other apps as an image.
 /// Pass `selectionActions` to add the app's own items to that menu.
+///
+/// The Pen Case's Insert menu puts pictures on the page from Photos, the camera, Files or the pasteboard
+/// (pictures can also be dropped onto the page), and places stickers: selections saved with the selection
+/// menu's Save as Sticker (`StickerStore.shared`). A selected picture's menu crops it (to a rectangle or
+/// freehand, and back) and sets its opacity. Pictures' bytes live in `ImageAssets.shared`; a host that
+/// stores notes registers where it keeps them there.
 public struct InkCanvasEditor: View {
     @ObservedObject private var notebook: InkNotebook
     private let showsDebugHUD: Bool
@@ -112,6 +118,13 @@ public struct InkCanvasEditor: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
+            if let crop = controller.imageCrop {
+                ImageCropBar(controller: controller, state: crop)
+                    .padding(InkSpacing.s)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             if controller.hudVisible {

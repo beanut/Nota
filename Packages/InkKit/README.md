@@ -72,6 +72,12 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `TextObject.swift` | `TextObject` (a text box: rewraps rather than stretches when resized, ticks checkboxes), `TextLayout` (TextKit 1 layout and list markers shared by drawing and the editor), page text for search |
 | `TextBoxEditor.swift` / `CanvasView+Text.swift` | Editing a text box in place (`InkTextView`, formatting, Return and Tab in lists) and the text tool on the canvas (tap or drag to make a box, tap to edit, tap a checkbox to tick it) |
 | `TextFormatBar.swift` | The format bar shown while a box is edited, and the text tool's options |
+| `ImageAssets.swift` | `ImageAssets`: pictures' bytes by content hash (in memory until a host persists them, then read from its files), downsampled and cached bitmaps decoded in the background; `ImageDrawing` (per-thread draw options) |
+| `ImageObject.swift` | `ImageObject`: a picture with a non-destructive rectangular or freehand crop and opacity, its drawing and hit-testing, lenient JSON; the pictures a page uses |
+| `ImageCropView.swift` | Cropping a picture on the canvas (rectangle grips or a freehand outline) and its geometry (`ImageCropGeometry`) |
+| `CanvasView+Images.swift` | Inserting pictures (Photos, camera, Files, paste, drop), their selection-menu items (Crop, Opacity, Save as Sticker), cropping, placing stickers |
+| `InsertMenu.swift` | The Pen Case's Insert menu, the camera, the sticker picker and the crop bar |
+| `StickerStore.swift` | `Sticker` and `StickerStore`: the app-wide sticker collection (`.shared` in Application Support) |
 | `CanvasView+Scribble.swift` | Scratch-out and circle-to-select |
 | `CanvasView+Shapes.swift` | The shape tool, draw-and-hold to snap (and sizing the snapped shape before lifting), dragging a selected shape's handles, restyling selected shapes |
 | `PageObjectsFile.swift` | `PageObjectsFile`, a page's objects as `pages/<page id>.json`: format version, reading, writing |
@@ -279,8 +285,8 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 A page holds objects as well as ink (Architecture §5): shapes, text boxes, images and tape as they land.
 Every object is a `PageObject`: an `id`, a `frame` in its own space, a `transform` (`CGAffineTransform`)
 that puts the frame on the page, and a `zIndex`. Each type only draws itself and encodes its own fields; the
-lasso, the handles, undo and storage work on that placement. There are three types: `ShapeObject` (see
-Shapes below), `TextObject` (see Text boxes below) and `PlaceholderObject` (More › Add Test Object), a
+lasso, the handles, undo and storage work on that placement. There are four types: `ShapeObject` (see
+Shapes below), `TextObject` (see Text boxes below), `ImageObject` (see Pictures below) and `PlaceholderObject` (More › Add Test Object), a
 rectangle with a cross that exercises the layer. A type that needs to move differently overrides
 `applying(_:)` (a text box keeps its letters' size).
 
@@ -322,11 +328,12 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
 
 When a selection is made (or a drag of it ends), its menu appears above it: Cut, Copy, Paste, Duplicate,
 Delete; Color (the pen's quick colours, or the highlighter's for highlighter ink alone), Thickness (Thicker /
-Thinner, ×1.25 a step, the menu staying open), Arrange (Bring to Front / Send to Back), Take Screenshot;
-then the app's `SelectionAction`s. A tap on the selection shows it again. Each action is one undo step.
+Thinner, ×1.25 a step, the menu staying open), Arrange (Bring to Front / Send to Back), Crop and Opacity (for
+pictures), Save as Sticker, Take Screenshot; then the app's `SelectionAction`s. A tap on the selection shows it again. Each action is one undo step.
 
 - **Clipboard.** Copy puts a `SelectionClip` on the pasteboard as `app.nota.inkkit.selection` (JSON: the ink
-  as an `.ink` file and the objects as an objects file, base64) next to a PNG of the selection for other apps,
+  as an `.ink` file and the objects as an objects file, base64, plus the bytes of any pictures, so they
+  survive a relaunch or a trip to another note) next to a PNG of the selection for other apps,
   so a selection reaches other pages, notes and windows. Paste makes copies with new ids (objects go through
   the objects file, so every kind copies the same way) and selects them. `PastePlacement`: a tap on nothing,
   with nothing selected, offers Paste there, centred on the tap; otherwise the clip lands in its own place
@@ -439,6 +446,44 @@ default, so text is never lost.
   wrap width (at least `minimumWidth`, 40 pt).
 - **Search.** `CanvasDocument.text` and `PageObjectsFile.text` are the plain text of a page's boxes; NotaCore
   copies them onto `Note.textContent`, which the library's search matches.
+
+#### Pictures
+
+`ImageObject` (file kind `"image"`) names its picture by `asset`, the SHA-256 of its bytes, with the picture's
+oriented `pixelSize`; its own fields are also `crop` (unit image space, absent for the whole picture), `mask`
+(a freehand outline in unit image space) and `opacity` (absent for 1, at least 5%).
+
+- **Bytes.** `ImageAssets.shared` holds pictures by id: in memory from insertion until a host writes them
+  somewhere and calls `didPersist`, then read from that file (`register(fileURL:for:)`). InkKit never knows
+  where; Nota's `DocumentStore` keeps them in each note package's `assets/`. Because ids are content hashes,
+  a picture placed twice, or pasted into another note, is stored once per note. Clips (copy, paste, stickers)
+  carry the bytes of their pictures.
+- **Display.** Pictures are drawn by the object layer, never on the ink path. A picture is decoded with ImageIO
+  as a thumbnail (orientation applied) at the next power of two above the size it's shown at (from 256 px),
+  and cached (`NSCache`, 192 MB). The canvas never waits for a decode (`ImageDrawing.defersDecoding`): it
+  draws the nearest size already decoded, or a faint stand-in, and redraws when the right size arrives.
+  Thumbnails, copies and screenshots wait for it; PDFs embed pictures at 3 px per point.
+- **Inserting.** The Pen Case's Insert menu (photo icon): Photos (`PhotosPicker`, up to 10, original bytes so
+  HEIC stays HEIC), Take Photo (`UIImagePickerController`; disabled without a camera, as in the simulator),
+  Files (`fileImporter`), Paste Image, and Stickers. Pictures also paste with ⌘V or the selection menu's Paste
+  when the pasteboard holds no lasso clip, and drop onto the page (`UIDropInteraction`; drags from inside the
+  app are ignored). A new picture is a pixel per half point, shrunk to 60% of the visible page at most,
+  centred in view (or where it was dropped), selected with the lasso.
+- **Cropping.** A selected picture's menu: Crop, Freehand Crop and Reset Crop. Cropping hides the picture from
+  the object layer and shows `ImageCropView` over the canvas: the whole picture dimmed, the part kept at full
+  strength, with grips at the corners and edges (rectangle) or an outline drawn around what to keep
+  (freehand). The crop bar switches mode, resets, cancels or finishes; Done is one undoable edit
+  (`replaceObjects`). Cropping changes the frame, never where the picture is, and can be changed again later.
+  A freehand-cropped picture is only hit inside its outline (`PageObject.contains(_:tolerance:)`).
+- **Resize, rotate, layer, opacity.** The object layer's transforms and Arrange; Opacity offers 100, 75, 50
+  and 25%. A corner resizes a selection holding a picture evenly in both directions (by whichever the drag moved
+  further, `SelectionGeometry.transform(…, keepsAspectRatio:)`), so photos never stretch; shapes, ink and text still
+  resize freely. While cropping, drags belong to the crop: the page doesn't pan, zoom, swipe or go back.
+- **Stickers.** Save as Sticker keeps the selection (ink, shapes, text and pictures) as a `SelectionClip` plus
+  a PNG preview in `StickerStore.shared` (`Application Support/InkKit/Stickers`: `Stickers.json` and each
+  sticker's `.clip` and `.png`), so ink stays vector and objects stay editable when placed. The Insert menu's
+  Stickers… shows them; a tap places a copy in the middle of the view, selected; touch and hold to rename or
+  delete.
 
 ### Rendering pipeline
 

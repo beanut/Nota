@@ -704,12 +704,12 @@ private final class KillSwitch: Sendable {
     }
 }
 
-/// A tiny opaque PNG.
-func makePNG() throws -> Data {
+/// A tiny opaque PNG; a different `red` makes a different picture.
+func makePNG(red: CGFloat = 0.2) throws -> Data {
     let ctx = try #require(CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 0,
                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-    ctx.setFillColor(CGColor(srgbRed: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+    ctx.setFillColor(CGColor(srgbRed: red, green: 0.4, blue: 0.8, alpha: 1))
     ctx.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
     let image = try #require(ctx.makeImage())
     let data = NSMutableData()

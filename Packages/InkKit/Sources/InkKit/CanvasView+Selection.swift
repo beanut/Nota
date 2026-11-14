@@ -144,7 +144,8 @@ extension CanvasView {
             updateLassoOverlay()
         case var .transforming(drag)?:
             let t = SelectionGeometry.transform(for: drag.handle, box: drag.box, from: drag.start, to: p,
-                                                minimumSize: 8 / viewTransform.scale)
+                                                minimumSize: 8 / viewTransform.scale,
+                                                keepsAspectRatio: drag.session.objects.contains { $0 is ImageObject })
             guard t != drag.transform else { return }
             drag.transform = t
             lassoSession = .transforming(drag)
