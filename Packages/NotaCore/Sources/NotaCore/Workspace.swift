@@ -100,6 +100,12 @@ public extension LibrarySection {
 // MARK: - Finding notes
 
 public extension Library {
+    /// The notes pages can be copied or moved to from `note`'s page sidebar: every other note not in
+    /// Recently Deleted, most recently modified first, at most `limit` of them.
+    static func notesToSendPagesTo(_ notes: [Note], from note: UUID, limit: Int = 20) -> [Note] {
+        notesToOpenBeside(notes, excluding: [note], limit: limit)
+    }
+
     /// The notes that can be opened beside `open`: every note not in Recently Deleted and not already open,
     /// most recently modified first, at most `limit` of them.
     static func notesToOpenBeside(_ notes: [Note], excluding open: [UUID], limit: Int = 12) -> [Note] {

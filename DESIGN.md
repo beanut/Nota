@@ -111,7 +111,7 @@ To add one: draw it in Figma on the 20 pt grid, export the SVG with `stroke="#1A
 | `.notaPopoverContent()` | Tool Options | Raised background, popover on iPad and iPhone. |
 | `NotaEmptyState` | *(addition)* | Icon on an ink-tint disc, Title 3, one line of guidance, optional primary button. |
 
-InkKit draws the editor's own copies of the Icon Button, Ink Swatch, Divider, Slider Row, floating bar and popover surface (`InkKit/InkChrome.swift`) at the same sizes, coloured by its `InkTheme`. Change a token here and the editor follows; change a size or shape and update `InkChrome.swift` to match.
+InkKit draws the editor's own copies of the Icon Button, Ink Swatch, Divider, Slider Row, floating bar and popover surface (`InkKit/InkChrome.swift`) at the same sizes, coloured by its `InkTheme`. Its page sidebar uses `InkMetrics.panelRadius` (16, as `NotaRadius.panel`) and `paperRadius` (4, as `NotaRadius.paper`) for its thumbnails; Nota maps its pages button (`InkIcon.pages`) to `NotaIcon.grid`. Change a token here and the editor follows; change a size or shape and update `InkChrome.swift` to match.
 
 App-only: `SidebarRow` (Figma Sidebar Row: 44 pt, selected = ink tint), `NoteCard` + `PaperThumbnail` (Figma Note Card and Paper, Letter ratio).
 

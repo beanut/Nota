@@ -132,6 +132,94 @@ public final class InkNotebook: ObservableObject {
         currentPageIndex = index(of: current) ?? 0
     }
 
+    // MARK: Several pages at once
+
+    /// Moves the pages at `offsets` so they sit together, in their order, before the page that was at
+    /// `destination` (`pageCount` for the end), like `Array.move(fromOffsets:toOffset:)`. The page that
+    /// was current stays current.
+    public func movePages(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        let valid = offsets.filteredIndexSet { pages.indices.contains($0) }
+        guard !valid.isEmpty else { return }
+        let current = currentPage.id
+        var reordered = pages
+        reordered.move(fromOffsets: valid, toOffset: min(max(destination, 0), pages.count))
+        guard reordered.map(\.id) != pages.map(\.id) else { return }
+        pages = reordered
+        currentPageIndex = index(of: current) ?? 0
+    }
+
+    /// Puts a copy of each page at `offsets` right after it, and returns the copies. The current page
+    /// stays current.
+    @discardableResult
+    public func duplicatePages(at offsets: IndexSet) -> [CanvasDocument] {
+        let current = currentPage.id
+        var copies: [CanvasDocument] = []
+        // Last first, so inserting a copy never shifts a page still to copy.
+        for i in offsets.reversed() where pages.indices.contains(i) {
+            let copy = pages[i].copy()
+            pages.insert(copy, at: i + 1)
+            copies.insert(copy, at: 0)
+        }
+        currentPageIndex = index(of: current) ?? 0
+        return copies
+    }
+
+    /// Whether the pages at `offsets` can be removed: a notebook keeps at least one page.
+    public func canRemovePages(at offsets: IndexSet) -> Bool {
+        let count = offsets.filter { pages.indices.contains($0) }.count
+        return count > 0 && count < pages.count
+    }
+
+    /// Removes the pages at `offsets` and returns them, unless that would leave no pages. The current
+    /// page stays current if it survives; otherwise the first page after the removed ones is shown.
+    @discardableResult
+    public func removePages(at offsets: IndexSet) -> [CanvasDocument] {
+        let valid = offsets.filteredIndexSet { pages.indices.contains($0) }
+        guard canRemovePages(at: valid) else { return [] }
+        let current = currentPage.id
+        let removedBeforeCurrent = valid.filter { $0 < currentPageIndex }.count
+        let removed = valid.map { pages[$0] }
+        pages.remove(atOffsets: valid)
+        currentPageIndex = index(of: current) ?? min(currentPageIndex - removedBeforeCurrent, pages.count - 1)
+        return removed
+    }
+
+    /// Turns each page at `offsets` a quarter turn, ink and all (see `CanvasDocument.rotate(clockwise:)`).
+    public func rotatePages(at offsets: IndexSet, clockwise: Bool = true) {
+        objectWillChange.send()
+        for i in offsets where pages.indices.contains(i) {
+            pages[i].rotate(clockwise: clockwise)
+        }
+    }
+
+    /// Adds existing pages (copied from another notebook, say) at the end, without changing the current
+    /// page. Pages already in the notebook are skipped.
+    public func appendPages(_ newPages: [CanvasDocument]) {
+        let fresh = newPages.filter { index(of: $0.id) == nil }
+        guard !fresh.isEmpty else { return }
+        pages.append(contentsOf: fresh)
+    }
+
+    // MARK: Writing off the end
+
+    /// How far down the last page ink has to reach (as a fraction of its height) for a new page to be
+    /// added after it in continuous scrolling.
+    public static let autoAddPageThreshold: CGFloat = 0.85
+
+    /// In continuous scrolling, writing near the bottom of the last page adds a blank page after it, so
+    /// there's always somewhere to carry on. Call with the bounds (canvas space) of ink just committed on
+    /// `page`; returns the page added, if any. The current page doesn't change.
+    @discardableResult
+    public func addPageIfWritingReachedEnd(of page: CanvasDocument, inkBounds: CGRect) -> CanvasDocument? {
+        guard page.id == pages.last?.id, !inkBounds.isNull,
+              inkBounds.maxY >= page.pageSize.height * Self.autoAddPageThreshold
+        else { return nil }
+        let newPage = CanvasDocument(pageSize: page.pageSize, template: page.template,
+                                     templateArtwork: page.templateArtwork)
+        pages.append(newPage)
+        return newPage
+    }
+
     /// Changes the size of the page at `index`; existing ink keeps its position.
     public func setPageSize(_ size: PageSize, forPageAt index: Int) {
         guard pages.indices.contains(index) else { return }

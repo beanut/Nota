@@ -57,6 +57,31 @@ struct DocumentStoreTests {
         #expect(reopened.pages.map(\.template) == [.preset(.dots), .preset(.dots)])
     }
 
+    @Test func pagesAddedFromAnotherNoteAreSavedWithTheirInk() async {
+        let store = DocumentStore(library: library)
+        let source = Note(title: "Source"), target = Note(title: "Target")
+        store.create(source, size: .a5, template: .preset(.dots))
+        store.create(target, size: .letter, template: .preset(.collegeRuled))
+        let sourceNotebook = await store.notebook(for: source)
+        draw(on: sourceNotebook.pages[0])
+        await store.flush()
+
+        // The target isn't open in an editor: it's loaded, given the pages and saved.
+        let copies = sourceNotebook.pages.map { $0.copy() }
+        await store.addPages(copies, to: target)
+        #expect(target.pageCount == 2)
+        await store.flush()
+
+        let reopened = await relaunch().notebook(for: target)
+        #expect(reopened.pageCount == 2)
+        #expect(reopened.pages[1].id == copies[0].id)
+        #expect(reopened.pages[1].pageSize == .a5)
+        #expect(reopened.pages[1].template == .preset(.dots))
+        #expect(reopened.pages[1].strokeCount == 1)
+        // The source keeps its page: moving is the editor taking it out afterwards.
+        #expect(sourceNotebook.pageCount == 1)
+    }
+
     @Test func templateChangedInTheEditorIsSavedPerPage() async {
         let store = DocumentStore(library: library)
         let note = Note(title: "Test")

@@ -117,8 +117,21 @@ struct PenCase: View {
             Button { controller.resetZoom() } label: {
                 Label("Fit Page · \(Int((controller.zoom * 100).rounded()))%", systemImage: "arrow.up.left.and.arrow.down.right")
             }
-            Toggle(isOn: $controller.zoomWindowVisible) {
-                Label("Zoom Window", systemImage: "rectangle.and.text.magnifyingglass")
+            if controller.pageLayout == .paged || !controller.allowsContinuousLayout {
+                Toggle(isOn: $controller.zoomWindowVisible) {
+                    Label("Zoom Window", systemImage: "rectangle.and.text.magnifyingglass")
+                }
+            }
+            if controller.allowsContinuousLayout {
+                Picker(selection: $controller.pageLayout) {
+                    ForEach(PageLayoutMode.allCases) { mode in
+                        Label(mode.displayName, systemImage: mode == .paged ? "arrow.left.and.right" : "arrow.up.and.down")
+                            .tag(mode)
+                    }
+                } label: {
+                    Label("Scroll Direction", systemImage: "arrow.up.and.down.text.horizontal")
+                }
+                .pickerStyle(.menu)
             }
             Button { controller.insertPlaceholderObject() } label: {
                 Label("Add Test Object", systemImage: "square.on.square.dashed")

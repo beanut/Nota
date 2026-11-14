@@ -57,8 +57,24 @@ final class CanvasController: ObservableObject {
             guard pencilSettings != oldValue else { return }
             pencilSettings.save(to: settingsStore)
             canvas?.pencilSettingsDidChange()
+            continuousHost?.pencilSettingsDidChange()
         }
     }
+
+    /// Pages one at a time with sideways swipes, or one continuous vertical column. Saved to
+    /// `UserDefaults` like `pencilSettings`, so it's the same in every editor.
+    @Published var pageLayout: PageLayoutMode {
+        didSet {
+            guard pageLayout != oldValue else { return }
+            pageLayout.save(to: settingsStore)
+            if pageLayout == .continuous {
+                zoomWindowVisible = false // the zoom window works on one fitted page
+            }
+        }
+    }
+
+    /// False in a single-page editor, which has nothing to scroll through.
+    @Published var allowsContinuousLayout = true
 
     private let settingsStore: UserDefaults
     /// Saved pens, quick sizes and colours, custom brushes, palettes and recent colours, shared by every
@@ -85,6 +101,7 @@ final class CanvasController: ObservableObject {
         let penTray = penTray ?? .shared
         self.penTray = penTray
         pencilSettings = PencilSettings.load(from: settingsStore)
+        pageLayout = PageLayoutMode.load(from: settingsStore)
         // Views reading quick colours, sizes and pens through the controller redraw when the tray changes.
         penTrayObservation = penTray.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
@@ -122,7 +139,10 @@ final class CanvasController: ObservableObject {
     /// The lines on a page, for the zoom window to follow. Set by the editor; nil uses the page template's lines.
     var writingLines: ((CanvasDocument) -> WritingLines?)?
 
+    /// The page the tools, undo and selection act on. In continuous scrolling, the page being worked on.
     weak var canvas: CanvasView?
+    /// The continuous-scrolling view, while the editor shows one.
+    weak var continuousHost: ContinuousCanvasView?
     /// The editor's theme; its ink presets colour new strokes. Set by the canvas from the environment.
     var theme = InkTheme.standard
     /// Called when the canvas is swiped sideways to turn the page. Set by the editor that owns the pages.
@@ -245,7 +265,21 @@ final class CanvasController: ObservableObject {
     }
 
     func resetZoom() {
-        canvas?.resetView()
+        if let continuousHost {
+            continuousHost.resetZoom()
+        } else {
+            canvas?.resetView()
+        }
+    }
+
+    /// A page in continuous scrolling is about to take ink: it becomes the page being worked on.
+    func embeddedCanvasWillInk(_ canvas: CanvasView) {
+        continuousHost?.activate(canvas)
+    }
+
+    /// Ink (not an eraser stroke) was committed on `document`; `bounds` are its canvas-space bounds.
+    func inkDidCommit(on document: CanvasDocument, bounds: CGRect) {
+        continuousHost?.inkDidCommit(on: document, bounds: bounds)
     }
 
     func deleteSelection() {
@@ -536,7 +570,10 @@ final class CanvasController: ObservableObject {
 
     /// The colour on screen at `point` in canvas-view coordinates (paper, template and ink as shown).
     func sampleColor(at point: CGPoint) -> PenColor? {
-        canvas?.sampledColor(at: point)
+        if let continuousHost {
+            return continuousHost.sampledColor(at: point)
+        }
+        return canvas?.sampledColor(at: point)
     }
 
     /// Ends eyedropper mode, using `color` if one was picked.

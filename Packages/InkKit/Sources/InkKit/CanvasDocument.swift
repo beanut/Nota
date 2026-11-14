@@ -536,6 +536,46 @@ public final class CanvasDocument: Identifiable {
         }
     }
 
+    // MARK: Whole-page operations
+
+    /// A new page (with a new id) holding this page's size, template, background, objects and ink, with an
+    /// empty undo history. It shares this page's cached committed layer, so it opens as quickly.
+    public func copy() -> CanvasDocument {
+        let page = CanvasDocument(pageSize: pageSize, template: template, templateArtwork: templateArtwork)
+        page.strokes = strokes
+        page.preservedRecords = preservedRecords
+        page.objects = objects
+        page.revision = revision
+        page.objectsRevision = objectsRevision
+        page.committedRaster = committedRaster
+        return page
+    }
+
+    /// Turns the page a quarter turn, ink and objects and all, so a portrait page becomes landscape. The undo
+    /// history is cleared: it describes the page the way it was.
+    public func rotate(clockwise: Bool = true) {
+        let width = pageSize.width, height = pageSize.height
+        // Clockwise, the top-left corner goes to the top-right: (x, y) → (height − y, x).
+        let t = clockwise
+            ? CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: height, ty: 0)
+            : CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: width)
+        for i in strokes.indices {
+            strokes[i] = strokes[i].applying(t)
+        }
+        for i in objects.indices where PageObjectKinds.isSelectable(objects[i]) {
+            objects[i] = objects[i].applying(t)
+        }
+        undoStack.removeAll()
+        redoStack.removeAll()
+        lastReshapedIDs = Set(strokes.map(\.id))
+        revision += 1
+        if !objects.isEmpty {
+            objectsRevision += 1
+        }
+        pageSize = PageSize(width: height, height: width, name: pageSize.name)
+        notify(.edited)
+    }
+
     private func push(_ command: Command, reshaping reshaped: Set<UUID> = []) {
         undoStack.append(command)
         redoStack.removeAll()
