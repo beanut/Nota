@@ -1,7 +1,12 @@
 import CoreGraphics
 import Foundation
 
-/// One page: its paper size and template, stroke list and undo/redo command stack.
+/// One page: its paper size and template, its objects and strokes, and one undo/redo command stack for both.
+///
+/// The page is drawn in layers: the paper and template, then `objects` (shapes, text, images, tape; see
+/// `PageObject`) in `zIndex` order, then the ink, then the selection. Edits to either go on the same
+/// stack, so one undo takes back whichever came last, and a lasso transform of ink and objects together
+/// is one step.
 @MainActor
 public final class CanvasDocument: Identifiable {
     public let id: UUID
@@ -61,11 +66,19 @@ public final class CanvasDocument: Identifiable {
         notifyTemplateChange()
     }
 
-    /// A page holding the ink of a `.ink` file, with an empty undo history. The page takes the file's id.
-    public convenience init(file: InkPageFile, pageSize: PageSize) {
+    /// A page holding the ink of a `.ink` file and the objects of its objects file (nil: none), with an
+    /// empty undo history. The page takes the ink file's id.
+    public convenience init(file: InkPageFile, objects: PageObjectsFile? = nil, pageSize: PageSize) {
         self.init(pageSize: pageSize, id: file.pageID)
         strokes = file.strokes
         preservedRecords = file.unknownRecords
+        self.objects = objects?.objects ?? []
+    }
+
+    /// The page's objects as they are now, ready to encode and write to disk (empty: no file needed).
+    /// Objects of kinds this version doesn't know go back out as they came in.
+    public var objectsFile: PageObjectsFile {
+        PageObjectsFile(pageID: id, objects: objects)
     }
 
     /// The page's ink as it is now, ready to encode (off the main actor if need be) and write to disk.
@@ -96,9 +109,21 @@ public final class CanvasDocument: Identifiable {
     /// filling every stroke again. Dropped as soon as the page changes.
     var committedRaster: CommittedRaster?
 
+    /// Goes up whenever the page's objects change (each edit, undo and redo that touches them). Separate
+    /// from `revision`, which is the ink's: objects aren't in the committed ink layer, so changing one
+    /// doesn't drop it.
+    public private(set) var objectsRevision = 0
+
     /// Number of strokes on the page (including pixel-eraser strokes).
     public var strokeCount: Int {
         strokes.count
+    }
+
+    /// The page's objects, lowest `zIndex` first. All of them are drawn under the ink.
+    public private(set) var objects: [any PageObject] = []
+
+    public var objectCount: Int {
+        objects.count
     }
 
     struct Removal {
@@ -114,12 +139,32 @@ public final class CanvasDocument: Identifiable {
         let pieces: [Stroke]
     }
 
+    struct ObjectRemoval {
+        let index: Int
+        let object: any PageObject
+    }
+
+    /// Strokes and objects as they were before a transform, and the transform. Undo puts the saved
+    /// values back exactly; redo applies the transform to them again, so neither drifts.
+    struct Transformation {
+        let transform: CGAffineTransform
+        let strokes: [Stroke]
+        let objects: [any PageObject]
+
+        var strokeIDs: Set<UUID> {
+            Set(strokes.map(\.id))
+        }
+    }
+
     enum Command {
         case add(Stroke, splits: [Split]) // splits: strokes the added pixel-eraser stroke cut apart
-        case erase([Removal]) // in removal order; undo re-inserts in reverse
-        case clear([Stroke])
+        /// In removal order; undo re-inserts in reverse. Deleting a selection removes objects too.
+        case erase([Removal], objects: [ObjectRemoval])
+        case clear([Stroke], objects: [any PageObject])
         case replace(before: [Stroke], after: [Stroke]) // a standard erase: strokes cut into what's left
-        case move(Set<UUID>, CGPoint) // translate strokes by a canvas-space delta
+        /// Move, scale or rotate strokes and objects (the lasso and the selection handles).
+        case transform(Transformation)
+        case addObject(any PageObject)
     }
 
     private(set) var strokes: [Stroke] = []
@@ -132,6 +177,8 @@ public final class CanvasDocument: Identifiable {
         case edited
         /// A late estimated-property update refined one committed stroke's points.
         case refined
+        /// Only objects changed (added, removed, moved), not the ink; the undo state may have changed.
+        case objectsEdited
     }
 
     /// A view showing the page. The same page can be on screen more than once (a note open in two
@@ -198,8 +245,8 @@ public final class CanvasDocument: Identifiable {
         }
     }
 
-    /// Strokes whose points changed in place in the most recent change (moved by a lasso, its undo or
-    /// redo, or refined by a late estimate), so a view can invalidate their cached geometry.
+    /// Strokes whose points changed in place in the most recent change (transformed by the lasso, its undo
+    /// or redo, or refined by a late estimate), so a view can invalidate their cached geometry.
     private(set) var lastReshapedIDs: Set<UUID> = []
     var canUndo: Bool {
         !undoStack.isEmpty
@@ -227,9 +274,37 @@ public final class CanvasDocument: Identifiable {
         return removed
     }
 
-    func recordErase(_ removals: [Removal]) {
-        guard !removals.isEmpty else { return }
-        push(.erase(removals))
+    func recordErase(_ removals: [Removal], objects objectRemovals: [ObjectRemoval] = []) {
+        guard !removals.isEmpty || !objectRemovals.isEmpty else { return }
+        push(.erase(removals, objects: objectRemovals))
+    }
+
+    /// Removes objects immediately without recording a command; pass them to `recordErase`.
+    func removeObjects(ids: Set<UUID>) -> [ObjectRemoval] {
+        var removed: [ObjectRemoval] = []
+        for i in objects.indices.reversed() where ids.contains(objects[i].id) {
+            removed.append(ObjectRemoval(index: i, object: objects.remove(at: i)))
+        }
+        return removed
+    }
+
+    /// Deletes the selected strokes and objects as one undoable edit.
+    func delete(_ selection: PageSelection) {
+        recordErase(remove(ids: selection.strokeIDs), objects: removeObjects(ids: selection.objectIDs))
+    }
+
+    /// Puts `object` on the page above every other object, as one undoable edit. Its `zIndex` is set to
+    /// the top of the stack.
+    public func addObject(_ object: any PageObject) {
+        var object = object
+        object.zIndex = (objects.last?.zIndex ?? -1) + 1
+        objects.append(object)
+        push(.addObject(object))
+    }
+
+    /// The object with this id, if it's on the page.
+    public func object(id: UUID) -> (any PageObject)? {
+        objects.first { $0.id == id }
     }
 
     /// Replaces a stroke, in place, with what's left of it after a standard erase (none if it's gone),
@@ -246,26 +321,86 @@ public final class CanvasDocument: Identifiable {
         push(.replace(before: before, after: strokes))
     }
 
-    /// Translates strokes immediately (live dragging) without recording a command.
-    func translate(ids: Set<UUID>, by d: CGPoint) {
-        for i in strokes.indices where ids.contains(strokes[i].id) {
-            for j in strokes[i].points.indices {
-                strokes[i].points[j].location.x += d.x
-                strokes[i].points[j].location.y += d.y
+    /// A transform in progress (dragging the selection or one of its handles): what's being transformed,
+    /// as it was when the drag began.
+    struct TransformSession {
+        let strokes: [Stroke]
+        let objects: [any PageObject]
+
+        var selection: PageSelection {
+            PageSelection(strokeIDs: Set(strokes.map(\.id)), objectIDs: Set(objects.map(\.id)))
+        }
+    }
+
+    /// Starts transforming the selected strokes and objects (pixel-eraser strokes and objects of unknown
+    /// kinds are left out). Follow with `previewTransform` while dragging and `commitTransform` or
+    /// `cancelTransform` at the end.
+    func beginTransform(_ selection: PageSelection) -> TransformSession {
+        TransformSession(strokes: strokes.filter { selection.strokeIDs.contains($0.id) && !$0.brush.erases },
+                         objects: objects.filter {
+                             selection.objectIDs.contains($0.id) && PageObjectKinds.isSelectable($0)
+                         })
+    }
+
+    /// Shows the session's strokes and objects transformed by `t` (from where they were when it began),
+    /// without recording a command or telling observers: the view doing the drag redraws them itself.
+    func previewTransform(_ session: TransformSession, by t: CGAffineTransform) {
+        place(session.strokes.map { $0.applying(t) }, session.objects.map { $0.applying(t) })
+    }
+
+    /// Ends the session with `t` applied, as one undoable edit (none if `t` is the identity).
+    func commitTransform(_ session: TransformSession, by t: CGAffineTransform) {
+        guard !t.isIdentity, !session.strokes.isEmpty || !session.objects.isEmpty else {
+            cancelTransform(session)
+            return
+        }
+        let transformation = Transformation(transform: t, strokes: session.strokes, objects: session.objects)
+        apply(transformation)
+        push(.transform(transformation), reshaping: transformation.strokeIDs)
+    }
+
+    /// Ends the session with everything back where it was.
+    func cancelTransform(_ session: TransformSession) {
+        place(session.strokes, session.objects)
+    }
+
+    /// Transforms strokes and objects by `t` as one undoable edit.
+    func transform(_ selection: PageSelection, by t: CGAffineTransform) {
+        commitTransform(beginTransform(selection), by: t)
+    }
+
+    private func apply(_ transformation: Transformation) {
+        place(transformation.strokes.map { $0.applying(transformation.transform) },
+              transformation.objects.map { $0.applying(transformation.transform) })
+    }
+
+    /// Replaces strokes and objects with these versions of them (matched by id), in place.
+    private func place(_ newStrokes: [Stroke], _ newObjects: [any PageObject]) {
+        if !newStrokes.isEmpty {
+            let byID = Dictionary(newStrokes.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
+            for i in strokes.indices {
+                if let replacement = byID[strokes[i].id] {
+                    strokes[i] = replacement
+                }
+            }
+        }
+        if !newObjects.isEmpty {
+            let byID = Dictionary(newObjects.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
+            for i in objects.indices {
+                if let replacement = byID[objects[i].id] {
+                    objects[i] = replacement
+                }
             }
         }
     }
 
-    func recordMove(ids: Set<UUID>, by d: CGPoint) {
-        guard !ids.isEmpty, d != .zero else { return }
-        push(.move(ids, d), reshaping: ids)
-    }
-
+    /// Removes every stroke and object, as one undoable edit.
     func clear() {
-        guard !strokes.isEmpty else { return }
-        let saved = strokes
+        guard !strokes.isEmpty || !objects.isEmpty else { return }
+        let saved = strokes, savedObjects = objects
         strokes.removeAll()
-        push(.clear(saved))
+        objects.removeAll()
+        push(.clear(saved, objects: savedObjects))
     }
 
     /// Applies a late estimated-property update (force/tilt refinement) to a committed stroke.
@@ -289,24 +424,30 @@ public final class CanvasDocument: Identifiable {
                 redoStack.append(.add(strokes.remove(at: i), splits: splits))
                 revert(splits)
             }
-        case let .erase(removals):
+        case let .erase(removals, objectRemovals):
             for r in removals.reversed() {
                 strokes.insert(r.stroke, at: min(r.index, strokes.count))
             }
-            redoStack.append(.erase(removals))
-        case let .clear(saved):
+            for r in objectRemovals.reversed() {
+                objects.insert(r.object, at: min(r.index, objects.count))
+            }
+            redoStack.append(command)
+        case let .clear(saved, savedObjects):
             strokes = saved
-            redoStack.append(.clear(saved))
-        case let .replace(before, after):
+            objects = savedObjects
+            redoStack.append(command)
+        case let .replace(before, _):
             strokes = before
-            redoStack.append(.replace(before: before, after: after))
-        case let .move(ids, d):
-            translate(ids: ids, by: CGPoint(x: -d.x, y: -d.y))
-            lastReshapedIDs = ids
-            redoStack.append(.move(ids, d))
+            redoStack.append(command)
+        case let .transform(transformation):
+            place(transformation.strokes, transformation.objects)
+            lastReshapedIDs = transformation.strokeIDs
+            redoStack.append(command)
+        case let .addObject(object):
+            objects.removeAll { $0.id == object.id }
+            redoStack.append(command)
         }
-        revision += 1
-        notify(.edited)
+        announce(command)
         return true
     }
 
@@ -319,23 +460,57 @@ public final class CanvasDocument: Identifiable {
             apply(splits)
             strokes.append(stroke)
             undoStack.append(.add(stroke, splits: splits))
-        case let .erase(removals):
+        case let .erase(removals, objectRemovals):
             let again = remove(ids: Set(removals.map(\.stroke.id)))
-            undoStack.append(.erase(again))
+            let againObjects = removeObjects(ids: Set(objectRemovals.map(\.object.id)))
+            undoStack.append(.erase(again, objects: againObjects))
         case .clear:
-            undoStack.append(.clear(strokes))
+            undoStack.append(.clear(strokes, objects: objects))
             strokes.removeAll()
-        case let .replace(before, after):
+            objects.removeAll()
+        case let .replace(_, after):
             strokes = after
-            undoStack.append(.replace(before: before, after: after))
-        case let .move(ids, d):
-            translate(ids: ids, by: d)
-            lastReshapedIDs = ids
-            undoStack.append(.move(ids, d))
+            undoStack.append(command)
+        case let .transform(transformation):
+            apply(transformation)
+            lastReshapedIDs = transformation.strokeIDs
+            undoStack.append(command)
+        case let .addObject(object):
+            objects.append(object)
+            objects = PageObjectsFile.stacked(objects)
+            undoStack.append(command)
         }
-        revision += 1
-        notify(.edited)
+        announce(command)
         return true
+    }
+
+    /// What a command changes: the ink, the objects or both.
+    private func touches(_ command: Command) -> (ink: Bool, objects: Bool) {
+        switch command {
+        case .add, .replace: (true, false)
+        case let .erase(removals, objectRemovals): (!removals.isEmpty, !objectRemovals.isEmpty)
+        case let .clear(saved, savedObjects): (!saved.isEmpty, !savedObjects.isEmpty)
+        case let .transform(t): (!t.strokes.isEmpty, !t.objects.isEmpty)
+        case .addObject: (false, true)
+        }
+    }
+
+    /// Bumps the revisions a command's undo or redo changed and tells the observers.
+    private func announce(_ command: Command) {
+        let changed = touches(command)
+        bump(ink: changed.ink, objects: changed.objects)
+    }
+
+    private func bump(ink: Bool, objects changedObjects: Bool) {
+        if changedObjects {
+            objectsRevision += 1
+        }
+        if ink || !changedObjects {
+            revision += 1
+            notify(.edited)
+        } else {
+            notify(.objectsEdited)
+        }
     }
 
     /// Highest index first, so replacing one stroke never shifts the index of another still to apply.
@@ -365,7 +540,6 @@ public final class CanvasDocument: Identifiable {
         undoStack.append(command)
         redoStack.removeAll()
         lastReshapedIDs = reshaped
-        revision += 1
-        notify(.edited)
+        announce(command)
     }
 }

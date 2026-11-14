@@ -61,12 +61,13 @@ struct CanvasDocumentObserverTests {
         #expect(try #require(doc.strokes.first).points[0].force == 0.9)
     }
 
-    @Test func movesReportTheStrokesTheyMoved() {
+    @Test func transformsReportTheStrokesTheyMoved() {
         let doc = CanvasDocument()
         let stroke = makeStroke(at: CGPoint(x: 10, y: 10))
         doc.add(stroke)
-        doc.translate(ids: [stroke.id], by: CGPoint(x: 5, y: 0))
-        doc.recordMove(ids: [stroke.id], by: CGPoint(x: 5, y: 0))
+        let session = doc.beginTransform(PageSelection(strokeIDs: [stroke.id]))
+        doc.previewTransform(session, by: CGAffineTransform(translationX: 5, y: 0))
+        doc.commitTransform(session, by: CGAffineTransform(translationX: 5, y: 0))
         #expect(doc.lastReshapedIDs == [stroke.id])
 
         // A later edit that moves nothing clears them, so another view doesn't redo work for them.
@@ -74,7 +75,7 @@ struct CanvasDocumentObserverTests {
         #expect(doc.lastReshapedIDs.isEmpty)
 
         doc.undo() // the added stroke
-        doc.undo() // the move
+        doc.undo() // the transform
         #expect(doc.lastReshapedIDs == [stroke.id])
     }
 

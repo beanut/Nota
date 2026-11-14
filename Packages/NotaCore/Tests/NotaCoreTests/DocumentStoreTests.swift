@@ -332,6 +332,154 @@ struct DocumentStoreTests {
         #expect(packageFiles(of: note).contains { $0.hasPrefix(damaged.lastPathComponent + ".damaged-") })
     }
 
+    // MARK: Objects
+
+    private func objectsURL(of page: CanvasDocument, in note: Note) -> URL {
+        NotePackage.objectsURL(for: page.id, noteID: note.id, in: library)
+    }
+
+    @Test func objectsAreMovedResizedRotatedUndoneAndPersistedAlongsideInk() async throws {
+        let store = DocumentStore(library: library)
+        let note = Note(title: "Test")
+        store.create(note, size: .letter, template: .noteDefault)
+        let page = await store.notebook(for: note).pages[0]
+        draw(on: page)
+        let object = page.addTestObject(frame: CGRect(x: 100, y: 100, width: 200, height: 120))
+        let move = CGAffineTransform(translationX: 40, y: 10)
+        let resize = CGAffineTransform(scaleX: 1.5, y: 0.75)
+        let rotate = CGAffineTransform(rotationAngle: .pi / 8)
+        page.transformForTesting(objectIDs: [object.id], by: move)
+        page.transformForTesting(objectIDs: [object.id], by: resize)
+        page.transformForTesting(objectIDs: [object.id], includingInk: true, by: rotate)
+        page.undoForTesting() // the rotation
+        page.undoForTesting() // the resize
+        page.redoForTesting()
+        let placed = move.concatenating(resize)
+        #expect(page.object(id: object.id)?.transform == placed)
+        store.save(note)
+        await store.flush()
+        #expect(FileManager.default.fileExists(atPath: objectsURL(of: page, in: note).path))
+
+        let reopened = try #require(await relaunch().notebook(for: note).pages.first)
+        #expect(reopened.strokeCount == 1)
+        #expect(reopened.inkFile.encoded() == page.inkFile.encoded())
+        let loaded = try #require(reopened.object(id: object.id) as? PlaceholderObject)
+        #expect(loaded.frame == object.frame)
+        #expect(loaded.transform == placed)
+        #expect(loaded.color == object.color)
+        #expect(try reopened.objectsFile.encoded() == page.objectsFile.encoded())
+    }
+
+    @Test func removingTheLastObjectRemovesItsFile() async {
+        let store = DocumentStore(library: library)
+        let note = Note(title: "Test")
+        store.create(note, size: .letter, template: .noteDefault)
+        let page = await store.notebook(for: note).pages[0]
+        page.addTestObject(frame: CGRect(x: 0, y: 0, width: 50, height: 50))
+        store.save(note)
+        await store.flush()
+        #expect(FileManager.default.fileExists(atPath: objectsURL(of: page, in: note).path))
+
+        page.undoForTesting()
+        store.save(note)
+        await store.flush()
+        #expect(!FileManager.default.fileExists(atPath: objectsURL(of: page, in: note).path))
+        #expect(await relaunch().notebook(for: note).pages[0].objectCount == 0)
+    }
+
+    @Test func inkOnlyNotesHaveNoObjectsFiles() async {
+        let store = DocumentStore(library: library)
+        let note = Note(title: "Test")
+        store.create(note, size: .letter, template: .noteDefault)
+        let page = await store.notebook(for: note).pages[0]
+        draw(on: page)
+        store.save(note)
+        await store.flush()
+        // Exactly the files a note had before objects existed, so older notes and older apps are unaffected.
+        #expect(packageFiles(of: note).filter { $0.hasSuffix(".json") } == ["manifest.json"])
+        let reopened = await relaunch().notebook(for: note).pages[0]
+        #expect(reopened.objectCount == 0)
+        #expect(reopened.strokeCount == 1)
+    }
+
+    @Test func changingOnlyObjectsRewritesOnlyTheObjectsFile() async {
+        let writes = StepLog()
+        let store = DocumentStore(library: library, files: PackageFiles { writes.record($0) })
+        let note = Note(title: "Test")
+        store.create(note, size: .letter, template: .noteDefault)
+        let page = await store.notebook(for: note).pages[0]
+        draw(on: page)
+        let object = page.addTestObject(frame: CGRect(x: 0, y: 0, width: 50, height: 50))
+        store.save(note)
+        await store.flush()
+
+        writes.reset()
+        page.transformForTesting(objectIDs: [object.id], by: CGAffineTransform(translationX: 10, y: 0))
+        store.save(note)
+        await store.flush()
+        let replaced = writes.steps.compactMap { step -> String? in
+            guard case let .replace(url) = step else { return nil }
+            return url.lastPathComponent
+        }
+        #expect(replaced == ["\(page.id.uuidString).json", "manifest.json"])
+    }
+
+    @Test func anUnreadableObjectsFileIsSetAsideNotOverwritten() async throws {
+        let store = DocumentStore(library: library)
+        let note = Note(title: "Test")
+        store.create(note, size: .letter, template: .noteDefault)
+        let page = await store.notebook(for: note).pages[0]
+        draw(on: page)
+        page.addTestObject(frame: CGRect(x: 0, y: 0, width: 50, height: 50))
+        store.save(note)
+        await store.flush()
+
+        let damaged = objectsURL(of: page, in: note)
+        try Data(#"{"formatVersion": 99, "objects": []}"#.utf8).write(to: damaged) // from a much newer app
+        let reopenedStore = relaunch()
+        let reopened = await reopenedStore.notebook(for: note).pages[0]
+        #expect(reopened.objectCount == 0)
+        #expect(reopened.strokeCount == 1) // the ink still opens
+        #expect(packageFiles(of: note).contains { $0.hasPrefix(damaged.lastPathComponent + ".damaged-") })
+
+        reopened.addTestObject(frame: CGRect(x: 10, y: 10, width: 5, height: 5))
+        reopenedStore.save(note)
+        await reopenedStore.flush()
+        #expect(await relaunch().notebook(for: note).pages[0].objectCount == 1)
+        #expect(packageFiles(of: note).contains { $0.hasPrefix(damaged.lastPathComponent + ".damaged-") })
+    }
+
+    @Test func removedPagesTakeTheirObjectsFileWithThem() async {
+        let store = DocumentStore(library: library)
+        let note = Note(title: "Test")
+        store.create(note, size: .letter, template: .noteDefault)
+        let notebook = await store.notebook(for: note)
+        let second = notebook.addPage()
+        second.addTestObject(frame: CGRect(x: 0, y: 0, width: 50, height: 50))
+        store.save(note)
+        await store.flush()
+        #expect(FileManager.default.fileExists(atPath: objectsURL(of: second, in: note).path))
+
+        notebook.removePage(at: 1)
+        store.save(note)
+        await store.flush()
+        #expect(!FileManager.default.fileExists(atPath: objectsURL(of: second, in: note).path))
+    }
+
+    @Test func duplicateCopiesObjects() async throws {
+        let store = DocumentStore(library: library)
+        let note = Note(title: "Test")
+        store.create(note, size: .letter, template: .noteDefault)
+        let page = await store.notebook(for: note).pages[0]
+        let object = page.addTestObject(frame: CGRect(x: 0, y: 0, width: 50, height: 50))
+        let copy = Note(title: "Copy")
+        store.duplicate(note, as: copy)
+        await store.flush()
+        let copied = try #require(await relaunch().notebook(for: copy).pages.first)
+        #expect(copied.object(id: object.id) != nil)
+        #expect(copied.objectsFile.pageID == copied.id)
+    }
+
     // MARK: Library changes
 
     @Test func duplicateCopiesInkAndCustomBackgrounds() async throws {

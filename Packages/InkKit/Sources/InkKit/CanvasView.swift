@@ -4,10 +4,13 @@ import UIKit
 /// Raw-touch drawing surface.
 ///
 /// Layers, bottom to top:
-///  1. `committedLayer` – cached bitmap of finished strokes rasterized asynchronously on `renderQueue`
+///  1. `pageLayer` and `templateView` – the paper and its template (the background).
+///  2. `objectLayer` – the page's objects (see `PageObject`), drawn as vectors at the current transform.
+///  3. `committedLayer` – cached bitmap of finished strokes rasterized asynchronously on `renderQueue`
 ///     via coalesced, non-blocking full re-renders and incremental commits.
-///  2. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
+///  4. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
+///  5. `lassoOverlayView` – the lasso, the selection box and its handles (the overlay).
 final class CanvasView: UIView {
     /// The page, the desk around it and the lasso's accent, from the editor's `InkTheme` (see `apply(_:)`).
     private(set) var paperColor = InkTheme.standard.paper
@@ -109,15 +112,26 @@ final class CanvasView: UIView {
     var eraseSession: EraseSession?
 
     /// Lasso state
-    private enum LassoSession {
+    enum LassoSession {
         case drawing([CGPoint]) // canvas-space gesture path
-        case moving(last: CGPoint, total: CGPoint) // dragging the current selection
+        case transforming(SelectionDrag) // dragging the selection or one of its handles
     }
 
-    private var lassoPending = false // lasso touch began, first sample not yet seen
-    private var lassoSession: LassoSession?
-    private var selection = Set<UUID>()
-    private var selectionBounds = CGRect.null // canvas space
+    /// A drag of the selection: which handle, from where, the box and the strokes and objects as they
+    /// were when it began, and the transform so far (from `start` to the latest sample).
+    struct SelectionDrag {
+        let handle: SelectionHandle
+        let start: CGPoint
+        let box: SelectionBox
+        let session: CanvasDocument.TransformSession
+        var transform: CGAffineTransform = .identity
+    }
+
+    var lassoPending = false // lasso touch began, first sample not yet seen
+    var lassoSession: LassoSession?
+    var selection = PageSelection.empty
+    var selectionBox: SelectionBox? // canvas space; nil when nothing is selected
+    let objectLayer = ObjectLayerView()
     private let lassoOverlayView = LassoOverlayView()
     private struct PointRef { let strokeID: UUID; let index: Int }
     private var pendingEstimates: [NSNumber: PointRef] = [:]
@@ -190,6 +204,7 @@ final class CanvasView: UIView {
         pageLayer.shadowOffset = CGSize(width: 0, height: 2)
         layer.addSublayer(pageLayer)
         addSubview(templateView)
+        addSubview(objectLayer)
 
         inkClipView.isUserInteractionEnabled = false
         inkClipView.backgroundColor = .clear
@@ -199,7 +214,9 @@ final class CanvasView: UIView {
         committedLayer.anchorPoint = .zero
         inkClipView.layer.addSublayer(committedLayer)
 
-        templateView.provideBackdrop(for: liveView)
+        templateView.provideBackdrop(for: liveView) { [weak self] ctx, transform, rect in
+            self?.objectLayer.drawObjects(at: transform, viewRect: rect, in: ctx)
+        }
         liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
         inkClipView.addSubview(liveView)
 
@@ -216,10 +233,12 @@ final class CanvasView: UIView {
         }, onPageSizeChange: { [weak self] in
             self?.resetView()
             self?.applyPaper()
+            self?.refreshObjects()
         }, onTemplateChange: { [weak self] in
             self?.applyPaper()
         })
         applyPaper()
+        refreshObjects()
     }
 
     @available(*, unavailable)
@@ -285,6 +304,7 @@ final class CanvasView: UIView {
         super.layoutSubviews()
         inkClipView.frame = bounds
         templateView.frame = bounds
+        objectLayer.frame = bounds
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
         layoutZoomPanel()
@@ -627,13 +647,33 @@ final class CanvasView: UIView {
     func dropOrphanedPendingStrokes() {
         let strokeIDs = Set(document.strokes.map(\.id))
         pending.removeAll { !strokeIDs.contains($0.live.stroke.id) }
-        if !selection.isEmpty, !selection.isSubset(of: strokeIDs) {
-            selection.formIntersection(strokeIDs)
-            updateSelectionBounds()
-        }
+        pruneSelection(strokeIDs: strokeIDs)
         zoomHeld.removeAll { !strokeIDs.contains($0.stroke.id) }
         invalidateAllLive()
         updateLassoOverlay()
+    }
+
+    /// Drops strokes and objects that are no longer on the page from the selection.
+    func pruneSelection(strokeIDs: Set<UUID>? = nil) {
+        guard !selection.isEmpty else { return }
+        let strokeIDs = strokeIDs ?? Set(document.strokes.map(\.id))
+        let objectIDs = Set(document.objects.map(\.id))
+        guard !selection.strokeIDs.isSubset(of: strokeIDs) || !selection.objectIDs.isSubset(of: objectIDs) else { return }
+        selection.strokeIDs.formIntersection(strokeIDs)
+        selection.objectIDs.formIntersection(objectIDs)
+        updateSelectionBox()
+    }
+
+    /// Drops pending strokes that are about to be redrawn elsewhere (moved by the lasso or undone).
+    func dropPending(_ ids: Set<UUID>) {
+        pending.removeAll { ids.contains($0.live.stroke.id) }
+    }
+
+    // MARK: - Object layer
+
+    /// Shows the document's objects as they are now.
+    func refreshObjects() {
+        objectLayer.show(document.objects, pageBounds: document.pageBounds)
     }
 
     // MARK: - Live layer
@@ -651,17 +691,18 @@ final class CanvasView: UIView {
         return entries
     }
 
+    /// The selection box as it's shown now: moved with the drag while one is under way.
+    private var displayedSelectionBox: SelectionBox? {
+        if case let .transforming(drag)? = lassoSession {
+            return drag.box.applying(drag.transform)
+        }
+        return selection.isEmpty ? nil : selectionBox
+    }
+
     fileprivate func drawLassoOverlay(in ctx: CGContext) {
         let accent = accentColor
-        if !selection.isEmpty, !selectionBounds.isNull {
-            let r = viewTransform.toView(selectionBounds).insetBy(dx: -6, dy: -6)
-            ctx.setFillColor(accent.withAlphaComponent(0.08).cgColor)
-            ctx.fill(r)
-            ctx.setStrokeColor(accent.cgColor)
-            ctx.setLineWidth(1.5)
-            ctx.setLineDash(phase: 0, lengths: [6, 4])
-            ctx.stroke(r)
-            ctx.setLineDash(phase: 0, lengths: [])
+        if let box = displayedSelectionBox {
+            drawSelection(box, accent: accent, in: ctx)
         }
         if case let .drawing(pts)? = lassoSession,
            let polygon = LassoGeometry.region(mode: controller?.lassoMode ?? .freeform, points: pts)
@@ -681,7 +722,41 @@ final class CanvasView: UIView {
         }
     }
 
-    private func updateLassoOverlay() {
+    /// The selection box, dashed, with a knob at each corner for resizing and one above it for rotating.
+    private func drawSelection(_ box: SelectionBox, accent: UIColor, in ctx: CGContext) {
+        let corners = box.corners.map { viewTransform.toView($0) }
+        let outline = CGMutablePath()
+        outline.addLines(between: corners)
+        outline.closeSubpath()
+        ctx.addPath(outline)
+        ctx.setFillColor(accent.withAlphaComponent(0.08).cgColor)
+        ctx.fillPath()
+        ctx.addPath(outline)
+        ctx.setStrokeColor(accent.cgColor)
+        ctx.setLineWidth(1.5)
+        ctx.setLineDash(phase: 0, lengths: [6, 4])
+        ctx.strokePath()
+        ctx.setLineDash(phase: 0, lengths: [])
+
+        let top = viewTransform.toView(CGPoint(x: box.rect.midX, y: box.rect.minY).applying(box.transform))
+        let knob = viewTransform.toView(SelectionGeometry.rotateHandle(
+            of: box, distance: Self.rotateHandleDistance / viewTransform.scale
+        ))
+        ctx.move(to: top)
+        ctx.addLine(to: knob)
+        ctx.setLineWidth(1)
+        ctx.strokePath()
+        let r = Self.handleRadius
+        ctx.setFillColor(paperColor.resolvedColor(with: InkTheme.onPaper).cgColor)
+        ctx.setLineWidth(1.5)
+        for point in corners + [knob] {
+            let circle = CGRect(x: point.x - r, y: point.y - r, width: 2 * r, height: 2 * r)
+            ctx.fillEllipse(in: circle)
+            ctx.strokeEllipse(in: circle)
+        }
+    }
+
+    func updateLassoOverlay() {
         lassoOverlayView.setNeedsDisplay()
     }
 
@@ -709,33 +784,43 @@ final class CanvasView: UIView {
     private func documentDidChange(_ change: CanvasDocument.Change) {
         if !isEditingDocument {
             // Another view showing the same page (the note open in a second window) changed it.
-            redrawFromDocument()
+            redrawFromDocument(ink: change != .objectsEdited)
         }
-        if change == .edited {
+        if change == .edited || change == .objectsEdited {
             controller?.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
         }
     }
 
-    /// Redraws the committed layer from the document after it changed under the view (an undo, a redo,
-    /// or an edit made in another view).
-    private func redrawFromDocument() {
-        generation &+= 1
-        invalidateMoved()
-        dropOrphanedPendingStrokes()
-        requestFullRender()
+    /// Redraws the page from the document after it changed under the view (an undo, a redo, or an edit
+    /// made in another view): the objects always, and the committed ink layer when the ink changed.
+    private func redrawFromDocument(ink: Bool = true) {
+        if ink {
+            generation &+= 1
+            invalidateMoved()
+            dropOrphanedPendingStrokes()
+            requestFullRender()
+        } else {
+            pruneSelection()
+        }
+        refreshObjects()
+        if !selection.isEmpty {
+            updateSelectionBox()
+        }
     }
 
     @discardableResult
     func undo() -> Bool {
+        let inkRevision = document.revision
         guard live == nil, lassoSession == nil, editDocument({ document.undo() }) else { return false }
-        redrawFromDocument()
+        redrawFromDocument(ink: document.revision != inkRevision)
         return true
     }
 
     @discardableResult
     func redo() -> Bool {
+        let inkRevision = document.revision
         guard live == nil, lassoSession == nil, editDocument({ document.redo() }) else { return false }
-        redrawFromDocument()
+        redrawFromDocument(ink: document.revision != inkRevision)
         return true
     }
 
@@ -743,6 +828,8 @@ final class CanvasView: UIView {
         editDocument { document.clear() }
         generation &+= 1
         dropOrphanedPendingStrokes()
+        pruneSelection()
+        refreshObjects()
         requestFullRender()
     }
 
@@ -785,6 +872,7 @@ final class CanvasView: UIView {
         pageLayer.frame = frame
         pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
         templateView.follow(viewTransform)
+        objectLayer.follow(viewTransform)
         inkMask.frame = inkClipView.bounds
         inkMask.path = CGPath(rect: frame, transform: nil)
         if let zoomBoxView, let zoomWindow {
@@ -804,122 +892,6 @@ final class CanvasView: UIView {
         super.safeAreaInsetsDidChange()
         fittedBoundsSize = .zero // refit with the new insets on the next layout
         setNeedsLayout()
-    }
-
-    // MARK: - Lasso
-
-    private func invalidateMoved() {
-        let ids = document.lastReshapedIDs
-        guard !ids.isEmpty else { return }
-        for id in ids {
-            forgetGeometry(id)
-        }
-        // Moved strokes may still be waiting in `pending` with stale geometry; the full render redraws them.
-        pending.removeAll { ids.contains($0.live.stroke.id) }
-        if !selection.isEmpty {
-            updateSelectionBounds()
-        }
-    }
-
-    private func updateSelectionBounds() {
-        var r = CGRect.null
-        for stroke in document.strokes where selection.contains(stroke.id) {
-            r = r.union(geometry(for: stroke).bounds)
-        }
-        selectionBounds = r
-        controller?.selectionDidChange(!selection.isEmpty)
-        updateLassoOverlay()
-    }
-
-    func clearSelection() {
-        guard !selection.isEmpty else { return }
-        selection.removeAll()
-        updateSelectionBounds()
-    }
-
-    func deleteSelection() {
-        guard !selection.isEmpty else { return }
-        let ids = selection
-        for id in ids {
-            forgetGeometry(id)
-        }
-        editDocument { document.recordErase(document.remove(ids: ids)) }
-        dropOrphanedPendingStrokes() // also prunes the selection
-        requestFullRender()
-    }
-
-    private func handleLassoSample(_ p: CGPoint) {
-        guard let controller else { return }
-        switch lassoSession {
-        case nil:
-            let slop = 10 / inputTransform.scale
-            if !selection.isEmpty, selectionBounds.insetBy(dx: -slop, dy: -slop).contains(p) {
-                // Dragging inside the selection moves it. Pending strokes are redrawn by the full render.
-                pending.removeAll { selection.contains($0.live.stroke.id) }
-                lassoSession = .moving(last: p, total: .zero)
-            } else {
-                clearSelection()
-                lassoSession = .drawing([p])
-            }
-            lassoPending = false
-        case var .drawing(pts)?:
-            switch controller.lassoMode {
-            case .freeform:
-                if let last = pts.last, last.distance(to: p) * inputTransform.scale < 1.5 {
-                    return
-                }
-                pts.append(p)
-            case .square:
-                pts = [pts[0], p]
-            }
-            lassoSession = .drawing(pts)
-            updateLassoOverlay()
-        case let .moving(last, total)?:
-            let d = p - last
-            guard d != .zero else { return }
-            for id in selection {
-                forgetGeometry(id)
-            }
-            document.translate(ids: selection, by: d)
-            selectionBounds = selectionBounds.offsetBy(dx: d.x, dy: d.y)
-            lassoSession = .moving(last: p, total: total + d)
-            requestFullRender()
-            updateLassoOverlay()
-        }
-    }
-
-    private func finishLasso(commit: Bool) {
-        defer { lassoSession = nil; lassoPending = false; updateLassoOverlay() }
-        switch lassoSession {
-        case let .drawing(pts)?:
-            guard commit, let controller,
-                  let polygon = LassoGeometry.region(mode: controller.lassoMode, points: pts) else { return }
-            let pb = LassoGeometry.bounds(of: polygon)
-            var hit = Set<UUID>()
-            // Whole strokes are selected even if only part of them is inside the region.
-            // Pixel-eraser strokes are invisible, so they're never selectable.
-            for stroke in document.strokes where !stroke.brush.erases {
-                guard geometry(for: stroke).bounds.intersects(pb) else { continue }
-                if LassoGeometry.stroke(stroke.points.map(\.location), touches: polygon, polygonBounds: pb) {
-                    hit.insert(stroke.id)
-                }
-            }
-            selection = hit
-            updateSelectionBounds()
-        case let .moving(_, total)?:
-            if commit {
-                editDocument { document.recordMove(ids: selection, by: total) }
-            } else if total != .zero {
-                document.translate(ids: selection, by: CGPoint(x: -total.x, y: -total.y))
-                for id in selection {
-                    forgetGeometry(id)
-                }
-                requestFullRender()
-            }
-            updateSelectionBounds()
-        case nil:
-            break
-        }
     }
 
     // MARK: - Touch input
@@ -1776,10 +1748,12 @@ extension CanvasView {
         self.live = nil
         invalidateAllLive()
         controller?.select(.lasso)
-        selection = ids
         pending.removeAll { ids.contains($0.live.stroke.id) } // they're redrawn where they move to
-        updateSelectionBounds()
-        lassoSession = .moving(last: inputTransform.toCanvas(last.location), total: .zero)
+        select(PageSelection(strokeIDs: ids))
+        if let box = selectionBox {
+            lassoSession = .transforming(SelectionDrag(handle: .move, start: inputTransform.toCanvas(last.location),
+                                                       box: box, session: document.beginTransform(selection)))
+        }
         feedback.alignmentOccurred(at: last.location)
     }
 }

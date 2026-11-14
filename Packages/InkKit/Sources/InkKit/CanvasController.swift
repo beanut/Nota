@@ -252,6 +252,14 @@ final class CanvasController: ObservableObject {
         canvas?.deleteSelection()
     }
 
+    /// Adds a placeholder object (the object layer's test object) to the page in the pen's colour and
+    /// selects it with the lasso, ready to move, resize or rotate.
+    func insertPlaceholderObject() {
+        let color = color(for: .pen)
+        select(.lasso)
+        canvas?.insertPlaceholderObject(color: color)
+    }
+
     func zoomWindowBack() {
         canvas?.moveZoomWindow(.back)
     }

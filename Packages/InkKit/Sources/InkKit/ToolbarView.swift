@@ -120,6 +120,9 @@ struct PenCase: View {
             Toggle(isOn: $controller.zoomWindowVisible) {
                 Label("Zoom Window", systemImage: "rectangle.and.text.magnifyingglass")
             }
+            Button { controller.insertPlaceholderObject() } label: {
+                Label("Add Test Object", systemImage: "square.on.square.dashed")
+            }
             Divider()
             Button { showSettings = true } label: {
                 Label("Pressure & Tilt…", systemImage: "hand.draw")
