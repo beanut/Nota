@@ -26,7 +26,8 @@ final class CanvasController: ObservableObject {
         .pencil: ToolSettings(width: 3),
         .highlighter: ToolSettings(width: 22),
         .eraser: ToolSettings(width: 30),
-        .lasso: ToolSettings(width: 4)
+        .lasso: ToolSettings(width: 4),
+        .shape: ToolSettings(width: 3)
     ]
 
     /// The last width used with each brush, so switching brushes in a tool brings back each one's width.
@@ -185,6 +186,7 @@ final class CanvasController: ObservableObject {
         case .highlighter: 8 ... 48
         case .eraser: 8 ... 100
         case .lasso: 1 ... 1
+        case .shape: 1 ... 20
         }
     }
 
@@ -196,6 +198,7 @@ final class CanvasController: ObservableObject {
         case .highlighter: [14, 22, 34]
         case .eraser: [16, 30, 60]
         case .lasso: []
+        case .shape: [2, 3, 6]
         }
     }
 
@@ -348,7 +351,7 @@ final class CanvasController: ObservableObject {
     /// The bundled brush each tool draws with by default, before the width and pressure settings are applied.
     static func baseBrush(for tool: Tool) -> BrushDescriptor {
         switch tool {
-        case .pen, .lasso: .pen
+        case .pen, .lasso, .shape: .pen
         case .pencil: .pencil
         case .highlighter: .highlighter
         case .eraser: .pixelEraser
@@ -361,7 +364,7 @@ final class CanvasController: ObservableObject {
         case .pen: BrushDescriptor.pens
         case .pencil: BrushDescriptor.pencils
         case .highlighter: BrushDescriptor.highlighters
-        case .eraser, .lasso: []
+        case .shape, .eraser, .lasso: []
         }
     }
 
@@ -558,6 +561,43 @@ final class CanvasController: ObservableObject {
         if self.brush(for: tool).id == brush.id {
             setBrush(Self.baseBrush(for: tool), for: tool, width: nil)
         }
+    }
+
+    // MARK: Shapes
+
+    /// Whether new shapes are drawn solid, dashed or dotted (the shape tool's options).
+    @Published var shapeLineStyle: ShapeObject.LineStyle = .solid
+    /// What new closed shapes are filled with; nil leaves them empty.
+    @Published var shapeFill: PenColor?
+    /// The style of the selected shapes (the first one's), while the selection holds any.
+    @Published private(set) var selectedShapeStyle: ShapeStyle?
+
+    /// How the shape tool draws a new shape: its colour and width, and the line style and fill.
+    var newShapeStyle: ShapeStyle {
+        ShapeStyle(color: color(for: .shape), lineWidth: CGFloat(settings[.shape]?.width ?? 3),
+                   lineStyle: shapeLineStyle, fill: shapeFill)
+    }
+
+    /// The style of a shape a pen or pencil stroke snapped to: the stroke's colour, about the width the
+    /// ink was drawing at, dashed or dotted if its brush is; no fill.
+    func shapeStyle(snapping stroke: Stroke) -> ShapeStyle {
+        let brush = stroke.brush
+        let lineStyle: ShapeObject.LineStyle = !brush.dash.isActive ? .solid : brush.dash.on < 1 ? .dotted : .dashed
+        let width = max((brush.size.lowerBound + brush.size.upperBound) / 2, 0.5)
+        return ShapeStyle(color: PenColor(red: Double(stroke.color.r), green: Double(stroke.color.g),
+                                          blue: Double(stroke.color.b)),
+                          lineWidth: width, lineStyle: lineStyle)
+    }
+
+    func selectedShapesDidChange(_ style: ShapeStyle?) {
+        if selectedShapeStyle != style {
+            selectedShapeStyle = style
+        }
+    }
+
+    /// Changes every selected shape's style, as one undoable edit.
+    func restyleSelectedShapes(_ change: @escaping (inout ShapeStyle) -> Void) {
+        canvas?.restyleSelectedShapes(change)
     }
 
     // MARK: Eyedropper
