@@ -25,6 +25,17 @@ enum InkMetrics {
     static let swatch: CGFloat = 28
     /// A brush's sample stroke in the brush picker, in points.
     static let brushPreview = CGSize(width: 110, height: 26)
+    /// A saved pen's sample stroke in the pen tray.
+    static let penPreview = CGSize(width: 96, height: 24)
+    /// The brush editor's live preview.
+    static let brushEditorPreview = CGSize(width: 480, height: 96)
+    /// The colour picker's saturation and brightness square, and its hue bar.
+    static let spectrum = CGSize(width: 288, height: 176)
+    static let hueBarHeight: CGFloat = 24
+    /// The colour picker's knobs.
+    static let knob: CGFloat = 24
+    /// The eyedropper's loupe.
+    static let loupe: CGFloat = 64
 }
 
 extension InkTheme {
@@ -132,7 +143,9 @@ private struct SecondaryButtonBody: View {
 /// A 28 pt target with a 20 pt dot. Selected shrinks the dot and adds a ring, so the selection never relies
 /// on colour alone.
 struct InkSwatchButton: View {
-    let ink: InkColor
+    let color: PenColor
+    /// VoiceOver's name for the colour.
+    let name: String
     let isSelected: Bool
     let action: () -> Void
     @Environment(\.inkTheme) private var theme
@@ -141,7 +154,7 @@ struct InkSwatchButton: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(ink.color)
+                    .fill(color.color)
                     .overlay(Circle().strokeBorder(theme.color(\.swatchOutline), lineWidth: 1))
                     .frame(width: isSelected ? 16 : 20, height: isSelected ? 16 : 20)
                 if isSelected {
@@ -153,7 +166,7 @@ struct InkSwatchButton: View {
             .animation(.snappy(duration: 0.18), value: isSelected)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(ink.name)
+        .accessibilityLabel(name)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
@@ -188,6 +201,10 @@ struct InkSliderRow<Value: BinaryFloatingPoint>: View where Value.Stride: Binary
         _value = value
         self.range = range
         self.valueText = valueText
+    }
+
+    init(verbatim label: String, value: Binding<Value>, in range: ClosedRange<Value>, valueText: String) {
+        self.init(LocalizedStringKey(label), value: value, in: range, valueText: valueText)
     }
 
     var body: some View {

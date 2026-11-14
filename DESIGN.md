@@ -4,7 +4,7 @@ Nota's visual language: tokens, icons and the shared controls built from them. I
 
 **Rule:** Library and editor chrome use tokens only. No `Color(red:…)`, no `.secondary`/`.primary`, no system greys. If a value is missing, add a token here first.
 
-Exempt: the debug Pencil HUD (a developer overlay), system menus, alerts and sheets (they keep system styling and SF Symbols).
+Exempt: the debug Pencil HUD (a developer overlay), system menus, alerts and sheets (they keep system styling and SF Symbols). The colour picker's spectrum, hue bar and colour well are drawn in the ink colours they offer (not chrome), so they use the colours themselves rather than tokens.
 
 ## Colour rules
 
@@ -90,9 +90,9 @@ The Figma styles use Inter at exactly the iOS Dynamic Type sizes, so the app use
 
 ## Icons
 
-`NotaIcon` holds the 42 line icons (`icon/*`) as template SVGs in `NotaUI/Resources/Icons.xcassets`: 20 pt grid, 1.75 pt round stroke, recoloured with `foregroundStyle`. Use `NotaIconView(.pen)` (or `size:` for 12–18 pt uses). Nota's own chrome uses these; menus, alerts and sheets keep SF Symbols.
+`NotaIcon` holds the 44 line icons (`icon/*`) as template SVGs in `NotaUI/Resources/Icons.xcassets`: 20 pt grid, 1.75 pt round stroke, recoloured with `foregroundStyle`. Use `NotaIconView(.pen)` (or `size:` for 12–18 pt uses). Nota's own chrome uses these; menus, alerts and sheets keep SF Symbols.
 
-Tools: pen, pencil, highlighter, eraser, lasso, text, shapes, photo. Editor: undo, redo, fit, grip, pressure, gauge, split (the editor's window menu; drawn in code for NOT-30 and not yet in Figma), return (the zoom window's new line; added in code, not yet in Figma). Library: grid, star, clock, trash, folder, plus, minus, search, filter, list, chevrons, xmark, ellipsis, share, arrow.up. Audio and AI: sparkles, mic, waveform, play, pause, stop, flashcards, quiz, calc.
+Tools: pen, pencil, highlighter, eraser, lasso, text, shapes, photo. Editor: undo, redo, fit, grip, pressure, gauge, split (the editor's window menu; drawn in code for NOT-30 and not yet in Figma), return (the zoom window's new line; added in code, not yet in Figma), pens (the Pen Case's pen tray) and eyedropper (the colour picker's; both drawn in code for NOT-18, not yet in Figma). Library: grid, star, clock, trash, folder, plus, minus, search, filter, list, chevrons, xmark, ellipsis, share, arrow.up. Audio and AI: sparkles, mic, waveform, play, pause, stop, flashcards, quiz, calc.
 
 To add one: draw it in Figma on the 20 pt grid, export the SVG with `stroke="#1A1A1F"`, add an imageset with `template-rendering-intent: template`, and add a case to `NotaIcon`.
 
@@ -117,12 +117,16 @@ App-only: `SidebarRow` (Figma Sidebar Row: 44 pt, selected = ink tint), `NoteCar
 
 ## Editor chrome
 
-- **Pen Case** (`InkKit/ToolbarView.swift`): tools · inks · undo/redo · more. Sits in the navigation bar on the same row as the back button, centered (principal placement) and drawn flat without the bar's glass background; it can't be moved. A floating favourites bar is planned separately.
+- **Pen Case** (`InkKit/ToolbarView.swift`): pen tray · tools · colours (quick colours and the colour well) · undo/redo · more. Sits in the navigation bar on the same row as the back button, centered (principal placement) and drawn flat without the bar's glass background; it can't be moved. A floating favourites bar is planned separately.
 - **Room to grow:** the tool tray scrolls when it runs out of room, so M1 tools (text, shapes, photo; icons already in the set) can be added without redesigning the bar.
 - **Tool Options:** tap the selected tool again. Pen, pencil and highlighter start with a brush picker:
   a two-column grid of tiles, each a sample stroke drawn by the engine in the current ink over the brush's
-  name (selected: ink tint fill, emphasised ink-coloured label). Then width presets (fine / medium / bold) and a width slider; freeform or rectangle lasso and Delete Selection. The eraser adds its mode (Precision, Standard or Stroke, each with a one-line description), which ink it erases (All Ink, Highlighter or Pencil; disabled for Precision, which says why), Switch back after erasing, and Clear Page (with the same confirmation as the More menu).
-- **Colour presets** follow the tool: pen and pencil show the five pen inks, the highlighter its five highlighters, and the eraser and lasso keep the pen inks dimmed so the bar doesn't change length.
+  name (selected: ink tint fill, emphasised ink-coloured label), the user's own brushes after the built-in ones (touch and hold a tile for Edit Brush / Edit a Copy / Delete Brush), and Customize Brush… (Edit Brush… for the user's own), which opens the brush editor. Then the three quick sizes (fine / medium / bold; touch and hold one to keep the current width there, or Reset Sizes) and a width slider; freeform or rectangle lasso and Delete Selection. The eraser adds its mode (Precision, Standard or Stroke, each with a one-line description), which ink it erases (All Ink, Highlighter or Pencil; disabled for Precision, which says why), Switch back after erasing, and Clear Page (with the same confirmation as the More menu).
+- **Quick colours** follow the tool: pen and pencil start with the five pen inks, the highlighter its five highlighters, and the eraser and lasso keep the pen's dimmed so the bar doesn't change length. Each tool's quick colours are the user's to change: tap the selected swatch again to edit it in the colour picker (Reset Quick Colors goes back to the inks). The colour well after them (a hue ring around the current colour, filled when the colour isn't a quick colour) opens the picker for any colour.
+- **Pen tray** (`InkKit/PenTrayView.swift`, the pens icon at the start of the Pen Case): the user's saved pens, each a row with the pen's sample stroke in its colour, its name, its brush and width, and its tool's icon; the pen in use is ink-tinted. Tap to write with it; Save Current Pen adds the one in use (named after its brush). Edit shows delete and reorder handles; each pen's menu has Rename…, Update to Current Pen, Move Up / Down and Delete Pen. Empty, it says what saving a pen does.
+- **Colour picker** (`InkKit/ColorPickerView.swift`, a popover): saturation × brightness square over a hue bar (24 pt knobs with a raised ring), a hex field and the eyedropper, Recent (newest first, up to 12), then each palette (name, a ⋯ menu for Add Current Color / Rename / Delete, its swatches, a dashed + to add the current colour; touch and hold a swatch to remove it) and New Palette. Changes apply as you go; the final colour joins Recent when the picker closes.
+- **Eyedropper** (`InkKit/EyedropperOverlay.swift`): covers the canvas with a floating banner (Touch the page to pick a color · Cancel); a 64 pt loupe above the finger shows the colour under it, and lifting uses it.
+- **Brush editor** (`InkKit/BrushEditorView.swift`, a sheet): a live preview on paper, drawn by the engine in the tool's colour with the Pressure & Tilt settings, the name, then every `BrushDescriptor` parameter grouped as Nib, Pressure, Tilt, Speed and Ink Flow, Ends, Stroke, Texture, Jitter and Opacity: sliders (Slider Row) for the numbers, segmented pickers for tip, texture and blend, a toggle for tilt shading. Parameters that do nothing for the brush (an ellipse's angle on a round nib) are hidden. Cancel · Reset · Done, and "Also save as a pen".
 - **More** (ellipsis): fit page (with zoom level), pressure and tilt, debug HUD, clear page.
 - **Page Bar** (`InkKit/PageBar.swift`): previous · Page n of m · next · add (hold for add before/after/size and Delete Page) · paper-size pill.
 

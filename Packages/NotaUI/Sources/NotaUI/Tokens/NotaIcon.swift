@@ -21,6 +21,8 @@ public enum NotaIcon: String, CaseIterable, Identifiable, Sendable {
 
     case undo, redo, fit, grip, pressure, gauge, split
     case newLine = "return"
+    /// The Pen Case's pen tray (saved pens) and the colour picker's eyedropper (NOT-18).
+    case pens, eyedropper
 
     // MARK: Audio and AI
 

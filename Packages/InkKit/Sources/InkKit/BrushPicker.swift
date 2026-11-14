@@ -9,9 +9,9 @@ struct BrushPicker: View {
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        let brushes = CanvasController.brushes(for: tool)
+        let brushes = controller.availableBrushes(for: tool)
         let selected = controller.brush(for: tool).id
-        let color = inkColor
+        let color = controller.color(for: tool).rgba
         LazyVGrid(columns: [GridItem(.flexible(), spacing: InkSpacing.s), GridItem(.flexible(), spacing: InkSpacing.s)],
                   spacing: InkSpacing.s) {
             ForEach(brushes) { brush in
@@ -35,6 +35,7 @@ struct BrushPicker: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(brush.name)
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .contextMenu { menu(for: brush) }
             }
         }
         .accessibilityElement(children: .contain)
@@ -52,10 +53,20 @@ struct BrushPicker: View {
         }
     }
 
-    private var inkColor: RGBA {
-        let inks = theme.inks(for: tool)
-        let index = controller.settings[tool]?.colorIndex ?? 0
-        return RGBA(inks[min(max(index, 0), inks.count - 1)])
+    @ViewBuilder
+    private func menu(for brush: BrushDescriptor) -> some View {
+        let custom = controller.isCustomBrush(brush, for: tool)
+        Button {
+            controller.selectBrush(brush, for: tool)
+            controller.editBrush(for: tool)
+        } label: {
+            Label(custom ? "Edit Brush…" : "Edit a Copy…", systemImage: "slider.horizontal.3")
+        }
+        if custom {
+            Button(role: .destructive) { controller.deleteCustomBrush(brush, for: tool) } label: {
+                Label("Delete Brush", systemImage: "trash")
+            }
+        }
     }
 }
 
@@ -63,25 +74,32 @@ struct BrushPicker: View {
 /// by the renderer itself, so the picker shows exactly what the brush draws. Cached per brush and ink.
 @MainActor
 enum BrushPreview {
+    private static var cache: [Key: CGImage] = [:]
+
     private struct Key: Hashable {
         let brush: BrushDescriptor
         let color: RGBA
         let scale: CGFloat
+        let size: CGSize
+        let fits: Bool
     }
 
-    private static var cache: [Key: CGImage] = [:]
-
-    static func image(of brush: BrushDescriptor, color: RGBA, scale: CGFloat) -> CGImage? {
-        let key = Key(brush: brush, color: color, scale: scale)
+    /// The sample stroke at `size` points. `fits` scales the brush's width to suit the preview (the
+    /// picker); otherwise it's drawn at its own width, on a page as tall as the preview (the brush editor).
+    static func image(of brush: BrushDescriptor, color: RGBA, scale: CGFloat,
+                      size: CGSize = InkMetrics.brushPreview, fits: Bool = true) -> CGImage? {
+        let key = Key(brush: brush, color: color, scale: scale, size: size, fits: fits)
         if let image = cache[key] {
             return image
         }
-        // Drawn on a page twice the preview's size (pages have a minimum size), then scaled down.
-        let size = InkMetrics.brushPreview
-        let page = CGSize(width: size.width * 2, height: size.height * 2)
+        // Fitted previews are drawn on a page twice their size (pages have a minimum size), then scaled down.
+        let factor: CGFloat = fits ? 2 : 1
+        let page = CGSize(width: size.width * factor, height: size.height * factor)
         let doc = CanvasDocument(pageSize: PageSize(width: page.width, height: page.height))
-        doc.add(Stroke(id: UUID(), color: color, brush: previewBrush(brush, pageHeight: page.height),
-                       points: samplePoints(in: page)))
+        let drawn = fits ? previewBrush(brush, pageHeight: page.height)
+            : brush.sized(min(brush.maxWidth, page.height * 0.6),
+                          minimumRatio: brush.maxWidth > 0 ? brush.size.lowerBound / brush.maxWidth : 1)
+        doc.add(Stroke(id: UUID(), color: color, brush: drawn, points: samplePoints(in: page)))
         let image = PageRenderer.image(of: doc.snapshot(), pixelWidth: Int((size.width * scale).rounded()))
         if cache.count > 64 {
             cache.removeAll()

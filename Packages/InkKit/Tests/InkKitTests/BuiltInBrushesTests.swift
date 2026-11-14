@@ -104,7 +104,7 @@ struct BuiltInBrushesTests {
         let suite = "BuiltInBrushesTests.\(UUID().uuidString)"
         let store = try #require(UserDefaults(suiteName: suite))
         defer { store.removePersistentDomain(forName: suite) }
-        let c = CanvasController(settingsStore: store)
+        let c = CanvasController(settingsStore: store, penTray: PenTrayStore(fileURL: nil))
         #expect(c.brush(for: .pen) == .pen && c.brush(for: .pencil) == .pencil)
         #expect(c.brush(for: .highlighter) == .highlighter && c.brush(for: .eraser) == .pixelEraser)
 

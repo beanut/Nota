@@ -37,6 +37,8 @@ public enum InkIcon: String, CaseIterable, Sendable {
     case previousPage, nextPage, addPage, disclosure, delete
     /// The zoom window's "start a new line" and "close" buttons.
     case newLine, close
+    /// The Pen Case's pen tray (saved pens) and the colour picker's eyedropper.
+    case penTray, eyedropper
 }
 
 /// How InkKit's editor looks: the colours, fonts and icons of its chrome, the paper and desk the page sits
@@ -200,6 +202,8 @@ public extension InkTheme {
         case .delete: "trash"
         case .newLine: "return.left"
         case .close: "xmark"
+        case .penTray: "tray.full"
+        case .eyedropper: "eyedropper"
         }
         return Image(systemName: name)
     }

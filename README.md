@@ -77,7 +77,7 @@ Colour, type, spacing, radius and elevation tokens, the icon set and shared cont
 
 ## InkKit
 
-The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / eraser / lasso with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, round and chisel highlighters), undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
+The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / eraser / lasso with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, round and chisel highlighters), a pen tray of saved pens, quick sizes and colours per tool, a colour picker (spectrum, hex, eyedropper, palettes, recent colours) and a brush editor, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
 
 ```swift
 import InkKit
@@ -128,6 +128,9 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   fixed angle.
 - The built-in brushes (NOT-17) are tuned on the simulator with synthetic input, not yet on a physical
   iPad with Pencil (NOT-12).
+- Saved pens, quick sizes and colours, custom brushes, palettes and recent colours (NOT-18) are kept on
+  this device only (`Application Support/InkKit/PenTray.json`); the model is ready for sync but nothing
+  syncs yet. The tool you were last using, and its colour and width, aren't restored at launch.
 
 ## Next steps
 

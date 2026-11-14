@@ -47,7 +47,15 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `LiveInkView.swift` | The live ink layer: a grid of tile layers showing the in-progress stroke and strokes awaiting rasterization, plus the hover/eraser cursor |
 | `BrushDescriptor.swift` | `BrushDescriptor`: every brush parameter, its legal range and `clamped()`, and lenient JSON |
 | `BuiltInBrushes.swift` | The built-in brush set (pens, pencils, highlighters, pixel eraser), `sized` and `personalized` (the Pressure & Tilt settings on top of a brush's character) |
-| `BrushPicker.swift` | The tool options' brush picker, with sample strokes drawn by the engine (`BrushPreview`) |
+| `BrushPicker.swift` | The tool options' brush picker (built-in brushes, then the user's), with sample strokes drawn by the engine (`BrushPreview`) |
+| `BrushParameter.swift` | Every numeric `BrushDescriptor` parameter as the brush editor shows it: label, slider range inside the legal range, units, when it's shown, get and set (setters always leave the brush clamped) |
+| `BrushEditorView.swift` | The brush editor sheet: live preview and a control for every parameter |
+| `PenColor.swift` | `PenColor`, an exact 24-bit sRGB colour stored as `"#RRGGBB"`, with hex and HSB conversion |
+| `PenTray.swift` | `PenTray` and its parts (`SavedPen`, `ToolPresets`, `ColorPalette`, `PenKind`): saved pens, quick sizes and colours, custom brushes, palettes and recent colours, with lenient JSON |
+| `PenTrayStore.swift` | `PenTrayStore`, which keeps the tray and saves it on every change (`.shared` in Application Support) |
+| `PenTrayView.swift` | The pen tray popover |
+| `ColorPickerView.swift` | The colour picker popover (spectrum, hue, hex, eyedropper, recent colours, palettes) and the Pen Case's colour well |
+| `EyedropperOverlay.swift` / `CanvasView+Eyedropper.swift` | The eyedropper's overlay, loupe and banner, and sampling one device pixel of the canvas as drawn |
 | `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
 | `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
@@ -58,7 +66,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `PageRenderer.swift` | Renders a page snapshot (template + ink) to an image off the main actor (thumbnails), or pages to a PDF |
 | `Stroke.swift` | `Stroke`, `StrokePoint`, tool enums, `RGBA` |
 | `InkFile.swift` | `InkPageFile`, the `.ink` page format: encoder, decoder and `InkFileError` |
-| `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit |
+| `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit: each tool's brush, colour and width, quick sizes and colours, saved pens, the brush editor and the eyedropper |
 | `ToolbarView.swift` | Pen Case, tool options, pressure & tilt settings, the Pencil quick palette |
 | `PageBar.swift` | Page bar (page size and template pills) and the custom page size sheet |
 | `InkTheme.swift` / `InkChrome.swift` | The theme and the controls built from it |
@@ -134,6 +142,47 @@ with Pencil (NOT-12).
   engine before descriptors; the bundled descriptors match them pixel for pixel. Re-record with
   `TEST_RUNNER_INK_SNAPSHOT_RECORD=1` only for an intended change. Each brush of the built-in set has a
   golden of its own (`brush-*.png`).
+
+## Pen tray
+
+The user's own pens, colours and brushes (NOT-18) are one `PenTray`: plain `Codable` data with stable ids,
+an explicit order and modification dates (to the second), so it can be synced later. It holds:
+
+- **Saved pens** (`SavedPen`): a name, a `PenKind` (pen, pencil, highlighter), a full `BrushDescriptor`
+  snapshot, a `PenColor` and a width. A pen keeps its own copy of its brush, so it outlives edits to or
+  deletion of the brush it was made from. Choosing one switches to its tool with exactly that brush,
+  colour and width.
+- **Per tool** (`ToolPresets`): the three quick sizes and the quick colours (nil means the defaults: the
+  tool's width presets and the theme's inks), and the brushes made in the brush editor, which the brush
+  picker lists after the built-in ones. Editing a built-in brush makes a new brush with a new id; editing
+  the user's own changes it in place. An ink tool's brush never erases.
+- **Colours**: palettes (`ColorPalette`, a name and unique colours) and recent colours (newest first, no
+  repeats, at most 12; added by the picker when it closes and by the eyedropper).
+
+```swift
+let store = PenTrayStore.shared                  // Application Support/InkKit/PenTray.json
+store.update { $0.add(SavedPen(name: "Red Fountain", kind: .pen, brush: .fountainPen,
+                               color: PenColor(hex: "#D92D30")!, width: 5)) }   // saved straight away
+let json = try store.tray.jsonData()             // sorted keys, ISO 8601 dates
+```
+
+`PenTrayStore` saves the whole tray (a few kilobytes) atomically on every change; every editor shares
+`.shared`, so a pen saved in one window appears in the others. Reading is lenient like brushes: unknown
+fields are ignored, an unreadable pen, colour or palette is skipped rather than losing the file, and a file
+that isn't a tray at all is moved aside to `PenTray.unreadable.json`. It's app data, not a note: it never
+goes through `.nota` packages.
+
+**Colours** are `PenColor`s: exact 8-bit sRGB, `"#RRGGBB"` in JSON, so equal colours compare equal however
+they were picked. Strokes still store `RGBA`; a stroke's colour comes from the tool's current `PenColor`.
+
+**Eyedropper.** The colour picker's eyedropper covers the canvas with an overlay in the canvas view's
+coordinate space; touching it renders the canvas's layer tree into a one-pixel bitmap at that point (one
+device pixel: paper, template and ink as drawn, or the desk off the page), shown in a loupe and used on
+lift. It reads what's on screen, so a highlighter over ink gives the blended colour.
+
+**Brush editor.** `BrushParameter.all` lists every numeric descriptor parameter with a slider range inside
+its legal range; a test checks every number in a descriptor's JSON has one, and that setting any value
+leaves the brush clamped. The editor's preview applies the Pressure & Tilt settings like a real stroke.
 
 ## Page templates
 
