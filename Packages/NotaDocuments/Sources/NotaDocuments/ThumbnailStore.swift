@@ -26,8 +26,6 @@ public final class ThumbnailStore {
     /// What each note's cached cover was rendered from, so an unchanged cover isn't rendered again.
     @ObservationIgnored private var renderedFrom: [UUID: CoverKey] = [:]
     @ObservationIgnored private var renders: [UUID: Task<Void, Never>] = [:]
-    /// Finishes once stale covers from a previous launch are gone; reads wait for it.
-    @ObservationIgnored private let ready: Task<Void, Never>
 
     private struct CoverKey: Equatable {
         let pageID: UUID
@@ -39,11 +37,6 @@ public final class ThumbnailStore {
     public init(library: URL = NotePackage.libraryURL) {
         self.library = library
         memory.countLimit = 150
-        // Ink lives only in memory until NOT-6, so covers left by an earlier launch show ink that no longer
-        // exists. Drop them; remove this once notes are saved to disk.
-        ready = Task.detached(priority: .userInitiated) {
-            Self.removeAllThumbnails(in: library)
-        }
     }
 
     public func generation(for noteID: UUID) -> Int {
@@ -61,7 +54,6 @@ public final class ThumbnailStore {
         if let image = cachedImage(for: noteID) {
             return image
         }
-        await ready.value
         let url = NotePackage.coverURL(for: noteID, in: library)
         let generation = generation(for: noteID)
         let image = await Task.detached(priority: .userInitiated) {
@@ -84,9 +76,7 @@ public final class ThumbnailStore {
         renders[noteID]?.cancel()
 
         let url = NotePackage.coverURL(for: noteID, in: library)
-        let ready = ready
         renders[noteID] = Task { [weak self] in
-            await ready.value
             let image = await Task.detached(priority: .userInitiated) {
                 Self.renderAndSave(page, to: url)
             }.value
@@ -132,13 +122,5 @@ public final class ThumbnailStore {
             try? png.write(to: url, options: .atomic)
         }
         return image.preparingForDisplay() ?? image
-    }
-
-    private nonisolated static func removeAllThumbnails(in library: URL) {
-        let files = FileManager.default
-        guard let packages = try? files.contentsOfDirectory(at: library, includingPropertiesForKeys: nil) else { return }
-        for package in packages where package.pathExtension == "nota" {
-            try? files.removeItem(at: package.appending(path: "thumbs", directoryHint: .isDirectory))
-        }
     }
 }

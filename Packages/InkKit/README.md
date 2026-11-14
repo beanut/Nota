@@ -24,7 +24,8 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | --- | --- |
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
 | `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes |
-| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it |
+| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `replace` for a standard erase, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
+| `TestingSupport.swift` | `@_spi(Testing)` hooks for other packages' tests to put ink on a page (`drawTestStroke(through:)`, `undoForTesting()`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
 | `PageTemplate.swift` | `PageTemplate` (pattern, spacing, margins, paper colour, custom background), the built-in presets, `PaperColor` / `PaperPalette` |
 | `TemplateLayout.swift` | Each pattern's measurements, and `lineMetrics(on:)`: baselines, line spacing, writing area and regions for the handwriting layout engine |
@@ -36,7 +37,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView.swift` | `UIView` that handles raw touches, gestures, `UIPencilInteraction` and hover. Owns the page, the cached committed bitmap and the lasso overlay. Redraws from the document when another canvas on the same page changes it |
 | `CanvasRepresentable.swift` | The `UIViewRepresentable` bridge from `InkCanvasEditor` to `CanvasView` |
 | `CanvasView+ZoomWindow.swift` | The zoom window on the canvas: showing the panel and box, mapping panel touches onto the page, moving the box, rendering the panel; the hover and eraser cursors |
-| `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through |
+| `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through; stroke and standard erasing, and the eraser cursor |
 | `ZoomWindow.swift` | `WritingLines` (a page's ruling) and `ZoomWindow`, the box's geometry: auto-advance, line return, dragging and resizing |
 | `ZoomPanelView.swift` | The zoom window's writing panel and the box overlay drawn on the page |
 | `MultiFingerTapRecognizer.swift` | Two- and three-finger taps (undo, redo) without multi-tap delay |
@@ -44,7 +45,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `BrushDescriptor.swift` | `BrushDescriptor`: every brush parameter, its legal range and `clamped()`, lenient JSON, and the bundled brushes |
 | `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
-| `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes |
+| `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
 | `Lasso.swift` | Freeform and rectangle lasso regions and hit-testing |
 | `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes built in parallel, culling, drawing in parallel bands), shared by the canvas and the benchmarks |
 | `CommittedRaster.swift` | A page's committed layer kept compressed with the page, so reopening it restores the pixels instead of re-rendering |
@@ -170,7 +171,7 @@ Each record is `type u8 · payload length (varint) · payload`:
 - **2, stroke**, in drawing order: id (16 bytes), brush index (varint), colour (4 × f32), `createdAt` (f64 seconds since 2001), the first point's timestamp (f64), point count (varint), then six columns of zigzag varints. Points are quantised (location to 1/64 pt, force to 1/1024, altitude and azimuth to 1/1024 rad, time to 1/4096 s) and delta-encoded: x, y and time as second-order deltas (the change in step, near zero for smooth, regularly sampled input), force, altitude and azimuth as first-order. Every step is a power of two, so a decoded page re-encodes to the same bytes.
 - **Any other type** is kept as it is, with its position among the strokes, and written back on save. A newer minor version adds data that must survive older apps as new record types; fields it appends to a known record are skipped by older readers (and lost if they re-save).
 
-Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size may be at most 256× the stored size, so a reader can bound its allocation. Decoding checks every length, count and index against what's left and rejects non-finite numbers, so damaged or truncated input throws an `InkFileError` (`notAnInkFile`, `unsupportedVersion`, `truncated`, `checksumMismatch`, `corrupt`) and never traps. Nothing writes these files yet; NOT-6 stores one per page in the note package.
+Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size may be at most 256× the stored size, so a reader can bound its allocation. Decoding checks every length, count and index against what's left and rejects non-finite numbers, so damaged or truncated input throws an `InkFileError` (`notAnInkFile`, `unsupportedVersion`, `truncated`, `checksumMismatch`, `corrupt`) and never traps. Nota stores one per page with ink in the note package (`pages/<page id>.ink`, written by NotaCore's `DocumentStore`).
 
 ### Rendering pipeline
 
@@ -197,6 +198,7 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 - **Highlighter** composites with *multiply* (`blend`), so ink underneath stays readable. The **pixel eraser** is a `destinationOut` stroke in the same list, so it's undoable. A grain texture fills with a pattern colour whose phase is pinned to the page.
 - Everything above is the **hull path**. The **stamp path** (textured brushes) emits only stamps, spread over each segment; see Brushes.
 - **Pixel erasing splits strokes.** When a pixel-eraser stroke is committed, every ink stroke under it is checked: wherever the ink's whole cross-section (the nib's extent across the direction of travel) lies inside the union of the pixel erasers above it, the stroke is cut. Each cut strictly inside a stroke replaces it with separate `Stroke`s (fresh IDs, same style snapshot), so the stroke eraser removes only the piece it touches. Erasing a stroke's end only shortens it. The split is part of the eraser's `add` command, so one undo restores the original stroke. Partial erases that only together sever a line count as a cut too.
+- **Eraser modes.** *Precision* is the pixel eraser above. *Standard* cuts away the parts of strokes the eraser passes over as it moves: each touched stroke is replaced in place (same z-order) by the runs of its spline the eraser didn't reach (`StrokeSplitter.remainder`), counting the nib's radius so the pieces' round caps stop at the eraser's edge. The whole gesture is one `replace(before:after:)` command. *Stroke* removes whole strokes (`erase`). Standard and stroke erasing can be limited to highlighter or to pencil ink (`EraserTarget`), so highlighting over handwriting comes off without touching the writing; precision erasing always takes everything, since its stroke composites over all the ink below it. The eraser shows its outline at its on-screen size while erasing, and can switch back to the previous tool when the stroke ends.
 
 ### Zoom window
 
