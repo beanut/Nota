@@ -17,6 +17,16 @@ struct PageSelection: Equatable {
     }
 }
 
+/// What the lasso picks up. Objects are everything on the page that isn't ink: shapes now, and text and
+/// images as they arrive, each of which can get an option of its own here.
+struct LassoFilter: OptionSet, Hashable {
+    let rawValue: Int
+
+    static let ink = LassoFilter(rawValue: 1 << 0)
+    static let objects = LassoFilter(rawValue: 1 << 1)
+    static let all: LassoFilter = [.ink, .objects]
+}
+
 /// The selection's frame on screen: a rectangle in its own space and the transform that puts it on the
 /// page. It's axis-aligned when the selection is made, except around a single object, where it's the
 /// object's own frame (so a rotated object gets a rotated box); it then follows every transform applied

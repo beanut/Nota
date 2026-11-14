@@ -100,6 +100,55 @@ public enum PageRenderer {
         return ctx.makeImage()
     }
 
+    /// `region` (canvas space) rendered at `scale` pixels per point in sRGB, transparent where nothing is
+    /// drawn: `background` first (already mapped to canvas space), then `objects`, then `strokes`, which
+    /// composite as one layer like the page's ink. For lasso images: the selection on its own (copying it
+    /// for other apps, dragging it out) or a screenshot of the page under it. Nil for an empty region or
+    /// one too big to make a bitmap for.
+    static func image(strokes: [Stroke], objects: [any PageObject], region: CGRect, scale: CGFloat,
+                      background: ((CGContext) -> Void)? = nil) -> CGImage? {
+        guard !region.isNull, !region.isInfinite, scale > 0 else { return nil }
+        let width = Int((region.width * scale).rounded(.up)), height = Int((region.height * scale).rounded(.up))
+        // 8192 px a side keeps a huge selection at a high zoom from asking for gigabytes.
+        guard width > 0, height > 0, width <= 8192, height <= 8192,
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.translateBy(x: 0, y: CGFloat(height))
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.interpolationQuality = .high
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.translateBy(x: -region.minX, y: -region.minY)
+        background?(ctx)
+        draw(objects, clip: region, in: ctx)
+        if !strokes.isEmpty {
+            PencilTexture.prepareContext(ctx)
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+            for stroke in strokes {
+                let geometry = StrokeRenderer.geometry(for: stroke)
+                guard geometry.bounds.intersects(region) else { continue }
+                StrokeRenderer.draw(runs: geometry.runs, clip: geometry.bounds.insetBy(dx: -2, dy: -2),
+                                    brush: stroke.brush, color: stroke.color, in: ctx)
+            }
+            ctx.endTransparencyLayer()
+        }
+        return ctx.makeImage()
+    }
+
+    /// The part of `page` inside `region` (canvas space) as it looks on the page, paper and template
+    /// included, at `scale` pixels per point: the lasso's Take Screenshot.
+    public static func image(of page: PageSnapshot, region: CGRect, scale: CGFloat,
+                             palette: PaperPalette) -> CGImage? {
+        let clipped = region.intersection(page.pageSize.bounds)
+        guard !clipped.isNull, !clipped.isEmpty else { return nil }
+        return image(strokes: page.strokes, objects: page.objects, region: clipped, scale: scale) { ctx in
+            TemplateRenderer.draw(page.template, pageSize: page.pageSize, palette: palette,
+                                  artwork: page.templateArtwork, in: ctx, visibleRect: clipped,
+                                  minimumLineWidth: 0.5 / scale)
+        }
+    }
+
     /// The page rendered `pixelWidth` pixels wide on its own template, coloured by `palette`.
     public static func image(of page: PageSnapshot, pixelWidth: Int,
                              palette: @escaping (PaperColor) -> PaperPalette) -> CGImage? {

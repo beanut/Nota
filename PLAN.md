@@ -4,7 +4,7 @@ A short summary of where Nota is going, so agents and new contributors don't hav
 out. **[Linear](https://linear.app/nota-on-inkkit/project/nota) is the source of truth**: if this file and
 Linear disagree, Linear wins, and this file should be fixed.
 
-_Last updated: 2026-11-13._
+_Last updated: 2026-11-14._
 
 ## Milestones
 
@@ -38,7 +38,9 @@ the built-in brush set ([NOT-17](https://linear.app/nota-on-inkkit/issue/NOT-17)
 physical iPad), the pen tray with quick sizes and colours, colour picker and brush editor
 ([NOT-18](https://linear.app/nota-on-inkkit/issue/NOT-18)), the page object model with transforms and unified undo
 ([NOT-19](https://linear.app/nota-on-inkkit/issue/NOT-19), in review) and continuous scrolling with the page sidebar
-([NOT-26](https://linear.app/nota-on-inkkit/issue/NOT-26), in review), landed early. After M0, M1 continues with
+([NOT-26](https://linear.app/nota-on-inkkit/issue/NOT-26), in review) and lasso v2: cut, copy, paste across pages and
+notes, duplicate, recolour, thickness, arrange, screenshots and drag-out
+([NOT-21](https://linear.app/nota-on-inkkit/issue/NOT-21), in review), landed early. After M0, M1 continues with
 shapes, text and images on the object layer and writing across page boundaries in vertical scrolling
 ([NOT-89](https://linear.app/nota-on-inkkit/issue/NOT-89)).
 

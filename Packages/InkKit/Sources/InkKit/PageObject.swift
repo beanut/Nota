@@ -29,6 +29,10 @@ public protocol PageObject: Codable, Sendable {
 
     /// Draws the object in its own space; the caller has already applied `transform`.
     func draw(in ctx: CGContext)
+
+    /// The object drawn in `color`, for the lasso's Color menu. The default keeps the object as it is,
+    /// for kinds that have no colour of their own (an image).
+    func recolored(_ color: PenColor) -> Self
 }
 
 public extension PageObject {
@@ -64,6 +68,10 @@ public extension PageObject {
         var copy = self
         copy.transform = transform.concatenating(t)
         return copy
+    }
+
+    func recolored(_: PenColor) -> Self {
+        self
     }
 }
 
@@ -190,6 +198,12 @@ public struct PlaceholderObject: PageObject, Equatable {
         try PageObjectPlacement(of: self).encode(to: encoder)
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(color, forKey: .color)
+    }
+
+    public func recolored(_ color: PenColor) -> PlaceholderObject {
+        var copy = self
+        copy.color = color
+        return copy
     }
 
     public func draw(in ctx: CGContext) {

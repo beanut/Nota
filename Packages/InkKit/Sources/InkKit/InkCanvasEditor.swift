@@ -18,6 +18,11 @@ import SwiftUI
 /// The More menu's Zoom Window writes small, neat handwriting in a magnified panel at the bottom of the
 /// screen. It follows each page's template ruling (`WritingLines.lines(for:on:)`); pass `writingLines` to
 /// override that per page, where returning nil falls back to the template's.
+///
+/// The lasso selects ink and objects (its Tool Options filter which). Its selection's menu cuts, copies,
+/// pastes (onto any page of any note), duplicates, deletes, recolours, thickens and thins, brings to front or
+/// sends to back, and takes a screenshot; a selection can also be dragged out to other apps as an image.
+/// Pass `selectionActions` to add the app's own items to that menu.
 public struct InkCanvasEditor: View {
     @ObservedObject private var notebook: InkNotebook
     private let showsDebugHUD: Bool
@@ -26,6 +31,7 @@ public struct InkCanvasEditor: View {
     private let writingLines: ((CanvasDocument) -> WritingLines?)?
     private let pageDestinations: [PageDestination]
     private let sendPages: PageSender?
+    private let selectionActions: [SelectionAction]
 
     @StateObject private var controller = CanvasController()
     @StateObject private var telemetry = PencilTelemetry()
@@ -40,20 +46,24 @@ public struct InkCanvasEditor: View {
     /// A multi-page editor.
     public init(notebook: InkNotebook, title: Binding<String>? = nil, showsDebugHUD: Bool = false,
                 writingLines: ((CanvasDocument) -> WritingLines?)? = nil,
-                pageDestinations: [PageDestination] = [], sendPages: PageSender? = nil) {
+                pageDestinations: [PageDestination] = [], sendPages: PageSender? = nil,
+                selectionActions: [SelectionAction] = []) {
         self.notebook = notebook
         self.title = title
         self.showsDebugHUD = showsDebugHUD
         self.writingLines = writingLines
         self.pageDestinations = pageDestinations
         self.sendPages = sendPages
+        self.selectionActions = selectionActions
         showsPageControls = true
     }
 
     /// A single-page editor: the page can be resized but no pages can be added.
     public init(document: CanvasDocument, title: Binding<String>? = nil, showsDebugHUD: Bool = false,
-                writingLines: ((CanvasDocument) -> WritingLines?)? = nil) {
+                writingLines: ((CanvasDocument) -> WritingLines?)? = nil,
+                selectionActions: [SelectionAction] = []) {
         self.title = title
+        self.selectionActions = selectionActions
         notebook = InkNotebook(pages: [document], defaultPageSize: document.pageSize)
         self.showsDebugHUD = showsDebugHUD
         self.writingLines = writingLines
@@ -137,6 +147,7 @@ public struct InkCanvasEditor: View {
             controller.hudVisible = showsDebugHUD
             controller.allowsContinuousLayout = showsPageControls
             controller.writingLines = writingLines
+            controller.selectionActions = selectionActions
             controller.onSwipeToPage = { [notebook] swipe in turnPage(swipe, in: notebook) }
             controller.canSwipeToPage = { [notebook] swipe in canTurnPage(swipe, in: notebook) }
         }
