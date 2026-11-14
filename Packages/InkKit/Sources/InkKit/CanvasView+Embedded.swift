@@ -35,7 +35,8 @@ extension CanvasView {
         }
         if settled {
             liveView.settle(at: viewTransform)
-            if bitmapTransform != viewTransform || displayedTransform != viewTransform {
+            // A render already on its way to this transform will show it; asking again only draws it twice.
+            if bitmapTransform != viewTransform || (!fullRenderInFlight && displayedTransform != viewTransform) {
                 requestFullRender()
             }
         }

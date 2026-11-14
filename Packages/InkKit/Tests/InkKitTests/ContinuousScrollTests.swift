@@ -59,6 +59,50 @@ struct ContinuousPageLayoutTests {
         #expect(layout.offset(showingPage: 7, viewportHeight: 100, topInset: 0) == 0)
     }
 
+    @Test func aPageThatFitsTheOverscanIsRenderedWholeAndNeverMovesWhileScrolling() {
+        let page = CGRect(x: 24, y: 24, width: 984, height: 1392)
+        let window = ContinuousPageLayout.renderWindow(forPage: page, viewport: CGRect(x: 0, y: 0, width: 1032, height: 1376),
+                                                       current: nil)
+        #expect(window == page)
+        for y in stride(from: -1400, through: 1400, by: 100) {
+            let viewport = CGRect(x: 0, y: CGFloat(y), width: 1032, height: 1376)
+            #expect(ContinuousPageLayout.renderWindow(forPage: page, viewport: viewport, current: window) == window)
+        }
+    }
+
+    @Test func aZoomedPageGetsTheViewportPlusOverscanAndMovesOnlyNearItsEdge() {
+        let page = CGRect(x: 0, y: 0, width: 4000, height: 6000)
+        // 1000 × 1000 viewport: half a viewport above and below, a quarter to each side, centred on it.
+        let window = ContinuousPageLayout.renderWindow(forPage: page, viewport: CGRect(x: 1000, y: 2000, width: 1000, height: 1000),
+                                                       current: nil)
+        #expect(window == CGRect(x: 750, y: 1500, width: 1500, height: 2000))
+        // Still a quarter viewport of rendered ink below the view: stays put.
+        #expect(ContinuousPageLayout.renderWindow(forPage: page, viewport: CGRect(x: 1000, y: 2200, width: 1000, height: 1000),
+                                                  current: window) == window)
+        // Closer than that: centres on the view again.
+        #expect(ContinuousPageLayout.renderWindow(forPage: page, viewport: CGRect(x: 1000, y: 2400, width: 1000, height: 1000),
+                                                  current: window) == CGRect(x: 750, y: 1900, width: 1500, height: 2000))
+    }
+
+    @Test func theRenderWindowStaysOnItsPage() {
+        let page = CGRect(x: 0, y: 3000, width: 4000, height: 6000)
+        // A page below the view, given its canvas early: the window starts at its top.
+        #expect(ContinuousPageLayout.renderWindow(forPage: page, viewport: CGRect(x: 1000, y: 0, width: 1000, height: 1000),
+                                                  current: nil) == CGRect(x: 750, y: 3000, width: 1500, height: 2000))
+        // At the page's bottom-right corner.
+        #expect(ContinuousPageLayout.renderWindow(forPage: page, viewport: CGRect(x: 3500, y: 8800, width: 1000, height: 1000),
+                                                  current: nil) == CGRect(x: 2500, y: 7000, width: 1500, height: 2000))
+    }
+
+    @Test func midPinchTheRenderWindowKeepsItsSize() {
+        let current = CGRect(x: 750, y: 1500, width: 1500, height: 2000)
+        let page = CGRect(x: 0, y: 0, width: 1200, height: 1600) // zoomed out until the page is smaller
+        let viewport = CGRect(x: 100, y: 300, width: 1000, height: 1000)
+        #expect(ContinuousPageLayout.renderWindow(forPage: page, viewport: viewport, current: current) == page)
+        #expect(ContinuousPageLayout.renderWindow(forPage: page, viewport: viewport, current: current, keepingSize: true)
+            == CGRect(x: -150, y: -200, width: 1500, height: 2000))
+    }
+
     @Test func laysOutAndFindsPagesOfALongNoteQuickly() {
         let sizes = Array(repeating: PageSize.letter.size, count: 300)
         let clock = ContinuousClock()
