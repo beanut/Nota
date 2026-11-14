@@ -23,7 +23,12 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | File | Responsibility |
 | --- | --- |
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
-| `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes |
+| `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes; several pages at once (move, duplicate, remove, rotate, append) for the page sidebar; adding a page when writing reaches the end |
+| `ContinuousPageLayout.swift` | `PageLayoutMode` (paged or continuous, saved in `UserDefaults`) and the continuous column: page frames, the pages in view, the current page |
+| `ContinuousCanvasView.swift` | Continuous vertical scrolling: a scroll view over the column, with an embedded canvas for each page in view |
+| `CanvasView+Embedded.swift` | A canvas as one page among several: placed by the host, transparent around its page, taking touches only on it |
+| `PageSidebar.swift` | The page sidebar: thumbnails (rendered in the background, cached), jump, reorder, select, duplicate, rotate, delete, copy or move to another note (`PageDestination`, `PageSender`) |
+| `LassoOverlayView.swift` | Draws the lasso path and the selection outline over the canvas |
 | `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
 | `TestingSupport.swift` | `@_spi(Testing)` hooks for other packages' tests to put ink on a page (`drawTestStroke(through:)`, `undoForTesting()`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
@@ -352,6 +357,15 @@ More › Zoom Window shows a writing panel at the bottom of the canvas that magn
 - **Input.** A touch that begins in the panel's ink area is mapped through the panel's transform instead of the page's (`inputTransform`), so the stroke is stored in page space inside the box like any other, and every tool (pens, both erasers, the lasso) works there. Width-in-view rules (sample spacing, the eraser's on-screen size, lasso slop) use the panel's scale.
 - **Rendering.** The panel shows the box the way the canvas shows the page: a committed image of just the strokes that reach the box, rendered on its own queue whenever the page's committed bitmap changes (one render at a time), under its own `LiveInkView` showing the stroke being written. A finished stroke stays on the panel's live layer until a render that includes it lands, so it never blinks out. With the panel closed none of this exists and the ink path is unchanged; with it open, live strokes are filled in both live layers.
 - **Following the line.** `ZoomWindow` keeps the box on a line of the page's `WritingLines` (derived from the page's template by `WritingLines.lines(for:on:)`, which falls back to `WritingLines.standard` for templates without even rows; the host can override per page), with the baseline 72% of the way down. A stroke written in the panel that reaches the right-hand 30% moves the box on so the stroke ends a quarter of the way in; at the end of the line the next one sends it to the start of the next line. Dragging the box by its tab snaps it to the nearest line; its corner knob resizes it, which changes the magnification.
+
+### Continuous scrolling
+
+More › Scroll Direction › Vertical (`PageLayoutMode.continuous`) shows every page in one column. `ContinuousPageLayout` fits the widest page to the width and stacks the pages with a gap, all at one scale; finding the pages in view and the current page (the one at the middle of the view) are binary searches, so the column's length doesn't matter.
+
+- **Only the pages in view are real.** A `UIScrollView` scrolls and zooms an empty stand-in for the column. Each page in view gets an embedded `CanvasView` the size of the viewport, transparent outside its page, which the host places with `place(_:settled:)` as the content moves; the canvas's own pan and pinch are off. A page scrolled out of view loses its canvas and bitmap, so memory follows what's on screen (at most 6 canvases), not the note's length. Embedded canvases leave no `CommittedRaster` behind: they're placed wherever the scroll left them, so it wouldn't match next time.
+- **Touches.** A canvas takes touches only on its page (`point(inside:with:)`); the gaps belong to the scroll view, whose pan and pinch accept only fingers (two when one draws) and won't begin while a page is taking ink. Writing on a page makes it the current one, and the tools, undo and selection act on it.
+- **Paged and continuous share the page bar and sidebar:** choosing a page scrolls to it, and reordering keeps the page being read where it was on screen. Writing in the bottom 15% of the last page adds a page like it.
+- **Not yet:** a stroke can't cross from one page to the next (NOT-89), and the zoom window is offered only in paged mode.
 
 ### Input handling
 

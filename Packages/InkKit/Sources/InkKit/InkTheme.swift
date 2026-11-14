@@ -35,6 +35,8 @@ public enum InkIcon: String, CaseIterable, Sendable {
     case pen, pencil, highlighter, eraser, lasso
     case undo, redo, more
     case previousPage, nextPage, addPage, disclosure, delete
+    /// The page bar's button for the page sidebar.
+    case pages
     /// The zoom window's "start a new line" and "close" buttons.
     case newLine, close
     /// The Pen Case's pen tray (saved pens) and the colour picker's eyedropper.
@@ -200,6 +202,7 @@ public extension InkTheme {
         case .addPage: "plus"
         case .disclosure: "chevron.down"
         case .delete: "trash"
+        case .pages: "rectangle.grid.1x2"
         case .newLine: "return.left"
         case .close: "xmark"
         case .penTray: "tray.full"

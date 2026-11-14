@@ -128,6 +128,18 @@ struct OpenBesideTests {
         #expect(offered.map(\.title) == ["Newer", "Older"])
     }
 
+    @Test func pagesCanGoToEveryOtherLiveNote() throws {
+        let context = try makeContext()
+        let source = Note(title: "Source", modifiedAt: Clock.daysAgo(3))
+        let other = Note(title: "Other", modifiedAt: Clock.daysAgo(1))
+        let deleted = Note(title: "Deleted", modifiedAt: Clock.daysAgo(0))
+        [source, other, deleted].forEach(context.insert)
+        deleted.moveToRecentlyDeleted(at: Clock.now)
+
+        let offered = Library.notesToSendPagesTo([source, other, deleted], from: source.id)
+        #expect(offered.map(\.title) == ["Other"])
+    }
+
     @Test func offersAtMostTheLimit() throws {
         let context = try makeContext()
         let notes = (0 ..< 20).map { Note(title: "\($0)", modifiedAt: Clock.daysAgo($0)) }

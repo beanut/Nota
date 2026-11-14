@@ -32,7 +32,9 @@ extension CanvasView {
         let strokeBounds = document.strokes.filter { selection.strokeIDs.contains($0.id) }.map { geometry(for: $0).bounds }
         let objects = document.objects.filter { selection.objectIDs.contains($0.id) }
         selectionBox = SelectionGeometry.box(strokeBounds: strokeBounds, objects: objects)
-        controller?.selectionDidChange(!selection.isEmpty)
+        if isActiveCanvas {
+            controller?.selectionDidChange(!selection.isEmpty)
+        }
         updateLassoOverlay()
     }
 

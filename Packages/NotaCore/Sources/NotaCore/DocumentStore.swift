@@ -192,6 +192,17 @@ public final class DocumentStore {
         }
     }
 
+    /// Adds `pages` to the end of `note`, loading it first if it isn't loaded, and saves it. For pages
+    /// copied or moved from another note's page sidebar: pass copies (`CanvasDocument.copy()`), never
+    /// pages that are still in another notebook. Their ink, sizes, templates and backgrounds go with them.
+    public func addPages(_ pages: [CanvasDocument], to note: Note) async {
+        guard !pages.isEmpty else { return }
+        let notebook = await notebook(for: note)
+        notebook.appendPages(pages)
+        save(noteID: note.id)
+        evictIfNeeded()
+    }
+
     /// Forgets the note and deletes its package, for a note deleted permanently.
     public func discard(noteID: UUID) {
         if let entry = open.removeValue(forKey: noteID) {

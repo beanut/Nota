@@ -20,16 +20,23 @@ final class CanvasView: UIView {
     private var paperTheme = InkTheme.standard
 
     let document: CanvasDocument
+    /// True when the view is one page among several in continuous scrolling (`ContinuousCanvasView`): the
+    /// host places the page (`place(_:settled:)`) and does the scrolling and zooming, and the view is
+    /// transparent outside its page so the pages around it show through.
+    let isEmbedded: Bool
+    /// Where the host has put the page, while embedded.
+    var placement = ViewTransform()
     weak var controller: CanvasController? {
         didSet { pencilSettingsDidChange() }
     }
 
     weak var telemetry: PencilTelemetry?
 
-    private(set) var viewTransform = ViewTransform()
-    private var bitmapTransform =
+    /// Set by the view's own pan and zoom, or by the host while embedded (`place(_:settled:)`).
+    var viewTransform = ViewTransform()
+    private(set) var bitmapTransform =
         ViewTransform() // transform the bitmap is / will be rendered at once queued jobs run; pending strokes draw with this
-    private var displayedTransform = ViewTransform() // transform of the image currently in committedLayer.contents
+    private(set) var displayedTransform = ViewTransform() // transform of the image currently in committedLayer.contents
     private var fullRenderInFlight = false
     private var fullRenderRequested = false
     private var modifiedSinceSnapshot = Set<UUID>()
@@ -192,10 +199,11 @@ final class CanvasView: UIView {
     private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
     private lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
 
-    init(frame: CGRect, document: CanvasDocument) {
+    init(frame: CGRect, document: CanvasDocument, embedded: Bool = false) {
         self.document = document
+        isEmbedded = embedded
         super.init(frame: frame)
-        backgroundColor = deskColor
+        backgroundColor = embedded ? .clear : deskColor
         isMultipleTouchEnabled = true
 
         pageLayer.shadowColor = shadowColor.cgColor
@@ -258,7 +266,8 @@ final class CanvasView: UIView {
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
         // Before leaving the window, while the fitted transform still sees the real safe area.
-        if newWindow == nil, window != nil {
+        // Embedded pages come and go as they scroll by, at whatever transform they were at: no raster.
+        if newWindow == nil, window != nil, !isEmbedded {
             saveCommittedRaster()
         }
     }
@@ -281,7 +290,7 @@ final class CanvasView: UIView {
         deskColor = theme.desk
         accentColor = theme.accent
         shadowColor = theme.shadow
-        backgroundColor = deskColor
+        backgroundColor = isEmbedded ? .clear : deskColor
         pageLayer.shadowColor = shadowColor.resolvedColor(with: traitCollection).cgColor
         applyPaper()
         lassoOverlayView.setNeedsDisplay()
@@ -314,7 +323,7 @@ final class CanvasView: UIView {
             viewTransform = fittedTransform()
             liveView.settle(at: viewTransform)
             updateCommittedLayerTransform()
-            controller?.zoomDidChange(viewTransform.scale)
+            reportZoom()
         }
         updateZoomWindow()
         updatePageChrome()
@@ -429,7 +438,7 @@ final class CanvasView: UIView {
         }
     }
 
-    private func updateCommittedLayerTransform() {
+    func updateCommittedLayerTransform() {
         let t: CGAffineTransform
         if displayedTransform == viewTransform {
             t = .identity
@@ -461,7 +470,7 @@ final class CanvasView: UIView {
     /// Called with every image published from a render job that drew the page at `revision` (nil: not
     /// a whole revision). Keeps the newest whole, fitted one as the page's raster-to-be.
     private func noteRendered(_ image: CGImage, revision: Int?, transform: ViewTransform) {
-        if let revision, revision == document.revision, bitmapRevision == revision, pending.isEmpty,
+        if !isEmbedded, let revision, revision == document.revision, bitmapRevision == revision, pending.isEmpty,
            !fullRenderRequested, transform == fittedTransform() {
             rasterCandidate = RenderedPage(image: image, revision: revision, transform: transform)
         } else if rasterCandidate?.revision != document.revision {
@@ -699,7 +708,7 @@ final class CanvasView: UIView {
         return selection.isEmpty ? nil : selectionBox
     }
 
-    fileprivate func drawLassoOverlay(in ctx: CGContext) {
+    func drawLassoOverlay(in ctx: CGContext) {
         let accent = accentColor
         if let box = displayedSelectionBox {
             drawSelection(box, accent: accent, in: ctx)
@@ -772,8 +781,6 @@ final class CanvasView: UIView {
 
     // MARK: - Commands
 
-    /// Runs a change this view makes to the document, so its own notification isn't taken for another
-    /// view's edit.
     /// Runs `body`, which edits the document, so this view doesn't treat the change as another view's.
     func editDocument<T>(_ body: () -> T) -> T {
         isEditingDocument = true
@@ -786,7 +793,7 @@ final class CanvasView: UIView {
             // Another view showing the same page (the note open in a second window) changed it.
             redrawFromDocument(ink: change != .objectsEdited)
         }
-        if change == .edited || change == .objectsEdited {
+        if change == .edited || change == .objectsEdited, isActiveCanvas {
             controller?.documentDidChange(canUndo: document.canUndo, canRedo: document.canRedo)
         }
     }
@@ -841,13 +848,16 @@ final class CanvasView: UIView {
         updatePageChrome()
         updateLassoOverlay()
         requestFullRender()
-        controller?.zoomDidChange(viewTransform.scale)
+        reportZoom()
     }
 
     // MARK: - Page
 
-    /// The transform that fits the whole page between the margins.
+    /// The transform that fits the whole page between the margins; while embedded, where the host put it.
     func fittedTransform() -> ViewTransform {
+        if isEmbedded {
+            return placement
+        }
         let s = safeAreaInsets, m = controller?.pageMargins ?? CanvasController.defaultPageMargins
         var insets = UIEdgeInsets(top: s.top + m.top, left: s.left + m.left,
                                   bottom: s.bottom + m.bottom, right: s.right + m.right)
@@ -941,6 +951,9 @@ final class CanvasView: UIView {
             guard isDrawingTouch(touch, event: event), activeTouch == nil, activeGestureCount == 0,
                   zoomTouch == nil else { continue }
             activeTouch = touch
+            if isEmbedded {
+                controller?.embeddedCanvasWillInk(self) // writing on a page makes it the one being worked on
+            }
             strokeBeganAt = touch.timestamp
             let location = touch.preciseLocation(in: self)
             inputInZoomPanel = zoomPanel != nil && zoomInkFrameInView.contains(location)
@@ -1209,6 +1222,9 @@ final class CanvasView: UIView {
                 pending.append(PendingStroke(live: live, geometry: geom, deadline: deadline,
                                              revisionBefore: revisionBefore, revisionAfter: document.revision))
                 schedulePendingCommit()
+                if !live.stroke.brush.erases {
+                    controller?.inkDidCommit(on: document, bounds: geom.bounds)
+                }
                 if zoomPanel != nil {
                     zoomHeld.append(live)
                     followWriting(geom.bounds, of: live.stroke)
@@ -1263,6 +1279,9 @@ extension CanvasView {
         pinch.allowedTouchTypes = direct
         pinch.delegate = self
         addGestureRecognizer(pinch)
+        // Embedded, the host's scroll view pans and zooms every page together.
+        pan.isEnabled = !isEmbedded
+        pinch.isEnabled = !isEmbedded
 
         for direction in [UISwipeGestureRecognizer.Direction.left, .right] {
             let swipe = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
@@ -1558,29 +1577,6 @@ extension CanvasView: UIGestureRecognizerDelegate {
     func gestureRecognizer(_: UIGestureRecognizer,
                            shouldRequireFailureOf _: UIGestureRecognizer) -> Bool {
         false
-    }
-}
-
-// MARK: - Lasso overlay
-
-private final class LassoOverlayView: UIView {
-    weak var canvas: CanvasView?
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isUserInteractionEnabled = false
-        isOpaque = false
-        backgroundColor = .clear
-    }
-
-    @available(*, unavailable)
-    required init?(coder _: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func draw(_: CGRect) {
-        guard let canvas, let ctx = UIGraphicsGetCurrentContext() else { return }
-        canvas.drawLassoOverlay(in: ctx)
     }
 }
 

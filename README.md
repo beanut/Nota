@@ -92,6 +92,8 @@ InkCanvasEditor(notebook: notebook)
 - **Page size** – `PageSize` is in points (1/72 in) and defaults to Letter. Custom sizes can be given in inches, millimetres or points. Resizing a page keeps the ink where it is; ink past the new edge is hidden, not deleted.
 - **Templates** – each page has a `PageTemplate`: blank, narrow / college / wide ruled, small and large grid, dotted, Cornell, music staff, isometric, to-do, weekly and monthly planners, or any PDF or image, on white, cream or dark paper. Templates are drawn as vectors (crisp at every zoom, real lines in an exported PDF) and expose their line metrics for handwriting layout. The page bar's template pill changes this page or every page; the library's Template menu changes a whole note.
 - **Objects** – besides ink, a page holds objects (`PageObject`: shapes, text, images and tape as they land), each with a frame, a transform and a z-order, drawn between the template and the ink. For now there's one test object, `PlaceholderObject` (More › Add Test Object). The lasso selects ink and objects together, by loop, rectangle or tap; the selection box's handles move, resize and rotate them; every change goes on the page's one undo stack.
+- **Scrolling** – More › Scroll Direction shows pages one at a time with sideways swipes (Horizontal) or all of them in one column scrolled vertically (Vertical), saved for every editor. In vertical scrolling only the pages in view get a canvas, so a 300-page note scrolls as smoothly as a short one; pinch to zoom, and writing near the bottom of the last page adds the next one.
+- **Page sidebar** – the page bar's pages button opens thumbnails of every page: tap one to go to it, drag to reorder, and duplicate, rotate (ink and all), delete, or copy or move pages to another note, one page from its context menu or several with Select.
 - **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page. The eraser erases pixel by pixel (Precision), the parts of strokes it passes over (Standard) or whole strokes, optionally only highlighter or only pencil ink, and can switch back to the previous tool afterwards.
 - **Zoom window** – More › Zoom Window opens a magnified writing panel above the page bar for a box on the page, for small, neat handwriting. Every tool works in it. Writing into the panel's shaded right-hand zone moves the box along the line, and at the end of the line on to the next one, following the page template's ruling. Drag the box by its tab, resize it (and so the magnification) by its corner knob, or use the panel's back, on and new-line buttons.
 
@@ -113,12 +115,15 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   page with objects) that `DocumentStore` autosaves
   about a second after each change, when the editor closes and when the app leaves the screen. Undo history
   isn't saved. Pages load a whole note at a time (decoded off the main thread); the 8 most recent notes stay
-  in memory. Loading individual pages on demand waits for continuous scroll (NOT-26).
+  in memory. Vertical scrolling draws only the pages in view, but a note's pages are still all read when it
+  opens.
 - A note's cover is re-rendered when its editor closes, so a note whose editor was open when the app was
   killed shows its previous cover until it's next opened and closed.
 - The library index (SwiftData) is rebuilt from packages at launch if notes are missing from it, with title,
   dates, page count and template; folders, favourites and tints aren't in packages, so they're lost then.
-- Pages are shown one at a time; there's no continuous vertical scroll or page-thumbnail sidebar yet.
+- In vertical scrolling each page is still its own canvas: a stroke stops at the bottom of its page rather
+  than flowing onto the next (NOT-89), and the zoom window isn't offered.
+- Rotating a page clears its undo history.
 - Objects (NOT-19) are the layer and its plumbing only: the one object type is a placeholder rectangle, added
   from the More menu. The zoom window's panel doesn't show objects, and the pixel eraser's live preview paints
   paper over them until the stroke commits (objects are never erased).
@@ -140,4 +145,4 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 ## Next steps
 
 1. Real thumbnails from the committed bitmap.
-2. PDF import and annotation, page thumbnails and drag-to-reorder.
+2. PDF import and annotation.
