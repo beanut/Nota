@@ -165,6 +165,7 @@ public final class CanvasDocument: Identifiable {
         /// Move, scale or rotate strokes and objects (the lasso and the selection handles).
         case transform(Transformation)
         case addObject(any PageObject)
+        case replaceObjects(before: [any PageObject], after: [any PageObject]) // reshaped or restyled
     }
 
     private(set) var strokes: [Stroke] = []
@@ -300,6 +301,21 @@ public final class CanvasDocument: Identifiable {
         object.zIndex = (objects.last?.zIndex ?? -1) + 1
         objects.append(object)
         push(.addObject(object))
+    }
+
+    /// Shows these versions of objects (matched by id) in place, without recording a command or telling
+    /// observers: a shape's handle being dragged. Follow with `replaceObjects(before:after:)`, or put
+    /// the originals back with this.
+    func previewObjects(_ changed: [any PageObject]) {
+        place([], changed)
+    }
+
+    /// Replaces objects (matched by id) with changed versions of them, in place, as one undoable edit:
+    /// a shape reshaped by a handle or restyled. `before` are the objects as they were.
+    func replaceObjects(before: [any PageObject], after: [any PageObject]) {
+        guard !after.isEmpty else { return }
+        place([], after)
+        push(.replaceObjects(before: before, after: after))
     }
 
     /// The object with this id, if it's on the page.
@@ -446,6 +462,9 @@ public final class CanvasDocument: Identifiable {
         case let .addObject(object):
             objects.removeAll { $0.id == object.id }
             redoStack.append(command)
+        case let .replaceObjects(before, _):
+            place([], before)
+            redoStack.append(command)
         }
         announce(command)
         return true
@@ -479,6 +498,9 @@ public final class CanvasDocument: Identifiable {
             objects.append(object)
             objects = PageObjectsFile.stacked(objects)
             undoStack.append(command)
+        case let .replaceObjects(_, after):
+            place([], after)
+            undoStack.append(command)
         }
         announce(command)
         return true
@@ -491,7 +513,7 @@ public final class CanvasDocument: Identifiable {
         case let .erase(removals, objectRemovals): (!removals.isEmpty, !objectRemovals.isEmpty)
         case let .clear(saved, savedObjects): (!saved.isEmpty, !savedObjects.isEmpty)
         case let .transform(t): (!t.strokes.isEmpty, !t.objects.isEmpty)
-        case .addObject: (false, true)
+        case .addObject, .replaceObjects: (false, true)
         }
     }
 

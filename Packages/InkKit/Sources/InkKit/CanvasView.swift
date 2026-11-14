@@ -122,6 +122,7 @@ final class CanvasView: UIView {
     enum LassoSession {
         case drawing([CGPoint]) // canvas-space gesture path
         case transforming(SelectionDrag) // dragging the selection or one of its handles
+        case reshaping(ShapeReshape) // dragging one of a selected shape's handles
     }
 
     /// A drag of the selection: which handle, from where, the box and the strokes and objects as they
@@ -133,6 +134,9 @@ final class CanvasView: UIView {
         let session: CanvasDocument.TransformSession
         var transform: CGAffineTransform = .identity
     }
+
+    /// A stroke snapped to a shape while the Pencil is still down (hold-to-snap); see `CanvasView+Shapes`.
+    var shapeSnap: ShapeSnap?
 
     var lassoPending = false // lasso touch began, first sample not yet seen
     var lassoSession: LassoSession?
@@ -172,7 +176,7 @@ final class CanvasView: UIView {
     /// Checks for circle-and-hold while ink is being drawn; runs only while a stroke is live.
     private var holdTimer: Timer?
     private var lastMovement: (location: CGPoint, time: TimeInterval)?
-    private lazy var feedback = UICanvasFeedbackGenerator(view: self)
+    lazy var feedback = UICanvasFeedbackGenerator(view: self)
 
     // Zoom window: the box on the page, the writing panel that magnifies it, and the panel's renders.
     enum ZoomMove { case back, advance, newLine }
@@ -692,7 +696,14 @@ final class CanvasView: UIView {
 
     /// Shows the document's objects as they are now.
     func refreshObjects() {
-        objectLayer.show(document.objects, pageBounds: document.pageBounds)
+        let preview: [any PageObject] = shapeSnap.map { [$0.shape] } ?? []
+        objectLayer.show(document.objects + preview, pageBounds: document.pageBounds)
+    }
+
+    /// Drops the stroke being drawn without committing it (it became a shape or a selection).
+    func discardLiveStroke() {
+        live = nil
+        invalidateAllLive()
     }
 
     // MARK: - Live layer
@@ -742,7 +753,13 @@ final class CanvasView: UIView {
     }
 
     /// The selection box, dashed, with a knob at each corner for resizing and one above it for rotating.
+    /// A single selected shape also shows its own handles; a line or arrow shows only those.
     private func drawSelection(_ box: SelectionBox, accent: UIColor, in ctx: CGContext) {
+        let shape = selectedShape
+        if let shape, shape.shape.isLinear {
+            drawShapeHandles(shape, accent: accent, in: ctx)
+            return
+        }
         let corners = box.corners.map { viewTransform.toView($0) }
         let outline = CGMutablePath()
         outline.addLines(between: corners)
@@ -772,6 +789,9 @@ final class CanvasView: UIView {
             let circle = CGRect(x: point.x - r, y: point.y - r, width: 2 * r, height: 2 * r)
             ctx.fillEllipse(in: circle)
             ctx.strokeEllipse(in: circle)
+        }
+        if let shape, !shape.handles.isEmpty {
+            drawShapeHandles(shape, accent: accent, in: ctx) // over the box's outline
         }
     }
 
@@ -828,7 +848,7 @@ final class CanvasView: UIView {
     @discardableResult
     func undo() -> Bool {
         let inkRevision = document.revision
-        guard live == nil, lassoSession == nil, editDocument({ document.undo() }) else { return false }
+        guard live == nil, lassoSession == nil, shapeSnap == nil, editDocument({ document.undo() }) else { return false }
         redrawFromDocument(ink: document.revision != inkRevision)
         return true
     }
@@ -836,7 +856,7 @@ final class CanvasView: UIView {
     @discardableResult
     func redo() -> Bool {
         let inkRevision = document.revision
-        guard live == nil, lassoSession == nil, editDocument({ document.redo() }) else { return false }
+        guard live == nil, lassoSession == nil, shapeSnap == nil, editDocument({ document.redo() }) else { return false }
         redrawFromDocument(ink: document.revision != inkRevision)
         return true
     }
@@ -1161,6 +1181,10 @@ final class CanvasView: UIView {
             eraseStrokes(along: point.location)
             return
         }
+        if shapeSnap != nil {
+            updateShapeSnap(to: point.location)
+            return
+        }
         guard let live else { return }
         let expectsUpdate = !touch.estimatedPropertiesExpectingUpdates.isEmpty
         controller?.inputRecorder?.sample(point, strokeID: live.stroke.id,
@@ -1207,6 +1231,9 @@ final class CanvasView: UIView {
         if lassoPending || lassoSession != nil {
             finishLasso(commit: commit)
         }
+        if shapeSnap != nil {
+            finishShapeSnap(commit: commit)
+        }
         var erased = eraseSession != nil && commit
         finishErasing()
         if let live {
@@ -1216,7 +1243,7 @@ final class CanvasView: UIView {
                 erased = commit
             }
             // A scratch-out erases the ink under it, and the scratch itself is dropped like a cancelled stroke.
-            if commit, !live.stroke.points.isEmpty, !scratchOut(with: live) {
+            if commit, !live.stroke.points.isEmpty, !convertToShape(live), !scratchOut(with: live) {
                 if let (segment, dirty) = live.finish() { // the end taper, now the end is known
                     liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
                     zoomPanel?.liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
@@ -1719,7 +1746,8 @@ extension CanvasView {
     /// Starts watching the live stroke for circle-and-hold.
     func startHoldWatch(at location: CGPoint, time: TimeInterval) {
         stopHoldWatch()
-        guard controller?.pencilSettings.circleToSelect == true, live != nil else { return }
+        guard let controller, live != nil,
+              controller.pencilSettings.circleToSelect || snapsShapesOnHold(controller) else { return }
         lastMovement = (location, time)
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkHold() }
@@ -1740,20 +1768,27 @@ extension CanvasView {
         lastMovement = (location, time)
     }
 
-    /// The Pencil has been still for a moment: if the live stroke is a loop around ink, select that ink.
+    /// The Pencil has been still for a moment: if the live stroke is a loop around ink, select that ink;
+    /// otherwise, if it's a shape, snap it to one.
     private func checkHold() {
-        guard let last = lastMovement, let live,
+        guard let last = lastMovement, let live, let controller,
               ProcessInfo.processInfo.systemUptime - last.time >= 0.45 else { return }
         stopHoldWatch() // one check per stroke once it's held
         let loop = live.stroke.points.map(\.location)
-        guard Scribble.isClosedLoop(loop, minSize: 24 / inputTransform.scale) else { return }
-        let ids = Scribble.loopSelection(loop, candidates: scribbleCandidates(excluding: live.stroke.id))
-        guard !ids.isEmpty else { return }
+        let ids: Set<UUID> = controller.pencilSettings.circleToSelect && controller.tool != .shape
+            && Scribble.isClosedLoop(loop, minSize: 24 / inputTransform.scale)
+            ? Scribble.loopSelection(loop, candidates: scribbleCandidates(excluding: live.stroke.id)) : []
+        guard !ids.isEmpty else {
+            if snapsShapesOnHold(controller) {
+                snapToShape(live, holdingAt: inputTransform.toCanvas(last.location))
+            }
+            return
+        }
         // The loop becomes a selection: drop its ink, switch to the lasso and keep the Pencil down to
         // drag what it caught.
         self.live = nil
         invalidateAllLive()
-        controller?.select(.lasso)
+        controller.select(.lasso)
         pending.removeAll { ids.contains($0.live.stroke.id) } // they're redrawn where they move to
         select(PageSelection(strokeIDs: ids))
         if let box = selectionBox {

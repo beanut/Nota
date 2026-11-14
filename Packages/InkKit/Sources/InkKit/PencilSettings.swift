@@ -113,6 +113,8 @@ struct PencilSettings: Equatable, Codable {
     var scratchOutToErase = true
     /// Drawing a loop around ink and holding the Pencil still selects it.
     var circleToSelect = true
+    /// Holding the Pencil still at the end of a pen or pencil stroke snaps it to a line, arrow or shape.
+    var holdToSnapShapes = true
 
     init() {}
 
@@ -127,6 +129,7 @@ struct PencilSettings: Equatable, Codable {
         handedness = (try? c.decode(Handedness.self, forKey: .handedness)) ?? d.handedness
         scratchOutToErase = (try? c.decode(Bool.self, forKey: .scratchOutToErase)) ?? d.scratchOutToErase
         circleToSelect = (try? c.decode(Bool.self, forKey: .circleToSelect)) ?? d.circleToSelect
+        holdToSnapShapes = (try? c.decode(Bool.self, forKey: .holdToSnapShapes)) ?? d.holdToSnapShapes
     }
 
     static let defaults = PencilSettings()

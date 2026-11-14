@@ -77,7 +77,7 @@ Colour, type, spacing, radius and elevation tokens, the icon set and shared cont
 
 ## InkKit
 
-The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / eraser / lasso with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, round and chisel highlighters), a pen tray of saved pens, quick sizes and colours per tool, a colour picker (spectrum, hex, eyedropper, palettes, recent colours) and a brush editor, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
+The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / shapes / eraser / lasso with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, round and chisel highlighters), a pen tray of saved pens, quick sizes and colours per tool, a colour picker (spectrum, hex, eyedropper, palettes, recent colours) and a brush editor, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
 
 ```swift
 import InkKit
@@ -91,7 +91,7 @@ InkCanvasEditor(notebook: notebook)
 - **Pages** – `InkNotebook` is an ordered list of `CanvasDocument`s with add / insert / remove / move and navigation. Each page has its own paper size, ink and undo history. A notebook always keeps at least one page.
 - **Page size** – `PageSize` is in points (1/72 in) and defaults to Letter. Custom sizes can be given in inches, millimetres or points. Resizing a page keeps the ink where it is; ink past the new edge is hidden, not deleted.
 - **Templates** – each page has a `PageTemplate`: blank, narrow / college / wide ruled, small and large grid, dotted, Cornell, music staff, isometric, to-do, weekly and monthly planners, or any PDF or image, on white, cream or dark paper. Templates are drawn as vectors (crisp at every zoom, real lines in an exported PDF) and expose their line metrics for handwriting layout. The page bar's template pill changes this page or every page; the library's Template menu changes a whole note.
-- **Objects** – besides ink, a page holds objects (`PageObject`: shapes, text, images and tape as they land), each with a frame, a transform and a z-order, drawn between the template and the ink. For now there's one test object, `PlaceholderObject` (More › Add Test Object). The lasso selects ink and objects together, by loop, rectangle or tap; the selection box's handles move, resize and rotate them; every change goes on the page's one undo stack.
+- **Objects** – besides ink, a page holds objects (`PageObject`: shapes, text, images and tape as they land), each with a frame, a transform and a z-order, drawn between the template and the ink. Shapes (`ShapeObject`) are the first real kind: the shape tool, or drawing with a pen or pencil and holding the Pencil still, snaps a rough stroke to a line, arrow, rectangle, ellipse, triangle, polygon or curve, recognised on the device, and a selected shape is reshaped by its handles. There's also a test object, `PlaceholderObject` (More › Add Test Object). The lasso selects ink and objects together, by loop, rectangle or tap; the selection box's handles move, resize and rotate them; every change goes on the page's one undo stack.
 - **Scrolling** – More › Scroll Direction shows pages one at a time with sideways swipes (Horizontal) or all of them in one column scrolled vertically (Vertical), saved for every editor. In vertical scrolling only the pages in view get a canvas, so a 300-page note scrolls as smoothly as a short one; pinch to zoom, and writing near the bottom of the last page adds the next one.
 - **Page sidebar** – the page bar's pages button opens thumbnails of every page: tap one to go to it, drag to reorder, and duplicate, rotate (ink and all), delete, or copy or move pages to another note, one page from its context menu or several with Select.
 - **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page. The eraser erases pixel by pixel (Precision), the parts of strokes it passes over (Standard) or whole strokes, optionally only highlighter or only pencil ink, and can switch back to the previous tool afterwards.
@@ -124,8 +124,9 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 - In vertical scrolling each page is still its own canvas: a stroke stops at the bottom of its page rather
   than flowing onto the next (NOT-89), and the zoom window isn't offered.
 - Rotating a page clears its undo history.
-- Objects (NOT-19) are the layer and its plumbing only: the one object type is a placeholder rectangle, added
-  from the More menu. The zoom window's panel doesn't show objects, and the pixel eraser's live preview paints
+- Shapes (NOT-20) are the only real object type so far. Shape recognition is tuned on synthetic strokes,
+  not yet on real handwriting (NOT-12), and a shape is hit anywhere in its bounds, so a diagonal line can be
+  selected from the empty corners of its box. The zoom window's panel doesn't show objects, and the pixel eraser's live preview paints
   paper over them until the stroke commits (objects are never erased).
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
