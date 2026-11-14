@@ -119,8 +119,9 @@ public final class Note {
                 kind: NoteKind = .notebook,
                 isFavorite: Bool = false,
                 isShared: Bool = false,
-                folder: Folder? = nil) {
-        id = UUID()
+                folder: Folder? = nil,
+                id: UUID = UUID()) {
+        self.id = id
         self.title = title
         self.pageCount = pageCount
         createdAt = modifiedAt

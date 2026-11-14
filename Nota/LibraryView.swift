@@ -88,6 +88,9 @@ struct LibraryView: View {
             }
         }
         .task {
+            // Notes whose packages outlived the library index (its store was lost or reset) come back
+            // first, so the sample library isn't seeded over them.
+            await documents.rebuildIndex(in: modelContext)
             SampleData.seedIfNeeded(in: modelContext)
             // Page counts and dates come from each note's manifest, not from what was seeded or last cached.
             let notes = (try? modelContext.fetch(FetchDescriptor<Note>())) ?? []

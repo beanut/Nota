@@ -1,16 +1,19 @@
 import Foundation
 import InkKit
 
-/// What a note package records about its pages, kept as `manifest.json` in the note's `.nota` directory:
-/// the page order and each page's size and template, the size new pages get, and when the note last changed.
+/// What a note package records about the note, kept as `manifest.json` in the note's `.nota` directory: its
+/// title, the page order and each page's size and template, the size new pages get, and when the note was
+/// created and last changed. Each page's ink is in `pages/<page id>.ink` beside it, and custom template
+/// backgrounds in `templates/` (see `NotePackage`).
 ///
-/// Format 2 replaced each page's `paper` name with a full `template`; format 1 manifests are still read.
-/// Custom template backgrounds are stored beside it in `templates/` (see `NotePackage.templateURL`).
+/// Format 3 added `title` and page files; format 2 replaced each page's `paper` name with a full
+/// `template`. Formats 1 and 2 are still read.
 ///
 /// The manifest is the source of truth for a note's page count and modification date; the SwiftData
-/// `Note` mirrors them for the library. Ink is not stored yet (NOT-6 adds page files alongside it).
+/// `Note` mirrors them for the library. The title's source of truth is the `Note`: it's copied here on
+/// every save so the library index can be rebuilt from packages alone (`DocumentStore.rebuildIndex`).
 public struct NoteManifest: Codable, Equatable, Sendable {
-    public static let currentFormatVersion = 2
+    public static let currentFormatVersion = 3
 
     public struct Page: Codable, Equatable, Sendable {
         public var id: UUID
@@ -49,6 +52,8 @@ public struct NoteManifest: Codable, Equatable, Sendable {
     }
 
     public var formatVersion = Self.currentFormatVersion
+    /// The note's title when it was last saved. Nil in manifests from before format 3.
+    public var title: String?
     public var pages: [Page]
     /// The size new pages get when there's no neighbouring page to copy, and the size "Use … for All
     /// Pages" last applied.
@@ -57,7 +62,9 @@ public struct NoteManifest: Codable, Equatable, Sendable {
     public var modifiedAt: Date
 
     /// A manifest of `pageCount` blank pages (at least one) of `size` on `template`.
-    public init(pageCount: Int = 1, size: PageSize, template: PageTemplate, createdAt: Date = .now, modifiedAt: Date = .now) {
+    public init(title: String? = nil, pageCount: Int = 1, size: PageSize, template: PageTemplate,
+                createdAt: Date = .now, modifiedAt: Date = .now) {
+        self.title = title
         pages = (0 ..< max(1, pageCount)).map { _ in Page(id: UUID(), size: size, template: template) }
         defaultPageSize = size
         self.createdAt = createdAt
@@ -79,9 +86,10 @@ public struct NoteManifest: Codable, Equatable, Sendable {
         return pages.compactMap(\.template.background).filter { seen.insert($0.id).inserted }
     }
 
-    /// The same pages and sizes with fresh page IDs, for a duplicated note.
-    public func duplicated(at date: Date = .now) -> NoteManifest {
+    /// The same pages and sizes with fresh page IDs, for a duplicated note titled `title`.
+    public func duplicated(title: String? = nil, at date: Date = .now) -> NoteManifest {
         var copy = self
+        copy.title = title
         copy.pages = pages.map { Page(id: UUID(), size: $0.size, template: $0.template) }
         copy.createdAt = date
         copy.modifiedAt = date
@@ -119,10 +127,13 @@ public struct NoteManifest: Codable, Equatable, Sendable {
         return manifest
     }
 
+    /// The manifest as JSON. `DocumentStore` sets `formatVersion` to `currentFormatVersion` before it saves.
+    public func encoded() throws -> Data {
+        try Self.encoder.encode(self)
+    }
+
     /// Writes the manifest to `url` atomically, creating the package directory if needed.
-    public func write(to url: URL) throws {
-        let data = try Self.encoder.encode(self)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
+    public func write(to url: URL, files: PackageFiles = PackageFiles()) throws {
+        try files.write(encoded(), to: url)
     }
 }
