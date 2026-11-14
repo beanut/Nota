@@ -41,8 +41,25 @@ final class CanvasController: ObservableObject {
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
     @Published private(set) var zoom: CGFloat = 1
-    /// Set by a Pencil Pro squeeze; location is in canvas-view (= full-screen) coordinates.
+    /// Set by a Pencil double-tap or squeeze; location is in canvas-view (= full-screen) coordinates.
     @Published var quickPaletteLocation: CGPoint?
+    /// Apple Pencil gestures, finger drawing, palm rejection and handedness. Saved to `UserDefaults`,
+    /// so every editor shares them; a change made in one window reaches the others when they next open.
+    @Published var pencilSettings: PencilSettings {
+        didSet {
+            guard pencilSettings != oldValue else { return }
+            pencilSettings.save(to: settingsStore)
+            canvas?.pencilSettingsDidChange()
+        }
+    }
+
+    private let settingsStore: UserDefaults
+
+    init(settingsStore: UserDefaults = .standard) {
+        self.settingsStore = settingsStore
+        pencilSettings = PencilSettings.load(from: settingsStore)
+    }
+
     /// Space kept around the page when it's fitted to the view, on top of the safe area: room for the
     /// floating page bar at the bottom. The Pen Case lives in the navigation bar, inside the safe area.
     @Published var pageMargins = CanvasController.defaultPageMargins {
@@ -160,6 +177,17 @@ final class CanvasController: ObservableObject {
 
     func switchToPrevious() {
         select(previousTool)
+    }
+
+    /// Runs a resolved double-tap or squeeze action. `location` is where to show the palette, in
+    /// canvas-view coordinates; showing it again while it's up hides it.
+    func perform(_ action: PencilSettings.Action, at location: CGPoint) {
+        switch action {
+        case .eraser: toggleEraser()
+        case .previousTool: switchToPrevious()
+        case .palette: quickPaletteLocation = quickPaletteLocation == nil ? location : nil
+        case .system, .off: break
+        }
     }
 
     /// The ink the eraser removes in the current mode.

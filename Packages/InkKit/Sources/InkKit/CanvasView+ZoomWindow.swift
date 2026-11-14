@@ -273,9 +273,24 @@ extension CanvasView {
         }
     }
 
-    /// The nib's outline at `canvasPoint`, drawn through `transform` (canvas → this view).
-    func tipOutline(at canvasPoint: CGPoint, altitude: CGFloat, azimuth: CGFloat,
+    /// The nib's outline at `canvasPoint`, drawn through `transform` (canvas → this view): its size and
+    /// tilt, plus a tick from the centre showing the barrel's roll when the Pencil reports one (Pencil Pro).
+    func tipOutline(at canvasPoint: CGPoint, altitude: CGFloat, azimuth: CGFloat, roll: CGFloat = 0,
                     transform: ViewTransform) -> CGPath? {
+        guard let path = nibOutline(at: canvasPoint, altitude: altitude, azimuth: azimuth, transform: transform)
+        else { return nil }
+        guard roll != 0, let controller, controller.tool != .eraser else { return path }
+        let c = transform.toView(canvasPoint)
+        let reach = max(path.boundingBoxOfPath.width, path.boundingBoxOfPath.height) / 2 + 5
+        let mutable = CGMutablePath()
+        mutable.addPath(path)
+        mutable.move(to: c)
+        mutable.addLine(to: CGPoint(x: c.x + cos(roll) * reach, y: c.y + sin(roll) * reach))
+        return mutable
+    }
+
+    private func nibOutline(at canvasPoint: CGPoint, altitude: CGFloat, azimuth: CGFloat,
+                            transform: ViewTransform) -> CGPath? {
         guard let controller, controller.tool != .lasso else { return nil }
         let path = CGMutablePath()
         if controller.tool == .eraser {

@@ -36,7 +36,7 @@ final class PencilTelemetry: ObservableObject {
             switch self {
             case .idle: "idle"
             case .pencilDown: "pencil ✎"
-            case .simulatedPencil: "sim pencil (fake force)"
+            case .simulatedPencil: "finger ink (fake force)"
             case .hovering: "pencil hover"
             case let .finger(n): "finger ×\(n)"
             }
@@ -51,6 +51,8 @@ final class PencilTelemetry: ObservableObject {
         var altitude: CGFloat = .pi / 2
         var azimuth: CGFloat = 0
         var zOffset: CGFloat = 0
+        /// Barrel roll; Pencil Pro only, 0 on other Pencils.
+        var roll: CGFloat = 0
         var samplesPerSecond: Double = 0
         var eventsPerSecond: Double = 0
         var predictedCount = 0
@@ -105,6 +107,7 @@ struct PencilHUD: View {
                 ForceBar(value: s.normalizedForce)
                 row("altitude", String(format: "%5.1f°", degrees(s.altitude)))
                 row("azimuth", String(format: "%5.1f°", degrees(s.azimuth)))
+                row("roll", String(format: "%5.1f°", degrees(s.roll)))
                 row("hover z", String(format: "%.3f", s.zOffset))
                 row("samples/s", String(format: "%.0f", s.samplesPerSecond))
                 row("events/s", String(format: "%.0f", s.eventsPerSecond))

@@ -39,6 +39,7 @@ struct PenCase: View {
 
     @State private var optionsTool: Tool?
     @State private var showSettings = false
+    @State private var showPencilSettings = false
     @State private var confirmClear = false
     @State private var showRename = false
     @State private var draftTitle = ""
@@ -114,6 +115,9 @@ struct PenCase: View {
             Button { showSettings = true } label: {
                 Label("Pressure & Tilt…", systemImage: "hand.draw")
             }
+            Button { showPencilSettings = true } label: {
+                Label("Apple Pencil…", systemImage: "applepencil")
+            }
             Toggle(isOn: $controller.hudVisible) {
                 Label("Debug HUD", systemImage: "gauge.with.dots.needle.67percent")
             }
@@ -138,6 +142,9 @@ struct PenCase: View {
         .accessibilityLabel("More")
         .popover(isPresented: $showSettings, arrowEdge: .top) {
             CanvasSettingsView(controller: controller)
+        }
+        .popover(isPresented: $showPencilSettings, arrowEdge: .top) {
+            PencilSettingsView(controller: controller)
         }
         .confirmationDialog("Clear the page?", isPresented: $confirmClear) {
             Button("Clear Page", role: .destructive) { controller.clear() }
@@ -428,12 +435,22 @@ private struct CurvePreview: View {
     }
 }
 
-/// Pencil Pro squeeze palette, shown at the hover location: tools and inks only.
+/// The quick palette a Pencil squeeze or double-tap shows at the Pencil: tools and inks only. It sits
+/// above the tip, on the side away from the writing hand.
 struct QuickPaletteView: View {
     @ObservedObject var controller: CanvasController
     let location: CGPoint
+    @State private var paletteSize = CGSize(width: 420, height: 52)
 
     var body: some View {
+        GeometryReader { geo in
+            palette(center: PencilSettings.paletteCenter(anchor: location, size: paletteSize,
+                                                         in: CGRect(origin: .zero, size: geo.size),
+                                                         handedness: controller.pencilSettings.handedness))
+        }
+    }
+
+    private func palette(center: CGPoint) -> some View {
         ZStack {
             Color.black.opacity(0.001) // tap anywhere to dismiss
                 .onTapGesture { controller.quickPaletteLocation = nil }
@@ -449,7 +466,9 @@ struct QuickPaletteView: View {
             }
             .padding(InkSpacing.xxs)
             .inkFloatingBar()
-            .position(x: location.x, y: max(40, location.y - 60))
+            .fixedSize()
+            .onGeometryChange(for: CGSize.self, of: \.size) { paletteSize = $0 }
+            .position(center)
         }
     }
 }
