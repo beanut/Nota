@@ -3,7 +3,7 @@ import Foundation
 
 /// Tools the user can pick in the toolbar.
 enum Tool: String, CaseIterable, Identifiable {
-    case pen, pencil, highlighter, eraser, lasso
+    case pen, pencil, highlighter, shape, eraser, lasso
     var id: String {
         rawValue
     }
@@ -16,7 +16,7 @@ extension Tool {
         case .pen: .pen
         case .pencil: .pencil
         case .highlighter: .highlighter
-        case .eraser, .lasso: nil
+        case .shape, .eraser, .lasso: nil
         }
     }
 }

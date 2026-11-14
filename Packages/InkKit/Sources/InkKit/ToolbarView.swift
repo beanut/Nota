@@ -8,6 +8,7 @@ extension Tool {
         case .highlighter: .highlighter
         case .eraser: .eraser
         case .lasso: .lasso
+        case .shape: .shapes
         }
     }
 
@@ -18,13 +19,14 @@ extension Tool {
         case .highlighter: "Highlighter"
         case .eraser: "Eraser"
         case .lasso: "Lasso"
+        case .shape: "Shapes"
         }
     }
 
     /// Whether the tool draws in a colour picked from the Pen Case.
     var usesInk: Bool {
         switch self {
-        case .pen, .pencil, .highlighter: true
+        case .pen, .pencil, .highlighter, .shape: true
         case .eraser, .lasso: false
         }
     }
@@ -348,6 +350,23 @@ struct ToolOptionsView: View {
                 EraserOptions(controller: controller) { widthControls }
             case .lasso:
                 LassoOptions(controller: controller)
+                if let style = controller.selectedShapeStyle {
+                    ShapeStyleControls(
+                        controller: controller,
+                        lineStyle: Binding(get: { style.lineStyle },
+                                           set: { new in controller.restyleSelectedShapes { $0.lineStyle = new } }),
+                        fill: Binding(get: { style.fill }, set: { new in controller.restyleSelectedShapes { $0.fill = new } }),
+                        color: Binding(get: { style.color }, set: { new in controller.restyleSelectedShapes { $0.color = new } })
+                    )
+                }
+            case .shape:
+                ShapeStyleControls(controller: controller, lineStyle: $controller.shapeLineStyle,
+                                   fill: $controller.shapeFill, color: nil)
+                Text("Draw a shape and it snaps to it. Anything else becomes a smooth curve.")
+                    .font(theme.footnoteFont)
+                    .foregroundStyle(theme.color(\.textSecondary))
+                    .fixedSize(horizontal: false, vertical: true)
+                widthControls
             case .pen, .pencil, .highlighter:
                 BrushPicker(controller: controller, tool: tool)
                 Button {
@@ -423,6 +442,78 @@ struct ToolOptionsView: View {
     private var dotColor: Color {
         guard tool.usesInk else { return theme.color(\.textSecondary) }
         return controller.color(for: tool).color
+    }
+}
+
+/// A shape's line style and fill, and with `color` its outline colour: the shape tool's options for new
+/// shapes, or the lasso's for the selected ones.
+private struct ShapeStyleControls: View {
+    @ObservedObject var controller: CanvasController
+    @Binding var lineStyle: ShapeObject.LineStyle
+    @Binding var fill: PenColor?
+    /// The outline colour, when it's edited here (selected shapes); the shape tool takes it from the Pen Case.
+    var color: Binding<PenColor>?
+    @Environment(\.inkTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: InkSpacing.s) {
+            Picker("Line", selection: $lineStyle) {
+                Text("Solid").tag(ShapeObject.LineStyle.solid)
+                Text("Dashed").tag(ShapeObject.LineStyle.dashed)
+                Text("Dotted").tag(ShapeObject.LineStyle.dotted)
+            }
+            .pickerStyle(.segmented)
+            if let color {
+                swatchRow("Color") {
+                    ForEach(colors, id: \.self) { c in
+                        InkSwatchButton(color: c, name: controller.colorName(c, for: .shape),
+                                        isSelected: color.wrappedValue == c) { color.wrappedValue = c }
+                    }
+                }
+            }
+            swatchRow("Fill") {
+                Button { fill = nil } label: {
+                    ZStack {
+                        Circle()
+                            .strokeBorder(theme.color(\.textSecondary), lineWidth: 1.5)
+                            .frame(width: 20, height: 20)
+                        Rectangle()
+                            .fill(theme.color(\.textSecondary))
+                            .frame(width: 1.5, height: 22)
+                            .rotationEffect(.degrees(45))
+                        if fill == nil {
+                            Circle().strokeBorder(theme.color(\.textPrimary), lineWidth: 2)
+                        }
+                    }
+                    .frame(width: InkMetrics.swatch, height: InkMetrics.swatch)
+                    .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("No Fill")
+                .accessibilityAddTraits(fill == nil ? .isSelected : [])
+                ForEach(colors, id: \.self) { c in
+                    InkSwatchButton(color: c, name: controller.colorName(c, for: .shape), isSelected: fill == c) {
+                        fill = c
+                    }
+                }
+            }
+        }
+    }
+
+    private var colors: [PenColor] {
+        controller.quickColors(for: .shape)
+    }
+
+    private func swatchRow(_ title: LocalizedStringKey, @ViewBuilder content: () -> some View) -> some View {
+        HStack(spacing: InkSpacing.xxxs) {
+            Text(title)
+                .font(theme.bodyFont)
+                .foregroundStyle(theme.color(\.textPrimary))
+            Spacer(minLength: InkSpacing.s)
+            content()
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
     }
 }
 

@@ -32,7 +32,7 @@ public struct InkColor: Hashable, Sendable {
 
 /// The glyphs InkKit's chrome uses. A theme maps each one to an image; the default is SF Symbols.
 public enum InkIcon: String, CaseIterable, Sendable {
-    case pen, pencil, highlighter, eraser, lasso
+    case pen, pencil, highlighter, eraser, lasso, shapes
     case undo, redo, more
     case previousPage, nextPage, addPage, disclosure, delete
     /// The page bar's button for the page sidebar.
@@ -194,6 +194,7 @@ public extension InkTheme {
         case .highlighter: "highlighter"
         case .eraser: "eraser"
         case .lasso: "lasso"
+        case .shapes: "square.on.circle"
         case .undo: "arrow.uturn.backward"
         case .redo: "arrow.uturn.forward"
         case .more: "ellipsis"

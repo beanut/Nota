@@ -66,6 +66,9 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
 | `Lasso.swift` | Freeform and rectangle lasso regions and hit-testing |
 | `PageObject.swift` | `PageObject` (frame, transform, z-order, drawing), `PageObjectPlacement` (the shared JSON keys), `PlaceholderObject` (the test object), objects of unknown kinds |
+| `ShapeObject.swift` | `ShapeObject`: lines, arrows, rectangles, ellipses, triangles, polygons and curves, their handles and snap anchors, drawing (fill, solid / dashed / dotted outline) and lenient JSON; `ShapeStyle` |
+| `ShapeRecognizer.swift` | The on-device recogniser: a rough stroke to the shape it was meant to be, with angle, upright, square/circle and shape-to-shape snapping |
+| `CanvasView+Shapes.swift` | The shape tool, draw-and-hold to snap (and sizing the snapped shape before lifting), dragging a selected shape's handles, restyling selected shapes |
 | `PageObjectsFile.swift` | `PageObjectsFile`, a page's objects as `pages/<page id>.json`: format version, reading, writing |
 | `Selection.swift` | `PageSelection`, `SelectionBox` and `SelectionGeometry`: lasso and tap selection of strokes and objects, the box's handles and the transforms they make; `Stroke.applying(_:)` |
 | `ObjectLayerView.swift` | The canvas layer that draws the page's objects between the template and the ink |
@@ -271,8 +274,8 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 A page holds objects as well as ink (Architecture §5): shapes, text boxes, images and tape as they land.
 Every object is a `PageObject`: an `id`, a `frame` in its own space, a `transform` (`CGAffineTransform`)
 that puts the frame on the page, and a `zIndex`. Each type only draws itself and encodes its own fields; the
-lasso, the handles, undo and storage work on that placement. Today there's one type, `PlaceholderObject`
-(More › Add Test Object), a rectangle with a cross that exercises the layer.
+lasso, the handles, undo and storage work on that placement. There are two types: `ShapeObject` (see
+Shapes below) and `PlaceholderObject` (More › Add Test Object), a rectangle with a cross that exercises the layer.
 
 ```swift
 page.addObject(PlaceholderObject(frame: CGRect(x: 72, y: 72, width: 200, height: 120), color: PenColor(rgb: 0x2563EB)))
@@ -288,10 +291,11 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
 - **Revisions.** `objectsRevision` counts object changes, separately from `revision` (the ink's), so an
   object edit doesn't drop the page's `CommittedRaster`. Object-only edits notify `.objectsEdited`.
 - **One undo stack.** `addObject`, deleting a selection (`erase` with strokes and objects), `clear`,
-  `transform` and `edit` are commands on the page's stack, so one undo takes back whichever came last.
-  `edit` (pasting, duplicating, recolouring, changing thickness, bringing to front, sending to back) keeps
-  the page's strokes and objects before and after (copy-on-write, so it costs little more than what changed)
-  and swaps them on undo and redo. `transform`
+  `transform`, `replaceObjects` (a shape reshaped by a handle or restyled; `previewObjects` shows a
+  drag's in-between states without recording anything) and `edit` are commands on the page's stack, so one
+  undo takes back whichever came last. `edit` (pasting, duplicating, recolouring, changing thickness, bringing
+  to front, sending to back) keeps the page's strokes and objects before and after (copy-on-write, so it costs
+  little more than what changed) and swaps them on undo and redo. `transform`
   replaced the move-only `move`: it records the strokes and objects as they were plus the affine transform;
   undo puts the saved values back exactly, redo applies the transform to them again, so neither drifts.
 - **Transforming ink** (`Stroke.applying(_:)`) maps every point, turns the azimuth and a flat nib's angle
@@ -357,6 +361,45 @@ apps, which only look at `.ink` files, leave it alone:
 - An object of a kind this version doesn't know is kept verbatim, in its place in the stack, and written back;
   it isn't drawn or selectable.
 - Objects are written in stacking order with sorted keys: the same page always writes the same bytes.
+
+#### Shapes
+
+`ShapeObject` (file kind `"shape"`) is a line, arrow, rectangle, ellipse, triangle, polygon or curve. A
+rectangle or ellipse is its `frame` (rotated ones keep an upright frame and turn with the transform); every
+other kind is its `points`, which are also its handles, and its frame is their bounds. The outline is drawn in
+page space at `lineWidth` × √|det| of the transform, so it scales with the shape like ink but never stretches
+unevenly; it's solid, dashed or dotted, and closed kinds can be filled (`fill` at `fillOpacity`, 0.3 by
+default). Its fields are `shape`, `points` (`[[x, y], …]`), `strokeColor`, `lineWidth`, `lineStyle`, `fill`
+and `fillOpacity`; reading is lenient (an unknown `shape`, or points that don't fit it, read as a rectangle
+in the same frame; a bad colour or width takes the default).
+
+- **Making them.** The shape tool (Pen Case) turns every stroke into a shape when the Pencil lifts, in its own
+  colour, width, line style and fill; a stroke that isn't a recognisable shape becomes a smooth curve through
+  it. With the pen or pencil, **draw and hold** the Pencil still at the end of a stroke (about 0.45 s, the
+  same hold as circle-to-select, which wins over ink it encircles): if the stroke is a shape it snaps to one
+  in the stroke's colour and width (dashed or dotted with a dashed or dotted brush), with a haptic tick.
+  Keep the Pencil down to size it: a line or arrow's end follows the Pencil, other shapes scale about their
+  centre. Hold-to-snap only takes confident shapes (handwriting with sharp corners stays ink) at least 30 view
+  points across, never applies to the highlighter, and can be turned off (Apple Pencil › Draw and hold to
+  snap shapes).
+- **Recognition** (`ShapeRecognizer`, pure geometry, nothing leaves the device). An open stroke is a line if
+  it stays within 8% of its chord, an arrow if a straight shaft is followed by short barbs folding back from
+  its end, otherwise a curve if it's smooth (no turn sharper than 50° between samples). A stroke whose end
+  comes back within 22% of its size to its start is closed (overshoot trimmed); its corners (Ramer–Douglas–
+  Peucker, then near-straight vertices dropped) are compared with a principal-axis ellipse fit: three corners
+  are a triangle, four with near-right angles a rectangle, other four-, five- to eight-corner outlines
+  polygons, as long as the corners fit better than the ellipse; otherwise a good ellipse fit is an ellipse.
+- **Snapping.** Lines and arrows within 6° of a multiple of 45° are straightened onto it; rectangles and
+  ellipses within 8° of upright stand upright; near-equal sides make a square or a circle. Ends and corners
+  within 12 view points of another shape's anchor (corners, ends, edge midpoints, centres) land on it, while
+  drawing, while sizing a snapped shape and while dragging a handle.
+- **Editing.** Select a shape with the lasso: a point-based shape shows its handles as solid accent knobs;
+  drag one to reshape it (one undo step). A line or arrow shows only its two ends, and moves by dragging along
+  it; rectangles and ellipses reshape with the selection box. With shapes selected, the lasso's options change
+  their line style, outline colour and fill.
+- **Limits.** Tap-to-select and the lasso hit a shape anywhere in its bounds, so a diagonal line is
+  selectable in the empty corners of its box. Recognition thresholds are tuned on synthetic strokes; they
+  still need tuning with real handwriting on a physical iPad (NOT-12).
 
 ### Rendering pipeline
 
@@ -437,7 +480,8 @@ every editor and window shares them.
     (one undo step). Over blank paper it stays ink.
   - *Circle and hold to select:* a closed loop held still for about 0.45 s selects the strokes at least
     60% inside it, switches to the lasso and lets the same Pencil touch drag them.
-  - Both give canvas haptic feedback (`UICanvasFeedbackGenerator`) on Pencil Pro.
+  - *Draw and hold to snap shapes:* see Page objects › Shapes.
+  - All three give canvas haptic feedback (`UICanvasFeedbackGenerator`) on Pencil Pro.
 
 Barrel roll doesn't change the nib yet: there are no chisel or fountain brushes until the brush engine
 (NOT-16). None of this has been tried on a real Pencil (see NOT-12).

@@ -342,7 +342,8 @@ enum JSONValue: Codable, Equatable, Sendable {
 enum PageObjectKinds {
     /// Every kind this version reads. Add new object types here.
     static let known: [String: any PageObject.Type] = [
-        PlaceholderObject.kind: PlaceholderObject.self
+        PlaceholderObject.kind: PlaceholderObject.self,
+        ShapeObject.kind: ShapeObject.self
     ]
 
     /// Whether objects of this type can be seen and selected (objects of unknown kinds can't).

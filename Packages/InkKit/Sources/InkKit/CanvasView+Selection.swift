@@ -36,6 +36,7 @@ extension CanvasView {
         selectionDragInteraction.isEnabled = selectionBox != nil
         if isActiveCanvas {
             controller?.selectionDidChange(!selection.isEmpty)
+            controller?.selectedShapesDidChange(selectedShapeStyle)
         }
         updateLassoOverlay()
     }
@@ -112,9 +113,12 @@ extension CanvasView {
         guard let controller else { return }
         switch lassoSession {
         case nil:
-            if let box = selectionBox, !selection.isEmpty,
-               let handle = SelectionGeometry.handle(at: p, box: box, reach: Self.handleReach / inputTransform.scale,
-                                                     rotateDistance: Self.rotateHandleDistance / viewTransform.scale) {
+            if beginShapeReshape(at: p) {
+                // A selected shape's own handle: drag it to reshape the shape.
+                lassoPending = false
+                return
+            }
+            if let box = selectionBox, !selection.isEmpty, let handle = selectionHandle(at: p, box: box) {
                 // Dragging the selection or a handle transforms it. Pending strokes are redrawn by the full render.
                 dropPending(selection.strokeIDs)
                 lassoSession = .transforming(SelectionDrag(handle: handle, start: p, box: box,
@@ -145,6 +149,8 @@ extension CanvasView {
             drag.transform = t
             lassoSession = .transforming(drag)
             preview(drag)
+        case let .reshaping(reshape)?:
+            updateShapeReshape(reshape, to: p)
         }
     }
 
@@ -209,6 +215,8 @@ extension CanvasView {
                 refreshObjects()
                 selectionBox = drag.box
             }
+        case let .reshaping(reshape)?:
+            finishShapeReshape(reshape, commit: commit)
         case nil:
             break
         }
