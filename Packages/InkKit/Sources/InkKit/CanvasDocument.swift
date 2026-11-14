@@ -160,6 +160,18 @@ public final class CanvasDocument: Identifiable {
         observers.removeAll { $0.owner == nil || $0.owner === owner }
     }
 
+    /// Calls `onChange` after every change worth saving: each edit, undo, redo and refinement of the ink,
+    /// and each change of size, template or background, until `owner` is released or
+    /// `stopObservingChanges(_:)` is called. It's never called during a stroke, only once it's committed,
+    /// so it's cheap to use for autosave. Observing again with the same owner replaces the handler.
+    public func observeChanges(_ owner: AnyObject, onChange: @escaping () -> Void) {
+        addObserver(owner, onChange: { _ in onChange() }, onPageSizeChange: onChange, onTemplateChange: onChange)
+    }
+
+    public func stopObservingChanges(_ owner: AnyObject) {
+        removeObserver(owner)
+    }
+
     /// Number of views observing the page.
     var observerCount: Int {
         observers.filter { $0.owner != nil }.count
