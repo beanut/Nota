@@ -32,6 +32,8 @@ extension CanvasView {
         let strokeBounds = document.strokes.filter { selection.strokeIDs.contains($0.id) }.map { geometry(for: $0).bounds }
         let objects = document.objects.filter { selection.objectIDs.contains($0.id) }
         selectionBox = SelectionGeometry.box(strokeBounds: strokeBounds, objects: objects)
+        // Only armed while there's something to drag out, so its long press never touches the ink path.
+        selectionDragInteraction.isEnabled = selectionBox != nil
         if isActiveCanvas {
             controller?.selectionDidChange(!selection.isEmpty)
             controller?.selectedShapesDidChange(selectedShapeStyle)
@@ -41,6 +43,9 @@ extension CanvasView {
 
     func select(_ newSelection: PageSelection) {
         selection = newSelection
+        if newSelection.isEmpty {
+            dismissEditMenu()
+        }
         updateSelectionBox()
     }
 
@@ -94,6 +99,16 @@ extension CanvasView {
         }
     }
 
+    /// The strokes the lasso may pick up near `region`: none when its filter leaves ink out.
+    func filteredStrokeShapes(near region: CGRect) -> [SelectionGeometry.StrokeShape] {
+        (controller?.lassoFilter ?? .all).contains(.ink) ? strokeShapes(near: region) : []
+    }
+
+    /// The objects the lasso may pick up: none when its filter leaves objects out.
+    var filteredObjects: [any PageObject] {
+        (controller?.lassoFilter ?? .all).contains(.objects) ? document.objects : []
+    }
+
     func handleLassoSample(_ p: CGPoint) {
         guard let controller else { return }
         switch lassoSession {
@@ -109,9 +124,11 @@ extension CanvasView {
                 lassoSession = .transforming(SelectionDrag(handle: handle, start: p, box: box,
                                                            session: document.beginTransform(selection)))
             } else {
+                lassoHadSelection = !selection.isEmpty
                 clearSelection()
                 lassoSession = .drawing([p])
             }
+            dismissEditMenu()
             lassoPending = false
         case var .drawing(pts)?:
             switch controller.lassoMode {
@@ -165,20 +182,28 @@ extension CanvasView {
                 // A tap: the topmost stroke or object under it.
                 let tolerance = Self.tapSlop / inputTransform.scale
                 let near = CGRect(origin: first, size: .zero).insetBy(dx: -tolerance, dy: -tolerance)
-                let hit = SelectionGeometry.hitTest(first, tolerance: tolerance, strokes: strokeShapes(near: near),
-                                                    objects: document.objects)
+                let hit = SelectionGeometry.hitTest(first, tolerance: tolerance, strokes: filteredStrokeShapes(near: near),
+                                                    objects: filteredObjects)
                 select(hit ?? .empty)
+                if hit != nil {
+                    showSelectionMenu()
+                } else if !lassoHadSelection, controller.canPaste {
+                    showPasteMenu(at: first)
+                }
                 return
             }
             guard let polygon = LassoGeometry.region(mode: controller.lassoMode, points: pts) else { return }
             // Whole strokes and objects are selected even if only part of them is inside the region.
-            select(SelectionGeometry.select(in: polygon, strokes: strokeShapes(near: LassoGeometry.bounds(of: polygon)),
-                                            objects: document.objects))
+            select(SelectionGeometry.select(in: polygon,
+                                            strokes: filteredStrokeShapes(near: LassoGeometry.bounds(of: polygon)),
+                                            objects: filteredObjects))
+            showSelectionMenu()
         case let .transforming(drag)?:
             if commit {
                 editDocument { document.commitTransform(drag.session, by: drag.transform) }
                 // The box turns and stretches with what it holds.
                 selectionBox = drag.box.applying(drag.transform)
+                showSelectionMenu()
             } else {
                 document.cancelTransform(drag.session)
                 for stroke in drag.session.strokes {

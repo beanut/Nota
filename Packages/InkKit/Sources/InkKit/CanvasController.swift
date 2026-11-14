@@ -20,7 +20,16 @@ final class CanvasController: ObservableObject {
     /// Goes back to the previous tool when an eraser stroke ends.
     @Published var switchBackAfterErasing = false
     @Published var lassoMode: LassoMode = .freeform
+    /// What the lasso picks up: ink, objects or both. Never empty.
+    @Published var lassoFilter: LassoFilter = .all
     @Published private(set) var hasSelection = false
+    /// Whether the pasteboard holds a lasso selection to paste (from any page of any note).
+    @Published private(set) var canPaste = false
+    /// Where Cut, Copy and Paste go: the system pasteboard, or a private one in tests.
+    let pasteboard: UIPasteboard
+    private var pasteboardObservers: [AnyCancellable] = []
+    /// The app's own actions in the selection's menu, after InkKit's (see `SelectionAction`).
+    var selectionActions: [SelectionAction] = []
     @Published var settings: [Tool: ToolSettings] = [
         .pen: ToolSettings(width: 4),
         .pencil: ToolSettings(width: 3),
@@ -96,15 +105,31 @@ final class CanvasController: ObservableObject {
         let quickColorIndex: Int?
     }
 
-    /// `penTray` defaults to `PenTrayStore.shared`.
-    init(settingsStore: UserDefaults = .standard, penTray: PenTrayStore? = nil) {
+    /// `penTray` defaults to `PenTrayStore.shared` and `pasteboard` to the general pasteboard.
+    init(settingsStore: UserDefaults = .standard, penTray: PenTrayStore? = nil, pasteboard: UIPasteboard = .general) {
         self.settingsStore = settingsStore
+        self.pasteboard = pasteboard
         let penTray = penTray ?? .shared
         self.penTray = penTray
         pencilSettings = PencilSettings.load(from: settingsStore)
         pageLayout = PageLayoutMode.load(from: settingsStore)
         // Views reading quick colours, sizes and pens through the controller redraw when the tray changes.
         penTrayObservation = penTray.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        // Another app (or another of our windows) may have copied something since.
+        let center = NotificationCenter.default
+        pasteboardObservers = [
+            center.publisher(for: UIPasteboard.changedNotification, object: pasteboard),
+            center.publisher(for: UIApplication.didBecomeActiveNotification)
+        ].map { $0.receive(on: RunLoop.main).sink { [weak self] _ in self?.refreshCanPaste() } }
+        refreshCanPaste()
+    }
+
+    /// Checks whether the pasteboard holds a selection, without reading it (so no paste prompt).
+    func refreshCanPaste() {
+        let has = pasteboard.contains(pasteboardTypes: [SelectionClip.pasteboardType])
+        if canPaste != has {
+            canPaste = has
+        }
     }
 
     /// Space kept around the page when it's fitted to the view, on top of the safe area: room for the
@@ -287,6 +312,41 @@ final class CanvasController: ObservableObject {
 
     func deleteSelection() {
         canvas?.deleteSelection()
+    }
+
+    func cutSelection() {
+        canvas?.cutSelection()
+    }
+
+    func copySelection() {
+        canvas?.copySelection()
+    }
+
+    /// Pastes the pasteboard's selection onto the current page and selects it.
+    func paste() {
+        canvas?.paste()
+    }
+
+    func duplicateSelection() {
+        canvas?.duplicateSelection()
+    }
+
+    /// Recolours the selection (one undo step).
+    func recolorSelection(_ color: PenColor) {
+        canvas?.recolorSelection(color)
+    }
+
+    /// Turns `kind` on or off in the lasso's filter. The last kind left on stays on.
+    func setLassoFilter(_ kind: LassoFilter, included: Bool) {
+        var filter = lassoFilter
+        if included {
+            filter.insert(kind)
+        } else {
+            filter.remove(kind)
+        }
+        if !filter.isEmpty {
+            lassoFilter = filter
+        }
     }
 
     /// Adds a placeholder object (the object layer's test object) to the page in the pen's colour and

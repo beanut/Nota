@@ -72,7 +72,10 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `PageObjectsFile.swift` | `PageObjectsFile`, a page's objects as `pages/<page id>.json`: format version, reading, writing |
 | `Selection.swift` | `PageSelection`, `SelectionBox` and `SelectionGeometry`: lasso and tap selection of strokes and objects, the box's handles and the transforms they make; `Stroke.applying(_:)` |
 | `ObjectLayerView.swift` | The canvas layer that draws the page's objects between the template and the ink |
-| `CanvasView+Selection.swift` | The lasso on the canvas: selecting, dragging the box and its handles, deleting, adding the test object |
+| `CanvasView+Selection.swift` | The lasso on the canvas: selecting (with the ink / objects filter), dragging the box and its handles, deleting, adding the test object |
+| `CanvasView+SelectionActions.swift` | What the lasso does with a selection: cut, copy, paste, duplicate, recolour, thickness, bring to front / send to back, screenshot, drag out as an image; its menu (`UIEditMenuInteraction`) and ⌘X / ⌘C / ⌘V / ⌘D / Delete |
+| `SelectionClip.swift` | `SelectionClip`, a copied selection on the pasteboard (its format, fresh copies with new ids), and `PastePlacement`, where a paste lands |
+| `SelectionAction.swift` | `SelectionAction` and `LassoSelection`: the app's own items in the selection's menu (convert to text, AI actions) |
 | `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes built in parallel, culling, drawing in parallel bands), shared by the canvas and the benchmarks |
 | `CommittedRaster.swift` | A page's committed layer kept compressed with the page, so reopening it restores the pixels instead of re-rendering |
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
@@ -288,8 +291,11 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
 - **Revisions.** `objectsRevision` counts object changes, separately from `revision` (the ink's), so an
   object edit doesn't drop the page's `CommittedRaster`. Object-only edits notify `.objectsEdited`.
 - **One undo stack.** `addObject`, deleting a selection (`erase` with strokes and objects), `clear`,
-  `transform` and `replaceObjects` (a shape reshaped by a handle or restyled; `previewObjects` shows a
-  drag's in-between states without recording anything) are commands on the page's stack, so one undo takes back whichever came last. `transform`
+  `transform`, `replaceObjects` (a shape reshaped by a handle or restyled; `previewObjects` shows a
+  drag's in-between states without recording anything) and `edit` are commands on the page's stack, so one
+  undo takes back whichever came last. `edit` (pasting, duplicating, recolouring, changing thickness, bringing
+  to front, sending to back) keeps the page's strokes and objects before and after (copy-on-write, so it costs
+  little more than what changed) and swaps them on undo and redo. `transform`
   replaced the move-only `move`: it records the strokes and objects as they were plus the affine transform;
   undo puts the saved values back exactly, redo applies the transform to them again, so neither drifts.
 - **Transforming ink** (`Stroke.applying(_:)`) maps every point, turns the azimuth and a flat nib's angle
@@ -302,7 +308,36 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
   single object's own frame, and follows each transform, so it rotates with what it holds. Dragging inside
   moves, a corner knob resizes in the box's own axes about the opposite corner (never flipping, at least
   8 view points a side), the knob above rotates about the centre. Pixel-eraser strokes and objects of unknown
-  kinds are never selected.
+  kinds are never selected. The lasso's filter (Tool Options › Selects: Ink, Objects) limits what loops,
+  rectangles and taps pick up; text and images get options of their own as they land.
+
+#### Lasso actions
+
+When a selection is made (or a drag of it ends), its menu appears above it: Cut, Copy, Paste, Duplicate,
+Delete; Color (the pen's quick colours, or the highlighter's for highlighter ink alone), Thickness (Thicker /
+Thinner, ×1.25 a step, the menu staying open), Arrange (Bring to Front / Send to Back), Take Screenshot;
+then the app's `SelectionAction`s. A tap on the selection shows it again. Each action is one undo step.
+
+- **Clipboard.** Copy puts a `SelectionClip` on the pasteboard as `app.nota.inkkit.selection` (JSON: the ink
+  as an `.ink` file and the objects as an objects file, base64) next to a PNG of the selection for other apps,
+  so a selection reaches other pages, notes and windows. Paste makes copies with new ids (objects go through
+  the objects file, so every kind copies the same way) and selects them. `PastePlacement`: a tap on nothing,
+  with nothing selected, offers Paste there, centred on the tap; otherwise the clip lands in its own place
+  (so a cut moves it to another page or note in position), a 24 pt step further for each copy already there
+  (the originals on the page count as one, and so does each earlier paste of the same clip), and centred in
+  view if that place is off screen. Duplicate copies a step down and right without touching the pasteboard.
+- **Style.** Recolouring keeps each stroke's opacity (a highlighter stays see-through) and recolours objects
+  through `PageObject.recolored(_:)` (kinds without a colour keep theirs). Thickness scales each brush's widths
+  and tapers (`BrushDescriptor.scaled(by:)`), as resizing does. With the lasso and a selection, the Pen Case's
+  quick colours recolour it too.
+- **Order.** Ink is always over objects, so Bring to Front moves strokes to the end of the ink and objects to
+  the top of the objects (renumbering `zIndex`), each keeping its own order.
+- **Images.** Take Screenshot shares the page under the selection box, paper and template included
+  (`PageRenderer.image(of:region:scale:palette:)`). Holding still on the selection with a finger or the Pencil
+  lifts it out as a PNG to drop into other apps (`UIDragInteraction`, armed only while something is selected).
+- **Hook.** `InkCanvasEditor(…, selectionActions:)` adds items after InkKit's, with an `isAvailable` check;
+  `perform` gets a `LassoSelection`: the page id, bounds, the selected ink as an `InkPageFile`, the objects and
+  `image(scale:)`.
 
 #### Objects file
 

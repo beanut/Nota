@@ -165,7 +165,27 @@ public final class CanvasDocument: Identifiable {
         /// Move, scale or rotate strokes and objects (the lasso and the selection handles).
         case transform(Transformation)
         case addObject(any PageObject)
+        /// Paste, duplicate, recolour, change thickness, bring to front or send to back.
+        case edit(Edit)
         case replaceObjects(before: [any PageObject], after: [any PageObject]) // reshaped or restyled
+    }
+
+    /// An edit given as the page's strokes and objects before and after it (nil: that layer didn't
+    /// change). Undo puts the before back and redo the after, exactly. The arrays are copy-on-write and so
+    /// are each stroke's points, so keeping both costs little more than what the edit changed.
+    struct Edit {
+        var strokesBefore: [Stroke]?
+        var strokesAfter: [Stroke]?
+        var objectsBefore: [any PageObject]?
+        var objectsAfter: [any PageObject]?
+        /// Strokes whose geometry the edit changes (a new thickness), so views drop their cached geometry.
+        var reshaped: Set<UUID> = []
+    }
+
+    /// What `arrange(_:_:)` does. Ink is always drawn over objects, so strokes move among the ink and
+    /// objects among the objects.
+    enum Arrangement {
+        case bringToFront, sendToBack
     }
 
     private(set) var strokes: [Stroke] = []
@@ -410,6 +430,107 @@ public final class CanvasDocument: Identifiable {
         }
     }
 
+    // MARK: Paste, duplicate, restyle, arrange
+
+    /// Puts strokes and objects on the page (pasted or duplicated copies, with ids of their own) as one
+    /// undoable edit: the strokes on top of the ink, the objects on top of the other objects, each in
+    /// their own order.
+    func insert(strokes newStrokes: [Stroke], objects newObjects: [any PageObject]) {
+        guard !newStrokes.isEmpty || !newObjects.isEmpty else { return }
+        var edit = Edit()
+        if !newStrokes.isEmpty {
+            edit.strokesBefore = strokes
+            edit.strokesAfter = strokes + newStrokes
+        }
+        if !newObjects.isEmpty {
+            var after = objects
+            var z = (objects.last?.zIndex ?? -1) + 1
+            for var object in PageObjectsFile.stacked(newObjects) {
+                object.zIndex = z
+                z += 1
+                after.append(object)
+            }
+            edit.objectsBefore = objects
+            edit.objectsAfter = after
+        }
+        commit(edit)
+    }
+
+    /// Changes the selected strokes and objects with `stroke` and `object` (a new colour or thickness) as
+    /// one undoable edit. Pixel-eraser strokes and objects of unknown kinds are left alone. Strokes are
+    /// recorded only if one of them changed.
+    func restyle(_ selection: PageSelection, strokes restyleStroke: (Stroke) -> Stroke,
+                 objects restyleObject: (any PageObject) -> any PageObject) {
+        var edit = Edit()
+        var after = strokes, reshaped = Set<UUID>()
+        for i in after.indices where selection.strokeIDs.contains(after[i].id) && !after[i].brush.erases {
+            let restyled = restyleStroke(after[i])
+            guard restyled != after[i] else { continue }
+            if restyled.brush != after[i].brush || restyled.points != after[i].points {
+                reshaped.insert(restyled.id)
+            }
+            after[i] = restyled
+        }
+        if after != strokes {
+            edit.strokesBefore = strokes
+            edit.strokesAfter = after
+            edit.reshaped = reshaped
+        }
+        let selected = objects.indices.filter {
+            selection.objectIDs.contains(objects[$0].id) && PageObjectKinds.isSelectable(objects[$0])
+        }
+        if !selected.isEmpty {
+            var afterObjects = objects
+            for i in selected {
+                afterObjects[i] = restyleObject(objects[i])
+            }
+            edit.objectsBefore = objects
+            edit.objectsAfter = afterObjects
+        }
+        commit(edit)
+    }
+
+    /// Brings the selected strokes and objects to the front, or sends them to the back, keeping their own
+    /// order, as one undoable edit (none if nothing moves). Objects are renumbered `0…` in their new order.
+    func arrange(_ selection: PageSelection, _ arrangement: Arrangement) {
+        func arranged<T>(_ items: [T], isSelected: (T) -> Bool) -> [T] {
+            let chosen = items.filter(isSelected), others = items.filter { !isSelected($0) }
+            return arrangement == .bringToFront ? others + chosen : chosen + others
+        }
+        var edit = Edit()
+        let newStrokes = arranged(strokes) { selection.strokeIDs.contains($0.id) && !$0.brush.erases }
+        if newStrokes.map(\.id) != strokes.map(\.id) {
+            edit.strokesBefore = strokes
+            edit.strokesAfter = newStrokes
+        }
+        var newObjects = arranged(objects) {
+            selection.objectIDs.contains($0.id) && PageObjectKinds.isSelectable($0)
+        }
+        if newObjects.map(\.id) != objects.map(\.id) {
+            for i in newObjects.indices {
+                newObjects[i].zIndex = i
+            }
+            edit.objectsBefore = objects
+            edit.objectsAfter = newObjects
+        }
+        commit(edit)
+    }
+
+    private func commit(_ edit: Edit) {
+        guard edit.strokesAfter != nil || edit.objectsAfter != nil else { return }
+        apply(edit, undoing: false)
+        push(.edit(edit), reshaping: edit.reshaped)
+    }
+
+    private func apply(_ edit: Edit, undoing: Bool) {
+        if let s = undoing ? edit.strokesBefore : edit.strokesAfter {
+            strokes = s
+        }
+        if let o = undoing ? edit.objectsBefore : edit.objectsAfter {
+            objects = o
+        }
+    }
+
     /// Removes every stroke and object, as one undoable edit.
     func clear() {
         guard !strokes.isEmpty || !objects.isEmpty else { return }
@@ -462,6 +583,10 @@ public final class CanvasDocument: Identifiable {
         case let .addObject(object):
             objects.removeAll { $0.id == object.id }
             redoStack.append(command)
+        case let .edit(edit):
+            apply(edit, undoing: true)
+            lastReshapedIDs = edit.reshaped
+            redoStack.append(command)
         case let .replaceObjects(before, _):
             place([], before)
             redoStack.append(command)
@@ -498,6 +623,10 @@ public final class CanvasDocument: Identifiable {
             objects.append(object)
             objects = PageObjectsFile.stacked(objects)
             undoStack.append(command)
+        case let .edit(edit):
+            apply(edit, undoing: false)
+            lastReshapedIDs = edit.reshaped
+            undoStack.append(command)
         case let .replaceObjects(_, after):
             place([], after)
             undoStack.append(command)
@@ -514,6 +643,7 @@ public final class CanvasDocument: Identifiable {
         case let .clear(saved, savedObjects): (!saved.isEmpty, !savedObjects.isEmpty)
         case let .transform(t): (!t.strokes.isEmpty, !t.objects.isEmpty)
         case .addObject, .replaceObjects: (false, true)
+        case let .edit(edit): (edit.strokesAfter != nil, edit.objectsAfter != nil)
         }
     }
 

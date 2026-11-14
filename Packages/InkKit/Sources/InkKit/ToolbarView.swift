@@ -218,6 +218,8 @@ private struct InkRow: View {
         let tool = controller.tool
         let colors = controller.quickColors(for: tool)
         let current = controller.color(for: tool)
+        // With the lasso, the pen's colours recolour the selection.
+        let recolors = tool == .lasso && controller.hasSelection
         let layout = axis == .horizontal
             ? AnyLayout(HStackLayout(spacing: InkSpacing.xxxs))
             : AnyLayout(VStackLayout(spacing: InkSpacing.xxxs))
@@ -226,7 +228,10 @@ private struct InkRow: View {
                 let isSelected = tool.usesInk && current == colors[i]
                 InkSwatchButton(color: colors[i], name: controller.colorName(colors[i], for: tool),
                                 isSelected: isSelected) {
-                    if opensPicker, isSelected {
+                    if recolors {
+                        controller.recolorSelection(colors[i])
+                        onPick()
+                    } else if opensPicker, isSelected {
                         pickerSlot = i
                     } else {
                         controller.setColor(colors[i], for: tool)
@@ -242,14 +247,15 @@ private struct InkRow: View {
                 ColorWellButton(color: current, isSelected: tool.usesInk && !colors.contains(current)) {
                     pickerSlot = -1
                 }
+                .disabled(!tool.usesInk)
                 .popover(isPresented: slotBinding(-1), arrowEdge: .top) {
                     ColorPickerView(controller: controller, tool: tool, quickColorIndex: nil) { pickerSlot = nil }
                 }
             }
         }
         .padding(axis == .horizontal ? .horizontal : .vertical, InkSpacing.xs)
-        .disabled(!tool.usesInk)
-        .opacity(tool.usesInk ? 1 : 0.35)
+        .disabled(!tool.usesInk && !recolors)
+        .opacity(tool.usesInk || recolors ? 1 : 0.35)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Colors")
     }
@@ -260,6 +266,68 @@ private struct InkRow: View {
                 pickerSlot = nil
             }
         })
+    }
+}
+
+/// The lasso's options: its shape, what it picks up, and what to do with the selection (the same actions
+/// as the selection's own menu, for when it's easier to reach here).
+private struct LassoOptions: View {
+    @ObservedObject var controller: CanvasController
+    @Environment(\.inkTheme) private var theme
+
+    var body: some View {
+        Picker("Shape", selection: $controller.lassoMode) {
+            Text("Freeform").tag(LassoMode.freeform)
+            Text("Rectangle").tag(LassoMode.square)
+        }
+        .pickerStyle(.segmented)
+        VStack(alignment: .leading, spacing: InkSpacing.xxs) {
+            Text("Selects")
+                .font(theme.footnoteFont)
+                .foregroundStyle(theme.color(\.textSecondary))
+            Toggle("Ink", isOn: filterBinding(.ink))
+            Toggle("Objects", isOn: filterBinding(.objects))
+        }
+        .font(theme.bodyFont)
+        .foregroundStyle(theme.color(\.textPrimary))
+        .tint(theme.color(\.accent))
+        Grid(horizontalSpacing: InkSpacing.xs, verticalSpacing: InkSpacing.xs) {
+            GridRow {
+                action("Cut", enabled: controller.hasSelection) { controller.cutSelection() }
+                action("Copy", enabled: controller.hasSelection) { controller.copySelection() }
+            }
+            GridRow {
+                action("Paste", enabled: controller.canPaste) { controller.paste() }
+                action("Duplicate", enabled: controller.hasSelection) { controller.duplicateSelection() }
+            }
+        }
+        Button {
+            controller.deleteSelection()
+        } label: {
+            HStack(spacing: InkSpacing.xs) {
+                InkIconView(.delete, size: 16)
+                Text("Delete Selection")
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(InkSecondaryButtonStyle())
+        .disabled(!controller.hasSelection)
+    }
+
+    private func action(_ title: String, enabled: Bool, perform: @escaping () -> Void) -> some View {
+        Button(action: perform) {
+            Text(title)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(InkSecondaryButtonStyle())
+        .disabled(!enabled)
+    }
+
+    /// On for `kind` while the lasso picks it up; the last kind left on can't be turned off.
+    private func filterBinding(_ kind: LassoFilter) -> Binding<Bool> {
+        Binding(get: { controller.lassoFilter.contains(kind) },
+                set: { controller.setLassoFilter(kind, included: $0) })
     }
 }
 
@@ -281,22 +349,7 @@ struct ToolOptionsView: View {
             case .eraser:
                 EraserOptions(controller: controller) { widthControls }
             case .lasso:
-                Picker("Shape", selection: $controller.lassoMode) {
-                    Text("Freeform").tag(LassoMode.freeform)
-                    Text("Rectangle").tag(LassoMode.square)
-                }
-                .pickerStyle(.segmented)
-                Button {
-                    controller.deleteSelection()
-                } label: {
-                    HStack(spacing: InkSpacing.xs) {
-                        InkIconView(.delete, size: 16)
-                        Text("Delete Selection")
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(InkSecondaryButtonStyle())
-                .disabled(!controller.hasSelection)
+                LassoOptions(controller: controller)
                 if let style = controller.selectedShapeStyle {
                     ShapeStyleControls(
                         controller: controller,

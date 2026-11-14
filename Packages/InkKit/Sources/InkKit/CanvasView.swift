@@ -17,7 +17,7 @@ final class CanvasView: UIView {
     private var deskColor = InkTheme.standard.desk
     private var accentColor = InkTheme.standard.accent
     private var shadowColor = InkTheme.standard.shadow
-    private var paperTheme = InkTheme.standard
+    private(set) var paperTheme = InkTheme.standard
 
     let document: CanvasDocument
     /// True when the view is one page among several in continuous scrolling (`ContinuousCanvasView`): the
@@ -144,6 +144,20 @@ final class CanvasView: UIView {
     var selectionBox: SelectionBox? // canvas space; nil when nothing is selected
     let objectLayer = ObjectLayerView()
     private let lassoOverlayView = LassoOverlayView()
+    /// How many times each clip has been pasted on this page in its own place, so the next paste of it
+    /// lands a step further along (see `PastePlacement`).
+    var pasteCounts: [UUID: Int] = [:]
+    /// The selection's menu (cut, copy, colour, arrange…) and the lasso's Paste menu.
+    lazy var editMenu = UIEditMenuInteraction(delegate: self)
+    /// Where a Paste from the lasso's Paste menu goes, in canvas space.
+    var pendingPastePoint: CGPoint?
+    /// Whether something was selected when the current lasso gesture began: a tap on nothing then only
+    /// deselects, while a tap on nothing with nothing selected offers Paste.
+    var lassoHadSelection = false
+    /// Drags the selection out to other apps as an image.
+    lazy var selectionDragInteraction = UIDragInteraction(delegate: self)
+    /// A finger tap with the lasso, when fingers don't draw: shows the selection's menu or Paste.
+    lazy var lassoTap = UITapGestureRecognizer(target: self, action: #selector(handleLassoTap(_:)))
     private struct PointRef { let strokeID: UUID; let index: Int }
     private var pendingEstimates: [NSNumber: PointRef] = [:]
     private var outstandingEstimates: [UUID: Int] = [:]
@@ -830,7 +844,7 @@ final class CanvasView: UIView {
 
     /// Redraws the page from the document after it changed under the view (an undo, a redo, or an edit
     /// made in another view): the objects always, and the committed ink layer when the ink changed.
-    private func redrawFromDocument(ink: Bool = true) {
+    func redrawFromDocument(ink: Bool = true) {
         if ink {
             generation &+= 1
             invalidateMoved()
@@ -1342,6 +1356,13 @@ extension CanvasView {
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
         hover.delegate = self
         addGestureRecognizer(hover)
+
+        lassoTap.allowedTouchTypes = direct
+        lassoTap.delegate = self
+        addGestureRecognizer(lassoTap)
+        addInteraction(editMenu)
+        selectionDragInteraction.isEnabled = false // see `updateSelectionBox()`
+        addInteraction(selectionDragInteraction)
     }
 
     private func gestureBegan() {
@@ -1591,6 +1612,9 @@ extension CanvasView: UIGestureRecognizerDelegate {
         }
         if g === pinch {
             return g.numberOfTouches == 2
+        }
+        if g === lassoTap {
+            return controller?.tool == .lasso && !fingerDraws
         }
         return true
     }

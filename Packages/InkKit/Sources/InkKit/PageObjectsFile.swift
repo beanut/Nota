@@ -79,6 +79,21 @@ public struct PageObjectsFile: Sendable {
         objects.enumerated().sorted { ($0.element.zIndex, $0.offset) < ($1.element.zIndex, $1.offset) }.map(\.element)
     }
 
+    /// Copies of `objects` with new ids and everything else the same, for pasting and duplicating. They go
+    /// through the file format, so every kind of object is copied the same way without having to know how.
+    static func copies(of objects: [any PageObject]) throws -> [any PageObject] {
+        guard !objects.isEmpty else { return [] }
+        let data = try PageObjectsFile(pageID: UUID(), objects: objects).encoded()
+        guard case var .object(body) = try JSONDecoder().decode(JSONValue.self, from: data),
+              case let .array(items)? = body["objects"] else { throw PageObjectsFileError.notAnObjectsFile }
+        body["objects"] = .array(items.map { item in
+            guard case var .object(fields) = item else { return item }
+            fields[PageObjectPlacement.CodingKeys.id.rawValue] = .string(UUID().uuidString)
+            return .object(fields)
+        })
+        return try PageObjectsFile(data: JSONEncoder().encode(JSONValue.object(body))).objects
+    }
+
     // MARK: Coding
 
     private struct Header: Decodable {

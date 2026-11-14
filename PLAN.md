@@ -38,10 +38,12 @@ the built-in brush set ([NOT-17](https://linear.app/nota-on-inkkit/issue/NOT-17)
 physical iPad), the pen tray with quick sizes and colours, colour picker and brush editor
 ([NOT-18](https://linear.app/nota-on-inkkit/issue/NOT-18)), the page object model with transforms and unified undo
 ([NOT-19](https://linear.app/nota-on-inkkit/issue/NOT-19)), continuous scrolling with the page sidebar
-([NOT-26](https://linear.app/nota-on-inkkit/issue/NOT-26)) and the shape tool with hold-to-snap recognition
-([NOT-20](https://linear.app/nota-on-inkkit/issue/NOT-20), in review, pending tuning on a physical iPad) landed
-early. After M0, M1 continues with text and images on the object layer and writing across page boundaries in
-vertical scrolling ([NOT-89](https://linear.app/nota-on-inkkit/issue/NOT-89)).
+([NOT-26](https://linear.app/nota-on-inkkit/issue/NOT-26)), the shape tool with hold-to-snap recognition
+([NOT-20](https://linear.app/nota-on-inkkit/issue/NOT-20), pending tuning on a physical iPad) and lasso v2: cut, copy,
+paste across pages and notes, duplicate, recolour, thickness, arrange, screenshots and drag-out
+([NOT-21](https://linear.app/nota-on-inkkit/issue/NOT-21), in review), landed early. After M0, M1 continues with
+text and images on the object layer and writing across page boundaries in vertical scrolling
+([NOT-89](https://linear.app/nota-on-inkkit/issue/NOT-89)).
 
 ## Keeping this current
 
