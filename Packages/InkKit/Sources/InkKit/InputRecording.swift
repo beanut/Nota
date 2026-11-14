@@ -41,9 +41,22 @@ public struct InkInputRecording: Codable, Sendable, Equatable {
         /// sRGB red, green, blue and alpha.
         public var color: [Double]
         public var style: Style
+        /// The stroke's whole brush. Recordings made before brushes were descriptors (NOT-16) don't have
+        /// one; `tool` and `style` then pick a bundled brush and set its width and pressure response.
+        public var brush: BrushDescriptor?
         /// Canvas-to-view scale while the stroke was drawn; the canvas drops samples closer than 0.3 view points.
         public var viewScale: Double
         public var events: [Event] = []
+
+        public init(tool: String, color: [Double], style: Style, brush: BrushDescriptor? = nil, viewScale: Double,
+                    events: [Event] = []) {
+            self.tool = tool
+            self.color = color
+            self.style = style
+            self.brush = brush
+            self.viewScale = viewScale
+            self.events = events
+        }
     }
 
     public struct Style: Codable, Sendable, Equatable {
@@ -174,48 +187,54 @@ extension InkInputRecording.Sample {
     }
 }
 
-extension InkKind {
-    var recordingName: String {
-        switch self {
-        case .pen: "pen"
-        case .pencil: "pencil"
-        case .highlighter: "highlighter"
-        case .pixelEraser: "pixelEraser"
-        }
-    }
-
-    init?(recordingName: String) {
-        switch recordingName {
-        case "pen": self = .pen
-        case "pencil": self = .pencil
-        case "highlighter": self = .highlighter
-        case "pixelEraser": self = .pixelEraser
-        default: return nil
-        }
-    }
-}
-
 extension InkInputRecording.RecordedStroke {
     init(_ stroke: Stroke, viewScale: CGFloat) {
         let c = stroke.color
-        let s = stroke.style
-        self.init(tool: stroke.tool.recordingName,
+        let b = stroke.brush
+        self.init(tool: Self.toolName(for: b),
                   color: [c.r, c.g, c.b, c.a].map { Double($0) },
-                  style: InkInputRecording.Style(width: Double(s.width), minWidthRatio: Double(s.minWidthRatio),
-                                                 pressureGamma: Double(s.pressureGamma),
-                                                 opacity: Double(s.opacity), tiltEnabled: s.tiltEnabled),
+                  style: InkInputRecording.Style(width: Double(b.maxWidth),
+                                                 minWidthRatio: Double(b.maxWidth > 0 ? b.size.lowerBound / b.maxWidth : 1),
+                                                 pressureGamma: Double(b.pressure.exponent),
+                                                 opacity: Double(b.opacity), tiltEnabled: b.tilt.enabled),
+                  brush: b,
                   viewScale: Double(viewScale))
     }
 
-    /// An empty stroke with this stroke's tool, colour and brush, ready to receive the samples.
+    /// The legacy tool name closest to `brush`, for readers that don't know descriptors.
+    static func toolName(for brush: BrushDescriptor) -> String {
+        if brush.erases {
+            return "pixelEraser"
+        }
+        if brush.blend == .multiply {
+            return "highlighter"
+        }
+        return brush.usesPattern ? "pencil" : "pen"
+    }
+
+    /// The bundled brush for a legacy tool name (`pen` for an unknown one).
+    static func bundledBrush(forTool tool: String) -> BrushDescriptor {
+        switch tool {
+        case "pencil": .pencil
+        case "highlighter": .highlighter
+        case "pixelEraser": .pixelEraser
+        default: .pen
+        }
+    }
+
+    /// An empty stroke with this stroke's colour and brush, ready to receive the samples.
     func makeStroke(id: UUID = UUID()) -> Stroke {
         let c = color + Array(repeating: 1, count: max(0, 4 - color.count))
-        return Stroke(id: id, tool: InkKind(recordingName: tool) ?? .pen,
-                      color: RGBA(r: c[0], g: c[1], b: c[2], a: c[3]),
-                      style: BrushStyle(width: style.width, minWidthRatio: style.minWidthRatio,
-                                        pressureGamma: style.pressureGamma, opacity: style.opacity,
-                                        tiltEnabled: style.tiltEnabled),
-                      points: [])
+        var brush: BrushDescriptor
+        if let recorded = self.brush {
+            brush = recorded
+        } else {
+            brush = Self.bundledBrush(forTool: tool).sized(style.width, minimumRatio: style.minWidthRatio)
+            brush.pressure = .init(amount: 1, exponent: style.pressureGamma)
+            brush.opacity = style.opacity
+            brush.tilt.enabled = style.tiltEnabled
+        }
+        return Stroke(id: id, color: RGBA(r: c[0], g: c[1], b: c[2], a: c[3]), brush: brush, points: [])
     }
 }
 

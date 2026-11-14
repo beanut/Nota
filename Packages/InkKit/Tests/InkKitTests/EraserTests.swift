@@ -4,12 +4,11 @@ import Foundation
 import Testing
 
 /// A horizontal stroke from (0, y) to (length, y), one point every 10 units.
-private func line(_ kind: InkKind = .pen, y: CGFloat = 50, length: CGFloat = 100) -> Stroke {
-    let style = BrushStyle(width: 4, minWidthRatio: 1, pressureGamma: 1, opacity: 1, tiltEnabled: false)
+private func line(_ kind: BrushDescriptor = .pen, y: CGFloat = 50, length: CGFloat = 100) -> Stroke {
     let points = stride(from: CGFloat(0), through: length, by: 10).enumerated().map { i, x in
         StrokePoint(location: CGPoint(x: x, y: y), force: 1, altitude: .pi / 2, azimuth: 0, timestamp: Double(i))
     }
-    return Stroke(id: UUID(), tool: kind, color: RGBA.swatches[0], style: style, points: points)
+    return Stroke(id: UUID(), color: RGBA.swatches[0], brush: kind, points: points)
 }
 
 @Suite("Eraser targets")
@@ -56,8 +55,7 @@ struct StandardEraseTests {
         #expect(right.last == 100)
         for piece in pieces {
             #expect(piece.id != stroke.id)
-            #expect(piece.tool == stroke.tool)
-            #expect(piece.style == stroke.style)
+            #expect(piece.brush == stroke.brush)
             #expect(piece.createdAt == stroke.createdAt)
         }
     }
@@ -100,7 +98,7 @@ struct StandardEraseUndoTests {
         doc.add(highlight)
         let before = doc.strokes
 
-        for stroke in doc.strokes where EraserTarget.highlighter.erases(stroke.tool) {
+        for stroke in doc.strokes where EraserTarget.highlighter.erases(stroke.brush) {
             let pieces = try #require(StrokeSplitter.remainder(of: stroke, erasedFrom: CGPoint(x: 0, y: 52),
                                                                to: CGPoint(x: 100, y: 52), radius: 10))
             doc.replace(id: stroke.id, with: pieces)

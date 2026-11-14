@@ -4,7 +4,7 @@ A short summary of where Nota is going, so agents and new contributors don't hav
 out. **[Linear](https://linear.app/nota-on-inkkit/project/nota) is the source of truth**: if this file and
 Linear disagree, Linear wins, and this file should be fixed.
 
-_Last updated: 2026-11-12._
+_Last updated: 2026-11-13._
 
 ## Milestones
 
@@ -33,8 +33,9 @@ Next, in order:
 Also open: the editor redesign in progress outside the milestones,
 [NOT-86](https://linear.app/nota-on-inkkit/issue/NOT-86) and [NOT-87](https://linear.app/nota-on-inkkit/issue/NOT-87).
 
-After M0, M1 starts with the brush engine ([NOT-16](https://linear.app/nota-on-inkkit/issue/NOT-16)) and the
-page object model ([NOT-19](https://linear.app/nota-on-inkkit/issue/NOT-19)).
+M1's first issue, the data-driven brush engine ([NOT-16](https://linear.app/nota-on-inkkit/issue/NOT-16)),
+landed early. After M0, M1 continues with the page object model ([NOT-19](https://linear.app/nota-on-inkkit/issue/NOT-19))
+and the built-in brush set ([NOT-17](https://linear.app/nota-on-inkkit/issue/NOT-17)).
 
 ## Keeping this current
 

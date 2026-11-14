@@ -7,11 +7,10 @@ import Foundation
 public extension CanvasDocument {
     /// Draws a straight pen stroke through `points` (canvas space) as one undoable edit, as if the user had.
     func drawTestStroke(through points: [CGPoint]) {
-        let style = BrushStyle(width: 4, minWidthRatio: 0.25, pressureGamma: 0.6, opacity: 1, tiltEnabled: false)
         let samples = points.enumerated().map { i, point in
             StrokePoint(location: point, force: 0.5, altitude: .pi / 2, azimuth: 0, timestamp: Double(i))
         }
-        add(Stroke(id: UUID(), tool: .pen, color: RGBA.swatches[0], style: style, points: samples))
+        add(Stroke(id: UUID(), color: RGBA.swatches[0], brush: .pen, points: samples))
     }
 
     /// Undoes the page's last edit, as the undo button would.

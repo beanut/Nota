@@ -302,16 +302,14 @@ final class LiveInkView: UIView {
         guard let baked else { return nil }
         for chunk in baked.bakedThrough ..< limit where stroke.chunkBounds(chunk).intersects(clip) {
             guard let ctx = makeBakeContext(baked, for: tileFrame) else { break }
-            let kind = stroke.stroke.tool
+            let brush = stroke.stroke.brush
             let color = stroke.stroke.color
-            if kind == .pencil {
+            if brush.usesPattern {
                 PencilTexture.prepareContext(ctx, phase: CGPoint(x: bakeTransform.offset.x - tileFrame.minX,
                                                                  y: bakeTransform.offset.y - tileFrame.minY))
             }
             for run in stroke.chunkRuns(chunk) {
-                let fill = entry.previewFill ?? (kind == .pencil
-                    ? PencilTexture.fillColor(for: color, alpha: run.alpha)
-                    : color.cgColor(alpha: run.alpha))
+                let fill = entry.previewFill ?? StrokeRenderer.fillColor(for: brush, color: color, alpha: run.alpha)
                 ctx.setFillColor(fill)
                 ctx.addPath(run.path)
                 ctx.fillPath(using: .winding)
@@ -351,7 +349,7 @@ final class LiveInkView: UIView {
         if dirty.contains(tileFrame) {
             tile.drewBackdrop = false
         }
-        if let underlay, items.contains(where: { $0.entry.stroke.stroke.tool == .highlighter }) {
+        if let underlay, items.contains(where: { $0.entry.stroke.stroke.brush.blend == .multiply }) {
             tile.drewBackdrop = true
             if let drawPaper {
                 drawPaper(ctx, bakeTransform, tileFrame)
@@ -366,7 +364,7 @@ final class LiveInkView: UIView {
         for item in items {
             let stroke = item.entry.stroke.stroke
             let preview = item.entry.previewFill
-            let blend: CGBlendMode = preview == nil ? stroke.tool.blendMode : .normal
+            let blend: CGBlendMode = preview == nil ? stroke.brush.blend.cgBlendMode : .normal
             // Opaque source-over ink composes the same with or without a group, so skip the offscreen layer.
             let direct = blend == .normal && (preview != nil || item.hot.allSatisfy { $0.alpha >= 0.999 })
             ctx.saveGState()
@@ -382,14 +380,13 @@ final class LiveInkView: UIView {
                 if !direct {
                     ctx.setBlendMode(.copy)
                 }
-                if stroke.tool == .pencil {
+                if stroke.brush.usesPattern {
                     PencilTexture.prepareContext(ctx, phase: CGPoint(x: bakeTransform.offset.x - tileFrame.minX,
                                                                      y: bakeTransform.offset.y - tileFrame.minY))
                 }
                 for run in item.hot {
-                    let fill = preview ?? (stroke.tool == .pencil
-                        ? PencilTexture.fillColor(for: stroke.color, alpha: run.alpha)
-                        : stroke.color.cgColor(alpha: run.alpha))
+                    let fill = preview ?? StrokeRenderer.fillColor(for: stroke.brush, color: stroke.color,
+                                                                   alpha: run.alpha)
                     ctx.setFillColor(fill)
                     ctx.addPath(run.path)
                     ctx.fillPath(using: .winding)

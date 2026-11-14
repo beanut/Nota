@@ -126,26 +126,6 @@ enum InkFileCodec {
     /// The writer never compresses more than this, so a reader can bound the body by the stored size.
     static let maxCompressionRatio = 256
 
-    struct Brush: Hashable {
-        var kind: InkKind
-        var style: BrushStyle
-
-        init(kind: InkKind, style: BrushStyle) {
-            self.kind = kind
-            self.style = style
-        }
-
-        /// The stroke's brush with any non-finite value zeroed, so it hashes consistently (NaN never
-        /// equals itself) and the file stays readable (readers reject non-finite numbers).
-        init(_ stroke: Stroke) {
-            let s = stroke.style
-            self.init(kind: stroke.tool,
-                      style: BrushStyle(width: finite(s.width), minWidthRatio: finite(s.minWidthRatio),
-                                        pressureGamma: finite(s.pressureGamma), opacity: finite(s.opacity),
-                                        tiltEnabled: s.tiltEnabled))
-        }
-    }
-
     /// `v`, or 0 if it's NaN or infinite.
     static func finite(_ v: CGFloat) -> CGFloat {
         v.isFinite ? v : 0
@@ -182,14 +162,26 @@ enum InkFileCodec {
     }
 
     static func encodeBody(_ file: InkPageFile) -> [UInt8] {
-        var brushes: [Brush] = []
-        var brushIndex: [Brush: Int] = [:]
+        // Each distinct brush once, clamped so it hashes consistently (NaN never equals itself) and
+        // re-reads as the same descriptor (decoding clamps).
+        var brushes: [BrushDescriptor] = []
+        var brushIndex: [BrushDescriptor: Int] = [:]
+        var strokeBrush: [Int] = []
+        strokeBrush.reserveCapacity(file.strokes.count)
+        var last: (raw: BrushDescriptor, index: Int)?
         for stroke in file.strokes {
-            let brush = Brush(stroke)
-            if brushIndex[brush] == nil {
-                brushIndex[brush] = brushes.count
+            if let last, last.raw == stroke.brush { // strokes in a row usually share their brush
+                strokeBrush.append(last.index)
+                continue
+            }
+            let brush = stroke.brush.clamped()
+            let index = brushIndex[brush] ?? brushes.count
+            if index == brushes.count {
+                brushIndex[brush] = index
                 brushes.append(brush)
             }
+            strokeBrush.append(index)
+            last = (stroke.brush, index)
         }
 
         // Stroke records are independent, so they're encoded in parallel, a chunk of strokes at a time.
@@ -202,9 +194,9 @@ enum InkFileCodec {
                 var ends: [Int] = []
                 let range = c * strokesPerChunk ..< min(strokes.count, (c + 1) * strokesPerChunk)
                 part.reserve(strokes[range].reduce(0) { $0 + 64 + $1.points.count * 7 })
-                for stroke in strokes[range] {
+                for i in range {
                     scratch.removeAll()
-                    write(stroke, brush: brushIndex[Brush(stroke)] ?? 0, into: &scratch)
+                    write(strokes[i], brush: strokeBrush[i], into: &scratch)
                     part.record(type: RecordType.stroke.rawValue, scratch.bytes)
                     ends.append(part.bytes.count)
                 }
@@ -246,15 +238,15 @@ enum InkFileCodec {
     /// Strokes encoded or decoded per parallel work item.
     static let strokesPerChunk = 64
 
-    private static func writeBrushes(_ brushes: [Brush], into w: inout ByteWriter) {
+    /// Each brush is its descriptor's JSON (sorted keys, so the same brush always writes the same bytes),
+    /// length-prefixed. JSON keeps the table readable by any later version: fields a newer descriptor adds
+    /// are ignored by older readers, and fields it lacks take their defaults.
+    private static func writeBrushes(_ brushes: [BrushDescriptor], into w: inout ByteWriter) {
         w.varint(UInt64(brushes.count))
         for brush in brushes {
-            w.u8(brush.kind.fileCode)
-            w.u8(brush.style.tiltEnabled ? 1 : 0)
-            w.f64(Double(brush.style.width))
-            w.f64(Double(brush.style.minWidthRatio))
-            w.f64(Double(brush.style.pressureGamma))
-            w.f64(Double(brush.style.opacity))
+            let json = (try? brush.jsonData()) ?? Data("{}".utf8)
+            w.varint(UInt64(json.count))
+            w.append(json)
         }
     }
 
@@ -362,7 +354,7 @@ enum InkFileCodec {
     static func decodeBody(_ body: UnsafeRawBufferPointer, pageID: UUID,
                            version: InkPageFile.Version) throws -> InkPageFile {
         var file = InkPageFile(pageID: pageID, strokes: [], version: version)
-        var brushes: [Brush]?
+        var brushes: [BrushDescriptor]?
         var strokeRecords: [UnsafeRawBufferPointer] = []
         var reader = ByteReader(body)
         while reader.remaining > 0 {
@@ -385,7 +377,7 @@ enum InkFileCodec {
     }
 
     /// Decodes stroke records in parallel, a chunk at a time. Throws the error of the first bad record.
-    private static func readStrokes(_ records: [UnsafeRawBufferPointer], brushes: [Brush]) throws -> [Stroke] {
+    private static func readStrokes(_ records: [UnsafeRawBufferPointer], brushes: [BrushDescriptor]) throws -> [Stroke] {
         let chunks = (records.count + strokesPerChunk - 1) / strokesPerChunk
         var strokes = [Stroke?](repeating: nil, count: records.count)
         var errors = [InkFileError?](repeating: nil, count: chunks)
@@ -412,17 +404,19 @@ enum InkFileCodec {
         return strokes.compactMap { $0 }
     }
 
-    private static func readBrushes(_ r: inout ByteReader) throws -> [Brush] {
-        let count = try r.count(minimumBytesEach: 34)
-        var brushes: [Brush] = []
+    private static func readBrushes(_ r: inout ByteReader) throws -> [BrushDescriptor] {
+        // A length and at least `{}`.
+        let count = try r.count(minimumBytesEach: 3)
+        var brushes: [BrushDescriptor] = []
         brushes.reserveCapacity(count)
+        let decoder = JSONDecoder()
         for _ in 0 ..< count {
-            guard let kind = try InkKind(fileCode: r.u8()) else { throw InkFileError.corrupt("unknown brush kind") }
-            let flags = try r.u8()
-            let style = try BrushStyle(width: r.finite(r.f64()), minWidthRatio: r.finite(r.f64()),
-                                       pressureGamma: r.finite(r.f64()), opacity: r.finite(r.f64()),
-                                       tiltEnabled: flags & 1 != 0)
-            brushes.append(Brush(kind: kind, style: style))
+            let json = try r.bytes(r.length())
+            // Lenient and clamped: any JSON object is a drawable brush. Anything else is damage.
+            guard let brush = try? decoder.decode(BrushDescriptor.self, from: Data(json)) else {
+                throw InkFileError.corrupt("brush")
+            }
+            brushes.append(brush)
         }
         return brushes
     }
@@ -432,7 +426,7 @@ enum InkFileCodec {
         var values: [[Int64]] = Array(repeating: [], count: 6)
     }
 
-    private static func readStroke(_ r: inout ByteReader, brushes: [Brush],
+    private static func readStroke(_ r: inout ByteReader, brushes: [BrushDescriptor],
                                    columns: inout ColumnScratch) throws -> Stroke {
         let id = try r.uuid()
         let brushIndex = try r.varint()
@@ -461,29 +455,7 @@ enum InkFileCodec {
                 initialized = count
             }
         }
-        return Stroke(id: id, tool: brush.kind, color: color, style: brush.style, points: points, createdAt: createdAt)
-    }
-}
-
-extension InkKind {
-    /// The kind's code in the `.ink` brush table. Never renumber these.
-    var fileCode: UInt8 {
-        switch self {
-        case .pen: 0
-        case .pencil: 1
-        case .highlighter: 2
-        case .pixelEraser: 3
-        }
-    }
-
-    init?(fileCode: UInt8) {
-        switch fileCode {
-        case 0: self = .pen
-        case 1: self = .pencil
-        case 2: self = .highlighter
-        case 3: self = .pixelEraser
-        default: return nil
-        }
+        return Stroke(id: id, color: color, brush: brush, points: points, createdAt: createdAt)
     }
 }
 

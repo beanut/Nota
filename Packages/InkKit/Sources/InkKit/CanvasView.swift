@@ -507,7 +507,7 @@ final class CanvasView: UIView {
             }
             return
         }
-        guard document.strokes.contains(where: { $0.tool != .pixelEraser }) else { return }
+        guard document.strokes.contains(where: { !$0.brush.erases }) else { return }
         let items = committedItems()
         DispatchQueue.global(qos: .utility).async {
             store(CommittedRaster(rendering: items, pixelSize: pixelSize, scale: scale, transform: transform,
@@ -520,7 +520,7 @@ final class CanvasView: UIView {
         document.strokes.compactMap { stroke in
             guard !skipped.contains(stroke.id) else { return nil }
             let cached = geometryCache[stroke.id]
-            return CommittedRenderer.Item(id: stroke.id, kind: stroke.tool, color: stroke.color,
+            return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
                                           geometry: cached, stroke: cached == nil ? stroke : nil)
         }
     }
@@ -533,7 +533,7 @@ final class CanvasView: UIView {
         geometryCache[item.live.stroke.id] = geom
         let runs = geom.runs
         let bounds = geom.bounds
-        let tool = item.live.stroke.tool
+        let brush = item.live.stroke.brush
         let color = item.live.stroke.color
         let targetTransform = bitmapTransform
         let currentGeneration = generation
@@ -545,11 +545,11 @@ final class CanvasView: UIView {
             guard let self, let ctx = bitmap else { return }
             ctx.saveGState()
             ctx.concatenate(targetTransform.affine)
-            if tool == .pencil {
+            if brush.usesPattern {
                 PencilTexture.prepareContext(ctx, phase: targetTransform.offset)
             }
             StrokeRenderer.draw(runs: runs, clip: bounds.insetBy(dx: -2, dy: -2),
-                                kind: tool, color: color, in: ctx)
+                                brush: brush, color: color, in: ctx)
             ctx.restoreGState()
             let image = ctx.makeImage()
 
@@ -627,7 +627,7 @@ final class CanvasView: UIView {
         for stroke in pending.map(\.live) + (live.map { [$0] } ?? []) {
             entries.append(LiveInkView.Entry(
                 stroke: stroke,
-                previewFill: stroke.stroke.tool == .pixelEraser ? liveView.paperColor : nil
+                previewFill: stroke.stroke.brush.erases ? liveView.paperColor : nil
             ))
         }
         return entries
@@ -880,7 +880,7 @@ final class CanvasView: UIView {
             var hit = Set<UUID>()
             // Whole strokes are selected even if only part of them is inside the region.
             // Pixel-eraser strokes are invisible, so they're never selectable.
-            for stroke in document.strokes where stroke.tool != .pixelEraser {
+            for stroke in document.strokes where !stroke.brush.erases {
                 guard geometry(for: stroke).bounds.intersects(pb) else { continue }
                 if LassoGeometry.stroke(stroke.points.map(\.location), touches: polygon, polygonBounds: pb) {
                     hit.insert(stroke.id)
@@ -1083,8 +1083,7 @@ final class CanvasView: UIView {
                                         before: controller.eraserMode == .standard ? document.strokes : nil)
         } else if controller.tool == .eraser || document.contains(start) {
             let template = controller.strokeTemplate(viewScale: inputTransform.scale)
-            let stroke = Stroke(id: UUID(), tool: template.kind, color: template.color, style: template.style,
-                                points: [])
+            let stroke = Stroke(id: UUID(), color: template.color, brush: template.brush, points: [])
             live = LiveStroke(stroke: stroke)
             controller.inputRecorder?.begin(stroke, viewScale: inputTransform.scale, pageSize: document.pageSize)
         }
@@ -1108,7 +1107,7 @@ final class CanvasView: UIView {
             hud.predictedCount = predicted.count
             controller?.inputRecorder?.endEvent(strokeID: live.stroke.id, predicted: predicted)
             invalidateLive(canvasRect: live.advance(predicted: predicted))
-            if live.stroke.tool == .pixelEraser, let last = live.stroke.points.last {
+            if live.stroke.brush.erases, let last = live.stroke.points.last {
                 showEraserCursor(at: last.location)
             }
         }
@@ -1207,14 +1206,19 @@ final class CanvasView: UIView {
         finishErasing()
         if let live {
             self.live = nil
-            if live.stroke.tool == .pixelEraser {
+            if live.stroke.brush.erases {
                 setCursor(nil)
                 erased = commit
             }
             if commit, !live.stroke.points.isEmpty {
+                if let (segment, dirty) = live.finish() { // the end taper, now the end is known
+                    liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
+                    zoomPanel?.liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
+                    invalidateLive(canvasRect: dirty)
+                }
                 let geom = live.geometry()
                 geometryCache[live.stroke.id] = geom
-                let splits = live.stroke.tool == .pixelEraser
+                let splits = live.stroke.brush.erases
                     ? splits(cutBy: live.stroke, hulls: live.allHulls) : []
                 let revisionBefore = document.revision
                 editDocument { document.add(live.stroke, splits: splits) }
@@ -1259,9 +1263,11 @@ final class CanvasView: UIView {
         hud.strokeCount = document.strokes.count
         telemetry.submit(hud, immediately: force)
     }
+}
 
-    // MARK: - Gestures
+// MARK: - Gestures
 
+extension CanvasView {
     private func setUpGestures() {
         let direct = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
 

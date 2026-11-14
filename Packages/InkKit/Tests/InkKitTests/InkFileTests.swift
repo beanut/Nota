@@ -7,8 +7,8 @@ import Testing
 struct InkFileTests {
     // MARK: Round trip
 
-    @Test(arguments: [InkKind.pen, .pencil, .highlighter, .pixelEraser])
-    func roundTripsEveryTool(_ kind: InkKind) throws {
+    @Test(arguments: TestBrush.allCases)
+    func roundTripsEveryTool(_ kind: TestBrush) throws {
         let strokes = (0 ..< 3).map { scribble(kind, seed: $0, tilt: $0 == 1) }
         let file = InkPageFile(pageID: UUID(), strokes: strokes)
         let decoded = try InkPageFile(data: file.encoded())
@@ -29,11 +29,12 @@ struct InkFileTests {
         // Two strokes with the same brush and one with another, interleaved.
         let a = scribble(.pen, seed: 1), b = scribble(.highlighter, seed: 2)
         var c = scribble(.pen, seed: 3)
-        c.style = a.style
+        c.brush = a.brush
         let decoded = try InkPageFile(data: InkPageFile(pageID: UUID(), strokes: [a, b, c]).encoded())
         #expect(decoded.strokes.map(\.id) == [a.id, b.id, c.id])
-        #expect(decoded.strokes.map(\.tool) == [.pen, .highlighter, .pen])
-        #expect(decoded.strokes[0].style == decoded.strokes[2].style)
+        #expect(decoded.strokes.map(\.brush.id) == [BrushDescriptor.pen.id, BrushDescriptor.highlighter.id,
+                                                    BrushDescriptor.pen.id])
+        #expect(decoded.strokes[0].brush == decoded.strokes[2].brush)
     }
 
     @Test func emptyPageAndEmptyStroke() throws {
@@ -63,12 +64,14 @@ struct InkFileTests {
         stroke.points[2].location.x = .infinity
         stroke.points[3].azimuth = -.infinity
         stroke.color.g = .nan
-        stroke.style.width = .infinity
+        stroke.brush.opacity = .nan
+        stroke.brush.smoothing = .infinity
         var other = scribble(.pen, seed: 1)
-        other.style = stroke.style // a second stroke with the same NaN-bearing brush
+        other.brush = stroke.brush // a second stroke with the same NaN-bearing brush
         let decoded = try InkPageFile(data: InkPageFile(pageID: UUID(), strokes: [stroke, other]).encoded())
-        #expect(decoded.strokes[0].style == decoded.strokes[1].style)
-        #expect(decoded.strokes[0].style.width == 0 && decoded.strokes[0].color.g == 0)
+        #expect(decoded.strokes[0].brush == decoded.strokes[1].brush)
+        #expect(decoded.strokes[0].brush.opacity == 1 && decoded.strokes[0].brush.smoothing == 0.95)
+        #expect(decoded.strokes[0].color.g == 0)
         #expect(decoded.strokes[0].points.count == stroke.points.count)
         #expect(decoded.strokes[0].points.allSatisfy { $0.force.isFinite && $0.location.x.isFinite })
     }
@@ -81,7 +84,7 @@ struct InkFileTests {
         let eraser = makeLine(from: CGPoint(x: 150, y: 40), to: CGPoint(x: 150, y: 160), kind: .pixelEraser,
                               width: 30)
         var coverage = StrokeSplitter.Coverage()
-        coverage.add(StrokeRenderer.hulls(for: eraser.points, style: eraser.style),
+        coverage.add(StrokeRenderer.hulls(for: eraser.points, brush: eraser.brush),
                      within: StrokeRenderer.geometry(for: line).bounds.insetBy(dx: -1, dy: -1))
         let pieces = try #require(StrokeSplitter.pieces(of: line, coverage: coverage))
         #expect(pieces.count == 2)
@@ -92,7 +95,7 @@ struct InkFileTests {
         let reopened = try CanvasDocument(file: InkPageFile(data: doc.inkFile.encoded()), pageSize: doc.pageSize)
         #expect(reopened.id == doc.id)
         expectClose(reopened.strokes, doc.strokes)
-        #expect(reopened.strokes.map(\.tool) == [.pen, .pen, .pixelEraser])
+        #expect(reopened.strokes.map(\.brush.erases) == [false, false, true])
         #expect(!reopened.canUndo)
     }
 
@@ -159,7 +162,8 @@ struct InkFileTests {
     }
 
     @Test func compressesLargePagesAndNotTinyOnes() throws {
-        let small = InkPageFile(pageID: UUID(), strokes: [scribble(.pen, seed: 0, count: 2)]).encoded()
+        // A brush's JSON alone is over the 256-byte threshold, so the tiny page here is an empty one.
+        let small = InkPageFile(pageID: UUID(), strokes: []).encoded()
         #expect(small[24] == InkFileCodec.BodyEncoding.stored.rawValue)
         let large = InkPageFile(pageID: UUID(), strokes: (0 ..< 20).map { scribble(.pen, seed: $0) })
         let data = large.encoded()
@@ -279,6 +283,13 @@ struct InkFileTests {
         #expect(crc.value == CRC32.checksum(bytes))
     }
 
+    @Test func brushesThatAreNotJSONObjectsThrow() {
+        let valid = InkPageFile(pageID: UUID()).encoded()
+        // A brush table (type 1, 4 bytes) holding one brush (2 bytes of JSON) that's an array.
+        let data = withHeader(of: valid, body: [1, 4, 1, 2] + Array("[]".utf8))
+        #expect(throws: InkFileError.self) { try InkPageFile(data: data) }
+    }
+
     // MARK: Size
 
     @Test func pointsTakeAFewBytesEach() {
@@ -319,7 +330,7 @@ struct InkFileTests {
                              sourceLocation: SourceLocation = #_sourceLocation) {
         #expect(decoded.count == original.count, sourceLocation: sourceLocation)
         for (d, o) in zip(decoded, original) {
-            #expect(d.id == o.id && d.tool == o.tool && d.style == o.style, sourceLocation: sourceLocation)
+            #expect(d.id == o.id && d.brush == o.brush, sourceLocation: sourceLocation)
             #expect(d.createdAt == o.createdAt, sourceLocation: sourceLocation)
             #expect(abs(d.color.r - o.color.r) < 1e-6 && abs(d.color.a - o.color.a) < 1e-6,
                     sourceLocation: sourceLocation)
@@ -337,10 +348,10 @@ struct InkFileTests {
     }
 }
 
-private let allKinds: [InkKind] = [.pen, .pencil, .highlighter, .pixelEraser]
+private let allKinds = TestBrush.allCases
 
 /// A wavy handwriting-like stroke sampled at 240 Hz, with pressure and (optionally) tilt varying.
-private func scribble(_ kind: InkKind, seed: Int, tilt: Bool = false, count: Int = 60) -> Stroke {
+private func scribble(_ kind: TestBrush, seed: Int, tilt: Bool = false, count: Int = 60) -> Stroke {
     var rng = SplitMix(seed: UInt64(seed) + 100)
     let origin = CGPoint(x: 40 + Double(rng.next() % 400), y: 40 + Double(rng.next() % 600))
     let start = 1000 + Double(seed) * 3.7
@@ -354,22 +365,22 @@ private func scribble(_ kind: InkKind, seed: Int, tilt: Bool = false, count: Int
                            azimuth: tilt ? -0.8 + t : 0,
                            timestamp: start + t)
     }
-    let style = BrushStyle(width: kind == .highlighter ? 18 : 3 + CGFloat(seed % 4), minWidthRatio: 0.3,
-                           pressureGamma: 0.7, opacity: kind == .highlighter ? 0.35 : 1, tiltEnabled: tilt)
-    return Stroke(id: UUID(), tool: kind, color: RGBA(r: 0.1 * CGFloat(seed % 10), g: 0.3, b: 0.77, a: 1),
-                  style: style, points: points,
+    let brush = kind.brush(width: kind == .highlighter ? 18 : 3 + CGFloat(seed % 4), minWidthRatio: 0.3,
+                           pressureExponent: 0.7, opacity: kind == .highlighter ? 0.35 : nil, tilt: tilt)
+    return Stroke(id: UUID(), color: RGBA(r: 0.1 * CGFloat(seed % 10), g: 0.3, b: 0.77, a: 1),
+                  brush: brush, points: points,
                   createdAt: Date(timeIntervalSinceReferenceDate: 800_000_000 + Double(seed) * 1.25))
 }
 
-private func makeLine(from a: CGPoint, to b: CGPoint, kind: InkKind, width: CGFloat) -> Stroke {
+private func makeLine(from a: CGPoint, to b: CGPoint, kind: TestBrush, width: CGFloat) -> Stroke {
     let n = 40
     let points = (0 ... n).map { i -> StrokePoint in
         let t = CGFloat(i) / CGFloat(n)
         return StrokePoint(location: CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t), force: 1,
                            altitude: .pi / 2, azimuth: 0, timestamp: Double(i) / 240)
     }
-    let style = BrushStyle(width: width, minWidthRatio: 1, pressureGamma: 1, opacity: 1, tiltEnabled: false)
-    return Stroke(id: UUID(), tool: kind, color: RGBA.swatches[0], style: style, points: points)
+    let brush = kind.brush(width: width, minWidthRatio: 1, pressureExponent: 1)
+    return Stroke(id: UUID(), color: RGBA.swatches[0], brush: brush, points: points)
 }
 
 /// Small deterministic PRNG, so fuzz failures reproduce.

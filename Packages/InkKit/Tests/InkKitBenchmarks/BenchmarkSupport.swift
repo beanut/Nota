@@ -156,7 +156,7 @@ final class Corpus {
             let fy = (Double(copy) * 0.414_214 + 0.5).truncatingRemainder(dividingBy: 1)
             let d = CGPoint(x: room.width * fx - box.minX, y: room.height * fy - box.minY)
             for stroke in strokes where result.count < count {
-                let moved = Stroke(id: UUID(), tool: stroke.tool, color: stroke.color, style: stroke.style,
+                let moved = Stroke(id: UUID(), color: stroke.color, brush: stroke.brush,
                                    points: stroke.points.map { p in
                                        var p = p
                                        p.location.x += d.x
