@@ -8,7 +8,9 @@ import UniformTypeIdentifiers
 /// Golden images of brushes. The built-in tools' PNGs in `Snapshots/` were rendered by the engine before
 /// brushes became `BrushDescriptor`s (NOT-16), so these tests show the bundled descriptors draw what
 /// `InkKind` + `BrushStyle` drew (they match pixel for pixel). The stamp and calligraphy scenes were
-/// recorded when those paths were added. Set `TEST_RUNNER_INK_SNAPSHOT_RECORD=1` to re-record them
+/// recorded when those paths were added, and each brush of the built-in set (NOT-17) has a scene of its
+/// own, drawn at its default width with the Pressure & Tilt settings at their defaults. Set `TEST_RUNNER_INK_SNAPSHOT_RECORD=1` to
+/// re-record them
 /// after an intended change to how a brush looks, and say why in the PR.
 @MainActor
 @Suite("Brush snapshots")
@@ -40,6 +42,14 @@ enum SnapshotScene: String, CaseIterable, CustomTestStringConvertible {
     case pixelEraserOverPen = "pixel-eraser-over-pen"
     case stampDryBrush = "stamp-dry-brush"
     case calligraphyTaper = "calligraphy-taper"
+    case fineliner = "brush-fineliner"
+    case fountainPen = "brush-fountain-pen"
+    case brushPen = "brush-brush-pen"
+    case marker = "brush-marker"
+    case dashedPen = "brush-dashed"
+    case dottedPen = "brush-dotted"
+    case softPencil = "brush-soft-pencil"
+    case chiselHighlighter = "brush-chisel-highlighter"
 
     var testDescription: String {
         rawValue
@@ -78,7 +88,22 @@ enum SnapshotScene: String, CaseIterable, CustomTestStringConvertible {
             brushStroke(.pen, width: 4, tilt: false, wave: 1).with(BrushDescriptor(
                 name: "Wet", size: 2 ... 6, velocity: .init(amount: 0.5), wetness: 0.8
             ))]
+        case .fineliner: Self.builtIn(.fineliner)
+        case .fountainPen: Self.builtIn(.fountainPen)
+        case .brushPen: Self.builtIn(.brushPen)
+        case .marker: Self.builtIn(.marker)
+        case .dashedPen: Self.builtIn(.dashedPen)
+        case .dottedPen: Self.builtIn(.dottedPen)
+        case .softPencil: Self.builtIn(.softPencil)
+        case .chiselHighlighter:
+            [brushStroke(.pen, width: 4, tilt: false, wave: 0), builtInStroke(.chiselHighlighter, wave: 3),
+             builtInStroke(.chiselHighlighter, wave: 4)]
         }
+    }
+
+    /// A built-in brush on a handwriting-like wave and a loop, tilted as the Pencil sweeps.
+    private static func builtIn(_ brush: BrushDescriptor) -> [Stroke] {
+        [builtInStroke(brush, wave: 0), builtInStroke(brush, wave: 1), builtInStroke(brush, wave: 2)]
     }
 
     @MainActor func render() -> CGImage? {
@@ -115,6 +140,19 @@ func brushStroke(_ brush: TestBrush, width: CGFloat, tilt: Bool, wave: Int) -> S
     }
     let color = brush == .highlighter ? RGBA(r: 1, g: 0.85, b: 0.2) : RGBA(r: 0.12, g: 0.2, b: 0.55)
     return Stroke(id: UUID(), color: color, brush: brush.brush(width: width, tilt: tilt), points: points)
+}
+
+/// `brushStroke`'s path drawn with a built-in brush at its default width, as the canvas would with the
+/// default Pressure & Tilt settings.
+func builtInStroke(_ brush: BrushDescriptor, wave: Int) -> Stroke {
+    var stroke = brushStroke(.pen, width: 4, tilt: true, wave: wave)
+    stroke.brush = brush.personalized(width: brush.maxWidth,
+                                      minimumWidthRatio: BrushDescriptor.neutralMinimumWidthRatio,
+                                      pressureExponent: BrushDescriptor.neutralPressureExponent, tilt: true)
+    if brush.blend == .multiply {
+        stroke.color = RGBA(r: 1, g: 0.85, b: 0.2)
+    }
+    return stroke
 }
 
 extension Stroke {

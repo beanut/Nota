@@ -77,7 +77,7 @@ Colour, type, spacing, radius and elevation tokens, the icon set and shared cont
 
 ## InkKit
 
-The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / eraser / lasso, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
+The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / eraser / lasso with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, round and chisel highlighters), undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
 
 ```swift
 import InkKit
@@ -124,7 +124,10 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 - The two notes in a split window always take half the width each.
 - Apple Pencil gestures, palm rejection, hover and scribble gestures (NOT-28) are tuned on the simulator
   only; their thresholds need a real Pencil 2 / Pencil Pro (NOT-12). Barrel roll is shown while hovering
-  but doesn't steer a nib yet, since there are no chisel or fountain brushes before NOT-16.
+  but doesn't steer a nib yet: the fountain pen, marker and chisel highlighter (NOT-17) hold their nib at a
+  fixed angle.
+- The built-in brushes (NOT-17) are tuned on the simulator with synthetic input, not yet on a physical
+  iPad with Pencil (NOT-12).
 
 ## Next steps
 

@@ -93,6 +93,7 @@ struct BrushModel {
     let taper: BrushDescriptor.Taper
     let texture: BrushDescriptor.Texture
     let jitter: BrushDescriptor.Jitter
+    let dash: BrushDescriptor.Dash
     let wetness: CGFloat
     let opacity: CGFloat
     let usesSpeed: Bool
@@ -109,6 +110,7 @@ struct BrushModel {
         taper = b.taper
         texture = b.texture
         jitter = b.jitter
+        dash = b.dash
         wetness = b.wetness
         opacity = b.opacity
         usesSpeed = b.usesSpeed
@@ -124,7 +126,8 @@ struct StrokeContext {
     let brush: BrushModel
     /// Stroke index of `pts[0]` in the points passed alongside (the live tail passes the end of the stroke).
     var firstIndex = 0
-    /// Arc length (along the samples) at each stroke point, by stroke index, when the brush tapers.
+    /// Arc length (along the samples) at each stroke point, by stroke index, when the brush tapers or
+    /// dashes (`BrushDescriptor.measuresDistance`).
     /// Points past its end (predicted samples) continue from its last entry in a straight line.
     var distances: [CGFloat] = []
     /// The stroke's whole length once it has ended; nil while it's drawn, so there's no end taper yet.
@@ -140,7 +143,7 @@ struct StrokeContext {
 
     /// A finished stroke's context: distances measured, total length known.
     init(finished points: [StrokePoint], brush: BrushDescriptor) {
-        let distances = brush.taper.isActive ? Self.distances(along: points) : []
+        let distances = brush.measuresDistance ? Self.distances(along: points) : []
         self.init(brush: brush, distances: distances, totalLength: distances.last)
     }
 
@@ -190,7 +193,8 @@ struct StrokeContext {
         StrokeRenderer.tip(for: pts[k], brush: brush, nib: nib(at: k, in: pts))
     }
 
-    private func distance(at k: Int, in pts: [StrokePoint]) -> CGFloat {
+    /// Arc length from the stroke's start to `pts[k]` (0 when the brush doesn't measure distance).
+    func distance(at k: Int, in pts: [StrokePoint]) -> CGFloat {
         let s = firstIndex + k
         if s < distances.count {
             return distances[s]
@@ -646,7 +650,8 @@ enum StrokeRenderer {
     /// The stamp path: separate nib stamps along segment `i`, about `brush.stampSpacing` nib widths
     /// apart, each moved by the brush's jitter and split into bristles by a bristle texture. Stamps are
     /// spread evenly over each segment, so a segment needs nothing from its neighbours and the live and
-    /// committed strokes match. The random variation is seeded by the stamp's place in the stroke.
+    /// committed strokes match. The random variation is seeded by the stamp's place in the stroke. A dash
+    /// pattern drops the stamps that fall in its gaps, by the arc length from the stroke's start.
     private static func stampHulls(_ pts: [StrokePoint], segment i: Int, context: StrokeContext) -> [Hull] {
         let brush = context.brush
         let a = pts[i], b = pts[i + 1]
@@ -664,11 +669,19 @@ enum StrokeRenderer {
         let chord = p2 - p1
         let normal = unitNormal(chord) ?? CGPoint(x: 0, y: 1)
         let bristles = bristleOffsets(for: brush)
+        let dash = brush.dash
+        let dashOn = dash.on * brush.size.upperBound, dashPeriod = (dash.on + dash.off) * brush.size.upperBound
+        let distanceA = dash.isActive ? context.distance(at: i, in: pts) : 0
+        let distanceB = dash.isActive ? context.distance(at: i + 1, in: pts) : 0
 
         var hulls: [Hull] = []
         hulls.reserveCapacity((count + 1) * max(bristles.count, 1))
         for k in (strokeIndex == 0 ? 0 : 1) ... count {
             let t = CGFloat(k) / CGFloat(count)
+            if dash.isActive, dashPeriod > 0,
+               (distanceA + (distanceB - distanceA) * t).truncatingRemainder(dividingBy: dashPeriod) > dashOn {
+                continue
+            }
             let loc = k == count ? p2 : (k == 0 ? p1 : bezier(p1, c1, c2, p2, t))
             var stamp = tip(for: interpolate(a, b, t, at: loc), brush: brush,
                             nib: context.plain ? nibA : nibA.mix(nibB, t))
@@ -935,7 +948,7 @@ final class LiveStroke {
 
     private var chunks: [Chunk] = []
 
-    /// Arc length at each point, kept only when the brush tapers (see `StrokeContext.distances`).
+    /// Arc length at each point, kept only when the brush tapers or dashes (see `StrokeContext.distances`).
     private var distances: [CGFloat] = []
     /// Set by `finish()`, for the end taper.
     private var totalLength: CGFloat?
@@ -943,7 +956,7 @@ final class LiveStroke {
 
     init(stroke: Stroke) {
         self.stroke = stroke
-        if stroke.brush.taper.isActive {
+        if stroke.brush.measuresDistance {
             distances = StrokeContext.distances(along: stroke.points)
         }
     }
@@ -978,10 +991,10 @@ final class LiveStroke {
                 stroke.points[stroke.points.count - 1].force = point.force
                 return nil
             }
-            if !distances.isEmpty || stroke.brush.taper.isActive {
+            if !distances.isEmpty || stroke.brush.measuresDistance {
                 distances.append((distances.last ?? 0) + last.location.distance(to: point.location))
             }
-        } else if stroke.brush.taper.isActive {
+        } else if stroke.brush.measuresDistance {
             distances = [0]
         }
         stroke.points.append(point)
