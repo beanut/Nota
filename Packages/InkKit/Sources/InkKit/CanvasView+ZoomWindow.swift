@@ -43,7 +43,8 @@ extension CanvasView {
 
     /// Shows or hides the panel and box to match the controller, and refits the page around the panel.
     func zoomWindowVisibilityDidChange() {
-        let visible = controller?.zoomWindowVisible ?? false
+        // Not in continuous scrolling, where the page moves under the box.
+        let visible = !isEmbedded && (controller?.zoomWindowVisible ?? false)
         if visible, zoomPanel == nil {
             let theme = controller?.theme ?? .standard
             let box = ZoomBoxOverlayView()

@@ -10,6 +10,11 @@ import SwiftUI
 /// InkCanvasEditor(notebook: note.notebook, title: $note.title)
 /// ```
 ///
+/// The More menu's Scroll Direction shows pages one at a time with sideways swipes (horizontal) or all of
+/// them in one column scrolled vertically (`PageLayoutMode`). The page bar's pages button opens the page
+/// sidebar: thumbnails to jump between, reorder, duplicate, rotate and delete pages. Pass `pageDestinations`
+/// and `sendPages` to also copy or move pages to other notes.
+///
 /// The More menu's Zoom Window writes small, neat handwriting in a magnified panel at the bottom of the
 /// screen. It follows each page's template ruling (`WritingLines.lines(for:on:)`); pass `writingLines` to
 /// override that per page, where returning nil falls back to the template's.
@@ -19,6 +24,8 @@ public struct InkCanvasEditor: View {
     private let showsPageControls: Bool
     private let title: Binding<String>?
     private let writingLines: ((CanvasDocument) -> WritingLines?)?
+    private let pageDestinations: [PageDestination]
+    private let sendPages: PageSender?
 
     @StateObject private var controller = CanvasController()
     @StateObject private var telemetry = PencilTelemetry()
@@ -27,15 +34,19 @@ public struct InkCanvasEditor: View {
     /// True while a swiped page is sliding in. Further swipes wait: starting a second slide mid-way can
     /// leave the page stuck part-way across the screen.
     @State private var isTurningPage = false
+    @State private var showsSidebar = false
     @Environment(\.inkTheme) private var theme
 
     /// A multi-page editor.
     public init(notebook: InkNotebook, title: Binding<String>? = nil, showsDebugHUD: Bool = false,
-                writingLines: ((CanvasDocument) -> WritingLines?)? = nil) {
+                writingLines: ((CanvasDocument) -> WritingLines?)? = nil,
+                pageDestinations: [PageDestination] = [], sendPages: PageSender? = nil) {
         self.notebook = notebook
         self.title = title
         self.showsDebugHUD = showsDebugHUD
         self.writingLines = writingLines
+        self.pageDestinations = pageDestinations
+        self.sendPages = sendPages
         showsPageControls = true
     }
 
@@ -46,21 +57,40 @@ public struct InkCanvasEditor: View {
         notebook = InkNotebook(pages: [document], defaultPageSize: document.pageSize)
         self.showsDebugHUD = showsDebugHUD
         self.writingLines = writingLines
+        pageDestinations = []
+        sendPages = nil
         showsPageControls = false
     }
 
     public var body: some View {
         ZStack {
-            // A fresh canvas view per page: each CanvasView is bound to one document.
-            CanvasRepresentable(controller: controller, telemetry: telemetry, document: notebook.currentPage)
-                .id(notebook.currentPage.id)
-                .transition(.push(from: pageTransitionEdge))
-                .ignoresSafeArea()
+            if isContinuous {
+                ContinuousCanvasRepresentable(controller: controller, telemetry: telemetry, notebook: notebook)
+                    .ignoresSafeArea()
+            } else {
+                // A fresh canvas view per page: each CanvasView is bound to one document.
+                CanvasRepresentable(controller: controller, telemetry: telemetry, document: notebook.currentPage)
+                    .id(notebook.currentPage.id)
+                    .transition(.push(from: pageTransitionEdge))
+                    .ignoresSafeArea()
+            }
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
-                PageBar(notebook: notebook, allowsMultiplePages: showsPageControls)
+                PageBar(notebook: notebook, allowsMultiplePages: showsPageControls,
+                        showsSidebar: showsPageControls ? $showsSidebar : nil)
                     .padding(.bottom, InkSpacing.s)
+            }
+
+            if showsSidebar, showsPageControls {
+                PageSidebar(notebook: notebook, destinations: pageDestinations, sendPages: sendPages) {
+                    withAnimation(.snappy) { showsSidebar = false }
+                }
+                .padding(.leading, InkSpacing.m)
+                .padding(.top, InkSpacing.s)
+                .padding(.bottom, InkSpacing.s + InkMetrics.barHeight + InkSpacing.s) // clear of the page bar
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
             if controller.hudVisible {
@@ -105,10 +135,16 @@ public struct InkCanvasEditor: View {
         }
         .onAppear {
             controller.hudVisible = showsDebugHUD
+            controller.allowsContinuousLayout = showsPageControls
             controller.writingLines = writingLines
             controller.onSwipeToPage = { [notebook] swipe in turnPage(swipe, in: notebook) }
             controller.canSwipeToPage = { [notebook] swipe in canTurnPage(swipe, in: notebook) }
         }
+    }
+
+    /// Continuous vertical scrolling, for a notebook (a single-page editor always shows its one page).
+    private var isContinuous: Bool {
+        showsPageControls && controller.pageLayout == .continuous
     }
 
     /// The Pen Case centered on the navigation bar's row. Drawn flat, without the bar's shared glass background.

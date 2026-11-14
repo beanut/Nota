@@ -4,6 +4,8 @@ import SwiftUI
 struct PageBar: View {
     @ObservedObject var notebook: InkNotebook
     let allowsMultiplePages: Bool
+    /// Shows and hides the page sidebar; nil for no sidebar button.
+    var showsSidebar: Binding<Bool>?
 
     @State private var customSizeTarget: CustomSizeTarget?
     @State private var confirmDelete = false
@@ -11,6 +13,16 @@ struct PageBar: View {
 
     var body: some View {
         HStack(spacing: InkSpacing.xxxs) {
+            if let showsSidebar {
+                Button {
+                    withAnimation(.snappy) { showsSidebar.wrappedValue.toggle() }
+                } label: {
+                    InkIconView(.pages)
+                }
+                .buttonStyle(.inkIcon(selected: showsSidebar.wrappedValue))
+                .accessibilityLabel(showsSidebar.wrappedValue ? "Hide Pages" : "Show Pages")
+                InkBarDivider()
+            }
             if allowsMultiplePages {
                 Button { notebook.goToPreviousPage() } label: { InkIconView(.previousPage) }
                     .buttonStyle(.inkIcon)

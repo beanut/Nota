@@ -36,6 +36,14 @@ enum InkMetrics {
     static let knob: CGFloat = 24
     /// The eyedropper's loupe.
     static let loupe: CGFloat = 64
+    /// Floating bars, such as the page bar.
+    static let barHeight: CGFloat = 44
+    /// Page thumbnails.
+    static let paperRadius: CGFloat = 4
+    /// Panels floating over the canvas, such as the page sidebar.
+    static let panelRadius: CGFloat = 16
+    /// The page sidebar: room for a portrait thumbnail about 150 pt wide.
+    static let pageSidebarWidth: CGFloat = 184
 }
 
 extension InkTheme {

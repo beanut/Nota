@@ -22,11 +22,14 @@ struct NoteEditorView: View {
     @Environment(DocumentStore.self) private var documents
     @Environment(ThumbnailStore.self) private var thumbnails
     @State private var notebook: InkNotebook?
+    /// For the page sidebar's Copy to Note and Move to Note.
+    @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
 
     var body: some View {
         Group {
             if let notebook {
-                InkCanvasEditor(notebook: notebook, title: $note.title)
+                InkCanvasEditor(notebook: notebook, title: $note.title,
+                                pageDestinations: pageDestinations, sendPages: sendPages)
                     .inkTheme(.nota)
             } else {
                 // Reading the note's pages; usually too quick to notice.
@@ -60,6 +63,19 @@ struct NoteEditorView: View {
             // The first page is the cover; skipped if it hasn't changed since its last render.
             thumbnails.updateCover(of: note.id, page: notebook.pages[0].snapshot())
         }
+    }
+}
+
+extension NoteEditorView {
+    private var pageDestinations: [PageDestination] {
+        Library.notesToSendPagesTo(allNotes, from: note.id).map { PageDestination(id: $0.id, title: $0.title) }
+    }
+
+    /// Adds pages copied in the sidebar to another note; false if that note is gone.
+    private func sendPages(_ pages: [CanvasDocument], to destination: PageDestination) async -> Bool {
+        guard let target = allNotes.first(where: { $0.id == destination.id && !$0.isDeleted }) else { return false }
+        await documents.addPages(pages, to: target)
+        return true
     }
 }
 
