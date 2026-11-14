@@ -11,6 +11,10 @@ final class CanvasController: ObservableObject {
     @Published private(set) var tool: Tool = .pen
     private(set) var previousTool: Tool = .pen
     @Published var eraserMode: EraserMode = .stroke
+    /// Which ink the eraser removes. Only standard and stroke erasing can be limited (`EraserMode.canTarget`).
+    @Published var eraserTarget: EraserTarget = .all
+    /// Goes back to the previous tool when an eraser stroke ends.
+    @Published var switchBackAfterErasing = false
     @Published var lassoMode: LassoMode = .freeform
     @Published private(set) var hasSelection = false
     @Published var settings: [Tool: ToolSettings] = [
@@ -156,6 +160,17 @@ final class CanvasController: ObservableObject {
 
     func switchToPrevious() {
         select(previousTool)
+    }
+
+    /// The ink the eraser removes in the current mode.
+    var effectiveEraserTarget: EraserTarget {
+        eraserMode.canTarget ? eraserTarget : .all
+    }
+
+    /// Called by the canvas when an eraser stroke ends; goes back to the previous tool if that's on.
+    func eraserStrokeDidEnd() {
+        guard switchBackAfterErasing, tool == .eraser, previousTool != .eraser else { return }
+        switchToPrevious()
     }
 
     // MARK: Commands

@@ -104,10 +104,6 @@ final class CanvasView: UIView {
     private(set) var activeTouch: UITouch?
     private(set) var live: LiveStroke?
     var eraseSession: EraseSession?
-    struct EraseSession {
-        var removals: [CanvasDocument.Removal] = []
-        var last: CGPoint?
-    }
 
     /// Lasso state
     private enum LassoSession {
@@ -685,7 +681,8 @@ final class CanvasView: UIView {
 
     /// Runs a change this view makes to the document, so its own notification isn't taken for another
     /// view's edit.
-    private func editDocument<T>(_ body: () -> T) -> T {
+    /// Runs `body`, which edits the document, so this view doesn't treat the change as another view's.
+    func editDocument<T>(_ body: () -> T) -> T {
         isEditingDocument = true
         defer { isEditingDocument = false }
         return body()
@@ -1081,8 +1078,9 @@ final class CanvasView: UIView {
         liveView.settle(at: viewTransform)
         if controller.tool == .lasso {
             lassoPending = true
-        } else if controller.tool == .eraser && controller.eraserMode == .stroke {
-            eraseSession = EraseSession()
+        } else if controller.tool == .eraser && controller.eraserMode != .precision {
+            eraseSession = EraseSession(target: controller.effectiveEraserTarget,
+                                        before: controller.eraserMode == .standard ? document.strokes : nil)
         } else if controller.tool == .eraser || document.contains(start) {
             let template = controller.strokeTemplate(viewScale: inputTransform.scale)
             let stroke = Stroke(id: UUID(), tool: template.kind, color: template.color, style: template.style,
@@ -1110,6 +1108,9 @@ final class CanvasView: UIView {
             hud.predictedCount = predicted.count
             controller?.inputRecorder?.endEvent(strokeID: live.stroke.id, predicted: predicted)
             invalidateLive(canvasRect: live.advance(predicted: predicted))
+            if live.stroke.tool == .pixelEraser, let last = live.stroke.points.last {
+                showEraserCursor(at: last.location)
+            }
         }
         hud.state = touch.type == .pencil ? .pencilDown : .simulatedPencil
         publishHUD(force: final)
@@ -1202,13 +1203,14 @@ final class CanvasView: UIView {
         if lassoPending || lassoSession != nil {
             finishLasso(commit: commit)
         }
-        if let session = eraseSession {
-            editDocument { document.recordErase(session.removals) }
-            eraseSession = nil
-            setCursor(nil)
-        }
+        var erased = eraseSession != nil && commit
+        finishErasing()
         if let live {
             self.live = nil
+            if live.stroke.tool == .pixelEraser {
+                setCursor(nil)
+                erased = commit
+            }
             if commit, !live.stroke.points.isEmpty {
                 let geom = live.geometry()
                 geometryCache[live.stroke.id] = geom
@@ -1232,6 +1234,9 @@ final class CanvasView: UIView {
         hud.state = .idle
         hud.predictedCount = 0
         publishHUD(force: true)
+        if erased {
+            controller?.eraserStrokeDidEnd()
+        }
     }
 
     // MARK: - HUD

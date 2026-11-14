@@ -9,10 +9,42 @@ enum Tool: String, CaseIterable, Identifiable {
     }
 }
 
+/// How the eraser removes ink.
 enum EraserMode: String, CaseIterable, Identifiable {
-    case stroke, pixel
+    /// Pixel eraser: an invisible `pixelEraser` stroke punches out exactly the pixels under it, from
+    /// every kind of ink.
+    case precision
+    /// Cuts away the parts of strokes the eraser passes over, leaving the rest as separate strokes.
+    case standard
+    /// Removes every stroke the eraser touches, whole.
+    case stroke
     var id: String {
         rawValue
+    }
+
+    /// Whether the mode can be limited to one kind of ink (`EraserTarget`). A precision erase is a
+    /// stroke of its own that composites over everything drawn before it, so it can't pick.
+    var canTarget: Bool {
+        self != .precision
+    }
+}
+
+/// Which ink the eraser removes, so highlighting can be erased without touching the writing under it.
+enum EraserTarget: String, CaseIterable, Identifiable {
+    case all, highlighter, pencil
+    var id: String {
+        rawValue
+    }
+
+    /// Whether ink of `kind` is erased. Pixel-eraser strokes are never erased: they're invisible, and
+    /// removing one would bring back the ink it erased.
+    func erases(_ kind: InkKind) -> Bool {
+        switch (self, kind) {
+        case (_, .pixelEraser): false
+        case (.all, _): true
+        case (.highlighter, .highlighter), (.pencil, .pencil): true
+        case (.highlighter, _), (.pencil, _): false
+        }
     }
 }
 

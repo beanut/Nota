@@ -24,7 +24,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | --- | --- |
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
 | `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes |
-| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
+| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `replace` for a standard erase, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
 | `TestingSupport.swift` | `@_spi(Testing)` hooks for other packages' tests to put ink on a page (`drawTestStroke(through:)`, `undoForTesting()`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
 | `PageTemplate.swift` | `PageTemplate` (pattern, spacing, margins, paper colour, custom background), the built-in presets, `PaperColor` / `PaperPalette` |
@@ -37,14 +37,14 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView.swift` | `UIView` that handles raw touches, gestures, `UIPencilInteraction` and hover. Owns the page, the cached committed bitmap and the lasso overlay. Redraws from the document when another canvas on the same page changes it |
 | `CanvasRepresentable.swift` | The `UIViewRepresentable` bridge from `InkCanvasEditor` to `CanvasView` |
 | `CanvasView+ZoomWindow.swift` | The zoom window on the canvas: showing the panel and box, mapping panel touches onto the page, moving the box, rendering the panel; the hover and eraser cursors |
-| `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through |
+| `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through; stroke and standard erasing, and the eraser cursor |
 | `ZoomWindow.swift` | `WritingLines` (a page's ruling) and `ZoomWindow`, the box's geometry: auto-advance, line return, dragging and resizing |
 | `ZoomPanelView.swift` | The zoom window's writing panel and the box overlay drawn on the page |
 | `MultiFingerTapRecognizer.swift` | Two- and three-finger taps (undo, redo) without multi-tap delay |
 | `LiveInkView.swift` | The live ink layer: a grid of tile layers showing the in-progress stroke and strokes awaiting rasterization, plus the hover/eraser cursor |
 | `StrokeRenderer.swift` | Nib model (pressure → width, tilt → ellipse + opacity), centripetal Catmull-Rom, outline geometry (tangent strips and nib stamps), drawing, hit-testing, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Graphite grain for the pencil |
-| `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes |
+| `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
 | `Lasso.swift` | Freeform and rectangle lasso regions and hit-testing |
 | `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes built in parallel, culling, drawing in parallel bands), shared by the canvas and the benchmarks |
 | `CommittedRaster.swift` | A page's committed layer kept compressed with the page, so reopening it restores the pixels instead of re-rendering |
@@ -150,6 +150,7 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 - Pieces with the same alpha are unioned into one non-zero-winding path, so overlapping joints never double up. When tilt varies alpha along a stroke, runs are drawn with `.copy` inside a transparency layer. This prevents seams.
 - **Highlighter** composites with *multiply*, so ink underneath stays readable. The **pixel eraser** is a `destinationOut` stroke in the same list, so it's undoable.
 - **Pixel erasing splits strokes.** When a pixel-eraser stroke is committed, every ink stroke under it is checked: wherever the ink's whole cross-section (the nib's extent across the direction of travel) lies inside the union of the pixel erasers above it, the stroke is cut. Each cut strictly inside a stroke replaces it with separate `Stroke`s (fresh IDs, same style snapshot), so the stroke eraser removes only the piece it touches. Erasing a stroke's end only shortens it. The split is part of the eraser's `add` command, so one undo restores the original stroke. Partial erases that only together sever a line count as a cut too.
+- **Eraser modes.** *Precision* is the pixel eraser above. *Standard* cuts away the parts of strokes the eraser passes over as it moves: each touched stroke is replaced in place (same z-order) by the runs of its spline the eraser didn't reach (`StrokeSplitter.remainder`), counting the nib's radius so the pieces' round caps stop at the eraser's edge. The whole gesture is one `replace(before:after:)` command. *Stroke* removes whole strokes (`erase`). Standard and stroke erasing can be limited to highlighter or to pencil ink (`EraserTarget`), so highlighting over handwriting comes off without touching the writing; precision erasing always takes everything, since its stroke composites over all the ink below it. The eraser shows its outline at its on-screen size while erasing, and can switch back to the previous tool when the stroke ends.
 
 ### Zoom window
 
