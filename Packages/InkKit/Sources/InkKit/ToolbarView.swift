@@ -205,8 +205,8 @@ private struct InkRow: View {
     }
 }
 
-/// Figma **Tool Options**: width presets and slider, eraser and lasso modes, delete selection. Opens when
-/// the selected tool is tapped again.
+/// Figma **Tool Options**: brush picker, width presets and slider, eraser and lasso modes, delete
+/// selection. Opens when the selected tool is tapped again.
 struct ToolOptionsView: View {
     @ObservedObject var controller: CanvasController
     let tool: Tool
@@ -240,6 +240,7 @@ struct ToolOptionsView: View {
                 .buttonStyle(InkSecondaryButtonStyle())
                 .disabled(!controller.hasSelection)
             case .pen, .pencil, .highlighter:
+                BrushPicker(controller: controller, tool: tool)
                 widthControls
             }
         }

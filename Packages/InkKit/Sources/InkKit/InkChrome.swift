@@ -23,6 +23,8 @@ enum InkMetrics {
     static let iconSize: CGFloat = 20
     static let iconButton = CGSize(width: 40, height: 36)
     static let swatch: CGFloat = 28
+    /// A brush's sample stroke in the brush picker, in points.
+    static let brushPreview = CGSize(width: 110, height: 26)
 }
 
 extension InkTheme {

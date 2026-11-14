@@ -6,6 +6,8 @@ final class CanvasController: ObservableObject {
     struct ToolSettings: Equatable {
         var colorIndex: Int
         var width: Double
+        /// The built-in brush the tool draws with (`CanvasController.brushes(for:)`); nil is the first.
+        var brushID: UUID?
     }
 
     @Published private(set) var tool: Tool = .pen
@@ -24,6 +26,9 @@ final class CanvasController: ObservableObject {
         .eraser: ToolSettings(colorIndex: 0, width: 30),
         .lasso: ToolSettings(colorIndex: 0, width: 4)
     ]
+
+    /// The last width used with each brush, so switching brushes in a tool brings back each one's width.
+    private var brushWidths: [UUID: Double] = [:]
 
     // Pressure / tilt response
     @Published var minWidthRatio: Double = 0.25
@@ -274,7 +279,7 @@ final class CanvasController: ObservableObject {
         let brush: BrushDescriptor
     }
 
-    /// The bundled brush each tool draws with, before the width and pressure settings are applied.
+    /// The bundled brush each tool draws with by default, before the width and pressure settings are applied.
     static func baseBrush(for tool: Tool) -> BrushDescriptor {
         switch tool {
         case .pen, .lasso: .pen
@@ -284,21 +289,52 @@ final class CanvasController: ObservableObject {
         }
     }
 
+    /// The built-in brushes `tool` can draw with, in picker order; empty for tools with no choice.
+    static func brushes(for tool: Tool) -> [BrushDescriptor] {
+        switch tool {
+        case .pen: BrushDescriptor.pens
+        case .pencil: BrushDescriptor.pencils
+        case .highlighter: BrushDescriptor.highlighters
+        case .eraser, .lasso: []
+        }
+    }
+
+    /// The brush `tool` currently draws with, before the width and pressure settings are applied.
+    func brush(for tool: Tool) -> BrushDescriptor {
+        let id = settings[tool]?.brushID
+        return Self.brushes(for: tool).first { $0.id == id } ?? Self.baseBrush(for: tool)
+    }
+
+    /// Makes `tool` draw with `brush` (one of `brushes(for:)`), at the width last used with it or, the
+    /// first time, its own default width.
+    func selectBrush(_ brush: BrushDescriptor, for tool: Tool) {
+        guard Self.brushes(for: tool).contains(where: { $0.id == brush.id }) else { return }
+        var s = settings[tool] ?? ToolSettings(colorIndex: 0, width: Double(brush.maxWidth))
+        let current = self.brush(for: tool)
+        guard current.id != brush.id else { return }
+        brushWidths[current.id] = s.width
+        let range = Self.widthRange(for: tool)
+        s.width = min(max(brushWidths[brush.id] ?? Double(brush.maxWidth), range.lowerBound), range.upperBound)
+        s.brushID = brush.id
+        settings[tool] = s
+    }
+
     /// Brush snapshot for a new stroke. `viewScale` converts the eraser's on-screen size to canvas units.
     func strokeTemplate(viewScale: CGFloat) -> StrokeTemplate {
         let s = current
         let inks = theme.inks(for: tool)
         let color = RGBA(inks[min(max(s.colorIndex, 0), inks.count - 1)])
-        var brush = Self.baseBrush(for: tool)
+        let base = brush(for: tool)
         if tool == .eraser {
             return StrokeTemplate(color: RGBA(r: 0, g: 0, b: 0),
-                                  brush: brush.sized(CGFloat(s.width) / viewScale, minimumRatio: 1))
+                                  brush: base.sized(CGFloat(s.width) / viewScale, minimumRatio: 1))
         }
-        // Pressure & Tilt settings apply to every ink brush.
-        brush = brush.sized(CGFloat(s.width), minimumRatio: CGFloat(minWidthRatio))
-        brush.pressure.exponent = CGFloat(pressureGamma)
-        brush.tilt.enabled = tiltEnabled
-        return StrokeTemplate(color: color, brush: brush)
+        // Pressure & Tilt settings adjust every ink brush, on top of its own character.
+        return StrokeTemplate(color: color,
+                              brush: base.personalized(width: CGFloat(s.width),
+                                                       minimumWidthRatio: CGFloat(minWidthRatio),
+                                                       pressureExponent: CGFloat(pressureGamma),
+                                                       tilt: tiltEnabled))
     }
 
     var simulatedAltitude: CGFloat {

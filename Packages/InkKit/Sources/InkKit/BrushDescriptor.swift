@@ -3,8 +3,8 @@ import Foundation
 
 /// Everything that decides how a stroke looks, as plain data (Architecture §4).
 ///
-/// Built-in tools are bundled descriptors (`pen`, `pencil`, `highlighter`, `pixelEraser`), so a built-in
-/// pen and one a user or a model made go through the same code. A stroke keeps a snapshot of its
+/// Built-in brushes are bundled descriptors (`BuiltInBrushes.swift`), so a built-in pen and one a user or
+/// a model made go through the same code. A stroke keeps a snapshot of its
 /// descriptor, so changing a brush later never restyles ink already on the page, and each page's `.ink`
 /// file stores every distinct descriptor once in its brush table.
 ///
@@ -45,6 +45,8 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
     public var spacing: CGFloat
     /// Random variation per stamp, on the stamp path.
     public var jitter: Jitter
+    /// A dash pattern along the stroke. The default, `.none`, is solid; a pattern draws on the stamp path.
+    public var dash: Dash
     /// Ink pooling, 0…1: slow movement lays down more and wider ink, fast movement less.
     public var wetness: CGFloat
     /// How the stroke composites onto the page.
@@ -56,7 +58,7 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
                 pressure: ResponseCurve = .standardPressure, pressureOpacity: ResponseCurve = .none,
                 tilt: TiltResponse = .standard, velocity: ResponseCurve = .none, taper: Taper = .none,
                 smoothing: CGFloat = 0, texture: Texture = .none, spacing: CGFloat = 0, jitter: Jitter = .none,
-                wetness: CGFloat = 0, blend: BlendMode = .normal, opacity: CGFloat = 1) {
+                dash: Dash = .none, wetness: CGFloat = 0, blend: BlendMode = .normal, opacity: CGFloat = 1) {
         self.id = id
         self.name = name
         self.tip = tip
@@ -70,6 +72,7 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
         self.texture = texture
         self.spacing = spacing
         self.jitter = jitter
+        self.dash = dash
         self.wetness = wetness
         self.blend = blend
         self.opacity = opacity
@@ -217,6 +220,26 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
         }
     }
 
+    /// Dashes along the stroke: `on` of ink, then `off` of gap, both in multiples of the full-pressure
+    /// width (`size.upperBound`) and measured between stamp centres, so the visible gap is about one width
+    /// shorter than `off` and the dash one width longer than `on`. `on` 0.05…50, `off` 0…50; `off` 0 is solid.
+    public struct Dash: Codable, Hashable, Sendable {
+        public var on: CGFloat
+        public var off: CGFloat
+
+        public init(on: CGFloat, off: CGFloat) {
+            self.on = on
+            self.off = off
+        }
+
+        /// Solid.
+        public static let none = Dash(on: 1, off: 0)
+
+        var isActive: Bool {
+            off > 0
+        }
+    }
+
     /// How a stroke composites onto the page.
     public enum BlendMode: String, Codable, Hashable, Sendable, CaseIterable {
         /// Source-over.
@@ -245,7 +268,7 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
     // MARK: Derived
 
     public var renderPath: RenderPath {
-        if spacing > 0 {
+        if spacing > 0 || dash.isActive {
             return .stamp
         }
         if case .bristle = texture {
@@ -254,7 +277,8 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
         return .hull
     }
 
-    /// Distance between stamps in nib widths on the stamp path (a bristle brush with `spacing` 0 gets 0.15).
+    /// Distance between stamps in nib widths on the stamp path (a bristle or dashed brush with `spacing` 0
+    /// gets 0.15).
     var stampSpacing: CGFloat {
         spacing > 0 ? spacing : 0.15
     }
@@ -270,6 +294,11 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
             return true
         }
         return false
+    }
+
+    /// Whether drawing needs the arc length at each point: for the taper, or to place the dashes.
+    var measuresDistance: Bool {
+        taper.isActive || dash.isActive
     }
 
     /// Whether the nib depends on the stroke's speed.
@@ -302,6 +331,7 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
         let spacing = clamp(spacing, 0 ... 4, fallback: 0)
         b.spacing = spacing < 0.025 ? 0 : max(spacing, 0.05)
         b.jitter = jitter.clamped()
+        b.dash = dash.clamped()
         b.wetness = clamp(wetness, 0 ... 1, fallback: 0)
         b.opacity = clamp(opacity, 0.02 ... 1, fallback: 1)
         return b
@@ -311,7 +341,7 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, tip, size, pressure, pressureOpacity, tilt, velocity, taper, smoothing, texture, spacing,
-             jitter, wetness, blend, opacity
+             jitter, dash, wetness, blend, opacity
     }
 
     /// Lenient: a missing or malformed field takes the pen's value, and the result is `clamped()`.
@@ -336,6 +366,7 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
                   texture: field(.texture, pen.texture),
                   spacing: field(.spacing, pen.spacing),
                   jitter: field(.jitter, pen.jitter),
+                  dash: field(.dash, pen.dash),
                   wetness: field(.wetness, pen.wetness),
                   blend: field(.blend, pen.blend),
                   opacity: field(.opacity, pen.opacity))
@@ -357,6 +388,9 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
         try c.encode(texture, forKey: .texture)
         try c.encode(spacing, forKey: .spacing)
         try c.encode(jitter, forKey: .jitter)
+        if dash.isActive { // omitted when solid, so brushes without dashes keep the bytes they had
+            try c.encode(dash, forKey: .dash)
+        }
         try c.encode(wetness, forKey: .wetness)
         try c.encode(blend, forKey: .blend)
         try c.encode(opacity, forKey: .opacity)
@@ -375,47 +409,6 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
-// MARK: - Bundled brushes
-
-public extension BrushDescriptor {
-    /// The ballpoint-like pen: round nib, pressure to width, tilt shading.
-    static let pen = BrushDescriptor(id: UUID(uuidString: "6E6F7461-0000-4000-8000-000000000001")!,
-                                     name: "Pen", size: 1 ... 4)
-
-    /// Graphite: the pen's nib with paper-tooth grain, slightly translucent.
-    static let pencil = BrushDescriptor(id: UUID(uuidString: "6E6F7461-0000-4000-8000-000000000002")!,
-                                        name: "Pencil", size: 0.75 ... 3,
-                                        texture: .grain(scale: 1, contrast: 1, seed: 42), opacity: 0.85)
-
-    /// A wide translucent nib that multiplies, so ink underneath stays readable.
-    static let highlighter = BrushDescriptor(id: UUID(uuidString: "6E6F7461-0000-4000-8000-000000000003")!,
-                                             name: "Highlighter", size: 5.5 ... 22, blend: .multiply,
-                                             opacity: 0.38)
-
-    /// Erases pixels of the strokes under it. A constant-width round nib, no pressure or tilt.
-    static let pixelEraser = BrushDescriptor(id: UUID(uuidString: "6E6F7461-0000-4000-8000-000000000004")!,
-                                             name: "Pixel Eraser", size: 30 ... 30,
-                                             pressure: ResponseCurve(amount: 1, exponent: 1), tilt: .off,
-                                             blend: .destinationOut)
-
-    /// Every bundled brush.
-    static let bundled: [BrushDescriptor] = [.pen, .pencil, .highlighter, .pixelEraser]
-
-    /// This brush with a full-pressure width of `width` and `minimumRatio` of it at no pressure.
-    func sized(_ width: CGFloat, minimumRatio: CGFloat) -> BrushDescriptor {
-        var b = self
-        let ratio = min(max(minimumRatio.isFinite ? minimumRatio : 0, 0), 1)
-        let width = width.isFinite ? min(max(width, 0.05), 1000) : BrushDescriptor.pen.maxWidth
-        b.size = width * ratio ... width
-        return b
-    }
-
-    /// The width at full pressure.
-    var maxWidth: CGFloat {
-        size.upperBound
-    }
-}
-
 // MARK: - Clamping helpers
 
 /// `v` pulled into `range`, or `fallback` (itself clamped) if it's NaN.
@@ -431,7 +424,8 @@ private extension BrushDescriptor.TipShape {
             return .round
         case let .ellipse(aspect, angle):
             let a = clamp(aspect, 0.05 ... 1, fallback: 1)
-            let t = angle.isFinite ? atan2(sin(angle), cos(angle)) : 0
+            // In-range angles are kept as they are (atan2 would round them), so clamping stays exact.
+            let t = !angle.isFinite ? 0 : (-CGFloat.pi ... CGFloat.pi).contains(angle) ? angle : atan2(sin(angle), cos(angle))
             return .ellipse(aspect: a, angle: t)
         }
     }
@@ -477,6 +471,12 @@ private extension BrushDescriptor.Texture {
         case let .bristle(count, spread):
             .bristle(count: min(max(count, 1), 64), spread: clamp(spread, 0.1 ... 2, fallback: 1))
         }
+    }
+}
+
+private extension BrushDescriptor.Dash {
+    func clamped() -> Self {
+        Self(on: clamp(on, 0.05 ... 50, fallback: 1), off: clamp(off, 0 ... 50, fallback: 0))
     }
 }
 
@@ -534,6 +534,18 @@ extension BrushDescriptor.Taper {
         self.init(startLength: (try? c.decodeIfPresent(CGFloat.self, forKey: .startLength)) ?? 0,
                   endLength: (try? c.decodeIfPresent(CGFloat.self, forKey: .endLength)) ?? 0,
                   minimumScale: (try? c.decodeIfPresent(CGFloat.self, forKey: .minimumScale)) ?? 0.1)
+    }
+}
+
+extension BrushDescriptor.Dash {
+    private enum Keys: String, CodingKey {
+        case on, off
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        self.init(on: (try? c.decodeIfPresent(CGFloat.self, forKey: .on)) ?? 1,
+                  off: (try? c.decodeIfPresent(CGFloat.self, forKey: .off)) ?? 0)
     }
 }
 

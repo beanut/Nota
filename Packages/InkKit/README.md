@@ -45,7 +45,9 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `ZoomPanelView.swift` | The zoom window's writing panel and the box overlay drawn on the page |
 | `MultiFingerTapRecognizer.swift` | Two- and three-finger taps (undo, redo) without multi-tap delay |
 | `LiveInkView.swift` | The live ink layer: a grid of tile layers showing the in-progress stroke and strokes awaiting rasterization, plus the hover/eraser cursor |
-| `BrushDescriptor.swift` | `BrushDescriptor`: every brush parameter, its legal range and `clamped()`, lenient JSON, and the bundled brushes |
+| `BrushDescriptor.swift` | `BrushDescriptor`: every brush parameter, its legal range and `clamped()`, and lenient JSON |
+| `BuiltInBrushes.swift` | The built-in brush set (pens, pencils, highlighters, pixel eraser), `sized` and `personalized` (the Pressure & Tilt settings on top of a brush's character) |
+| `BrushPicker.swift` | The tool options' brush picker, with sample strokes drawn by the engine (`BrushPreview`) |
 | `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
 | `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
@@ -64,10 +66,10 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 
 ## Brushes
 
-A brush is a `BrushDescriptor`: plain, `Codable` data (Architecture §4). The built-in tools are bundled
-descriptors (`.pen`, `.pencil`, `.highlighter`, `.pixelEraser`), so a built-in brush and one a user or a
-model makes go through exactly the same code. A stroke keeps a snapshot of its descriptor, with the width
-and Pressure & Tilt settings of the moment applied (`sized(_:minimumRatio:)`, `pressure`, `tilt`).
+A brush is a `BrushDescriptor`: plain, `Codable` data (Architecture §4). The built-in brushes are bundled
+descriptors, so a built-in brush and one a user or a model makes go through exactly the same code. A stroke
+keeps a snapshot of its descriptor, with the width and Pressure & Tilt settings of the moment applied
+(`personalized(width:minimumWidthRatio:pressureExponent:tilt:)`).
 
 ```swift
 var marker = BrushDescriptor.pen.sized(6, minimumRatio: 0.6)
@@ -89,10 +91,33 @@ let brush = try BrushDescriptor(json: json)          // lenient and clamped
 | `smoothing` | 0…0.95 | Stabiliser: each sample pulled toward the stroke so far |
 | `texture` | `none`, `grain(scale 0.25…8, contrast 0…1, seed)`, `bristle(count 1…64, spread 0.1…2)` | Procedural, never a bitmap |
 | `spacing` | 0, or 0.05…4 nib widths | 0 draws on the hull path; more draws stamps |
+| `dash` | on 0.05…50, off 0…50 full-pressure widths | Dashes by arc length from the stroke's start; off 0 is solid. Draws on the stamp path |
 | `jitter` | size, angle, opacity 0…1; scatter 0…2 nib widths; seed | Per-stamp variation (stamp path) |
 | `wetness` | 0…1 | Ink pools where the nib lingers, runs dry where it hurries |
 | `blend` | `normal`, `multiply`, `destinationOut` | Compositing; `destinationOut` erases |
 | `opacity` | 0.02…1 | Overall opacity |
+
+### Built-in set
+
+Each tool offers a few brushes (tap the selected tool for its options). Fixed ids (`6E6F7461-…-0000000000NN`)
+mark a brush as built in; the first in each list is the tool's default, and the original pen, pencil,
+highlighter and pixel eraser kept their ids (and their looks).
+
+| Tool | Brushes |
+| --- | --- |
+| Pen (`pens`) | Ballpoint (`.pen`), Fineliner, Fountain Pen (angled stub nib, soft taper, ink pooling), Brush Pen (wide pressure range, taper, thins when fast), Marker (chisel), Dashed, Dotted |
+| Pencil (`pencils`) | HB Pencil (`.pencil`), Soft Pencil (coarser grain, pressure darkens, broad tilt shading) |
+| Highlighter (`highlighters`) | Highlighter (round), Chisel Highlighter |
+
+A brush's `size.upperBound` is its default width, and each brush remembers the last width used with it.
+The Pressure & Tilt settings **adjust** a brush rather than replace its character: *Minimum width* moves
+the brush's own minimum-width ratio the way the setting moves from its default (0.25), so the default
+leaves every brush as designed and 1 makes all of them constant width; *Response curve* scales the brush's
+pressure exponent by γ / 0.6; *Tilt shading* off turns shading off. The ballpoint gets the settings'
+values exactly, as the pen always did.
+
+The brushes are tuned on the simulator with synthetic input; they still need tuning on a physical iPad
+with Pencil (NOT-12).
 
 - **Clamping.** `clamped()` pulls every parameter into its range and replaces NaN with the pen's value.
   Decoding always clamps, a missing field takes its default (a partial object like `{"tilt": {"enabled":
@@ -100,13 +125,15 @@ let brush = try BrushDescriptor(json: json)          // lenient and clamped
   the renderer can't draw. That's what makes model-generated brushes safe to render.
 - **Two render paths**, picked from the descriptor (`renderPath`). `spacing == 0` without a bristle texture
   is the **hull path**: the nib swept continuously, exactly as before descriptors (see Stroke geometry).
-  Otherwise the **stamp path**: nib stamps spread evenly over each spline segment about `spacing` nib widths
+  Otherwise (a spacing, a bristle texture or a dash) the **stamp path**: nib stamps spread evenly over each spline segment about `spacing` nib widths
   apart, moved by `jitter` with a generator seeded by the stamp's place in the stroke, and split into
-  bristle dots by a bristle texture. Segments never depend on each other, so live and committed strokes
+  bristle dots by a bristle texture. A dash drops the stamps in its gaps, by the arc length the live stroke
+  already keeps for the taper. Segments never depend on each other, so live and committed strokes
   match and nothing grows with stroke length.
 - **Built-in tools look the same.** `Tests/InkKitTests/Snapshots/` holds golden images rendered by the
   engine before descriptors; the bundled descriptors match them pixel for pixel. Re-record with
-  `TEST_RUNNER_INK_SNAPSHOT_RECORD=1` only for an intended change.
+  `TEST_RUNNER_INK_SNAPSHOT_RECORD=1` only for an intended change. Each brush of the built-in set has a
+  golden of its own (`brush-*.png`).
 
 ## Page templates
 

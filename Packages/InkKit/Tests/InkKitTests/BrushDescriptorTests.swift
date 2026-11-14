@@ -15,8 +15,12 @@ struct BrushDescriptorTests {
     }
 
     @Test func bundledBrushesPickTheirRenderPath() {
-        #expect(BrushDescriptor.bundled.allSatisfy { $0.renderPath == .hull })
+        let stamped: Set<UUID> = [BrushDescriptor.dashedPen.id, BrushDescriptor.dottedPen.id]
+        #expect(BrushDescriptor.bundled.allSatisfy { ($0.renderPath == .stamp) == stamped.contains($0.id) })
         #expect(dryBrush.renderPath == .stamp)
+        var dashed = BrushDescriptor.pen
+        dashed.dash = .init(on: 2, off: 1)
+        #expect(dashed.renderPath == .stamp && dashed.measuresDistance)
         var spaced = BrushDescriptor.pen
         spaced.spacing = 0.5
         #expect(spaced.renderPath == .stamp)
@@ -38,6 +42,7 @@ struct BrushDescriptorTests {
         b.texture = .bristle(count: 1000, spread: 0)
         b.spacing = 0.01
         b.jitter = .init(size: 9, angle: -1, scatter: 9, opacity: .nan)
+        b.dash = .init(on: 0, off: 99)
         b.wetness = -0.5
         b.opacity = 0
         let c = b.clamped()
@@ -54,6 +59,7 @@ struct BrushDescriptorTests {
         #expect(c.texture == .bristle(count: 64, spread: 0.1))
         #expect(c.spacing == 0) // under half the minimum: continuous
         #expect(c.jitter == .init(size: 1, angle: 0, scatter: 2, opacity: 0))
+        #expect(c.dash == .init(on: 0.05, off: 50))
         #expect(c.wetness == 0 && c.opacity == 0.02)
         #expect(c.clamped() == c)
     }
@@ -69,6 +75,14 @@ struct BrushDescriptorTests {
     }
 
     /// Whatever the JSON says, decoding gives a clamped brush that draws.
+    @Test func solidBrushesLeaveTheDashOutOfTheirJSON() throws {
+        let solid = try #require(JSONSerialization.jsonObject(with: BrushDescriptor.pen.jsonData()) as? [String: Any])
+        #expect(solid["dash"] == nil)
+        let dashed = try #require(JSONSerialization.jsonObject(with: BrushDescriptor.dashedPen.jsonData())
+            as? [String: Any])
+        #expect(dashed["dash"] as? [String: Double] == ["on": 3, "off": 2.5])
+    }
+
     @Test(arguments: [
         "{}",
         #"{"size": [9, 2]}"#,
@@ -170,9 +184,12 @@ struct BrushDescriptorTests {
 
     /// The live stroke (finalized segments, tail, end taper applied on `finish()`) must build exactly the
     /// geometry a full rebuild does, or ink would shift when the page re-renders.
-    @Test(arguments: ["tapered", "dry brush", "calligraphy", "wet"])
+    @Test(arguments: ["tapered", "dry brush", "calligraphy", "wet", "Fountain Pen", "Brush Pen", "Dashed",
+                      "Dotted", "Soft Pencil", "Marker", "Chisel Highlighter"])
     func liveGeometryMatchesTheFullRebuild(_ name: String) {
+        let builtIn = BrushDescriptor.bundled.first { $0.name == name }
         let brush: BrushDescriptor = switch name {
+        case _ where builtIn != nil: builtIn ?? .pen
         case "tapered": {
                 var b = BrushDescriptor.pencil.sized(5, minimumRatio: 0.3)
                 b.taper = .init(startLength: 25, endLength: 30)
@@ -228,6 +245,28 @@ struct BrushDescriptorTests {
         reseeded.jitter.seed += 1
         let c = StrokeRenderer.hulls(for: stroke.points, brush: reseeded)
         #expect(!zip(a, c).allSatisfy { $0.polygon == $1.polygon })
+    }
+
+    @Test func dashesLeaveGapsAtTheirPeriod() {
+        // A straight 300-point line, so arc length is x.
+        let points = (0 ..< 61).map { i in
+            StrokePoint(location: CGPoint(x: CGFloat(i) * 5, y: 50), force: 1, altitude: .pi / 2, azimuth: 0,
+                        timestamp: Double(i) / 240)
+        }
+        let brush = BrushDescriptor.dashedPen.sized(4, minimumRatio: 1)
+        var solid = brush
+        solid.dash = .none
+        solid.spacing = 0.15 // the dashed brush's stamp spacing, without the gaps
+        let dashed = StrokeRenderer.hulls(for: points, brush: brush)
+        #expect(dashed.count < StrokeRenderer.hulls(for: points, brush: solid).count)
+        // Every stamp centre lies in an "on" stretch: on 3 × 4 = 12 pt, period (3 + 2.5) × 4 = 22 pt.
+        for hull in dashed {
+            let x = hull.bounds.midX.truncatingRemainder(dividingBy: 22)
+            #expect(x <= 12 + 0.5, "stamp at \(hull.bounds.midX)")
+        }
+        // And every period has ink: no dash is lost.
+        let periods = Set(dashed.map { Int($0.bounds.midX / 22) })
+        #expect(periods == Set(0 ... 13))
     }
 
     // MARK: Storage

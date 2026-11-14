@@ -119,7 +119,9 @@ App-only: `SidebarRow` (Figma Sidebar Row: 44 pt, selected = ink tint), `NoteCar
 
 - **Pen Case** (`InkKit/ToolbarView.swift`): tools · inks · undo/redo · more. Sits in the navigation bar on the same row as the back button, centered (principal placement) and drawn flat without the bar's glass background; it can't be moved. A floating favourites bar is planned separately.
 - **Room to grow:** the tool tray scrolls when it runs out of room, so M1 tools (text, shapes, photo; icons already in the set) can be added without redesigning the bar.
-- **Tool Options:** tap the selected tool again. Width presets (fine / medium / bold) and a width slider; freeform or rectangle lasso and Delete Selection. The eraser adds its mode (Precision, Standard or Stroke, each with a one-line description), which ink it erases (All Ink, Highlighter or Pencil; disabled for Precision, which says why), Switch back after erasing, and Clear Page (with the same confirmation as the More menu).
+- **Tool Options:** tap the selected tool again. Pen, pencil and highlighter start with a brush picker:
+  a two-column grid of tiles, each a sample stroke drawn by the engine in the current ink over the brush's
+  name (selected: ink tint fill, emphasised ink-coloured label). Then width presets (fine / medium / bold) and a width slider; freeform or rectangle lasso and Delete Selection. The eraser adds its mode (Precision, Standard or Stroke, each with a one-line description), which ink it erases (All Ink, Highlighter or Pencil; disabled for Precision, which says why), Switch back after erasing, and Clear Page (with the same confirmation as the More menu).
 - **Colour presets** follow the tool: pen and pencil show the five pen inks, the highlighter its five highlighters, and the eraser and lasso keep the pen inks dimmed so the bar doesn't change length.
 - **More** (ellipsis): fit page (with zoom level), pressure and tilt, debug HUD, clear page.
 - **Page Bar** (`InkKit/PageBar.swift`): previous · Page n of m · next · add (hold for add before/after/size and Delete Page) · paper-size pill.
