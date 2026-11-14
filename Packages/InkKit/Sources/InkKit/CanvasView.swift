@@ -15,7 +15,7 @@ final class CanvasView: UIView {
     /// The page, the desk around it and the lasso's accent, from the editor's `InkTheme` (see `apply(_:)`).
     private(set) var paperColor = InkTheme.standard.paper
     private var deskColor = InkTheme.standard.desk
-    private var accentColor = InkTheme.standard.accent
+    private(set) var accentColor = InkTheme.standard.accent
     private var shadowColor = InkTheme.standard.shadow
     private(set) var paperTheme = InkTheme.standard
 
@@ -139,6 +139,8 @@ final class CanvasView: UIView {
     var shapeSnap: ShapeSnap?
     /// The text box being edited, while one is (see `CanvasView+Text`).
     var textEditor: TextBoxEditor?
+    /// The picture being cropped, while one is (see `CanvasView+Images`).
+    var imageCropView: ImageCropView?
     /// A text tool touch in progress.
     var textGesture: TextGesture?
     /// A finger tap with the text tool when fingers don't draw, or on the page while a box is edited.
@@ -721,7 +723,7 @@ final class CanvasView: UIView {
     func refreshObjects() {
         let preview: [any PageObject] = shapeSnap.map { [$0.shape] } ?? []
         // The box being edited is shown by its text view instead.
-        let editing = textEditor?.objectID
+        let editing = textEditor?.objectID ?? imageCropView?.objectID
         let objects = editing.map { id in document.objects.filter { $0.id != id } } ?? document.objects
         objectLayer.show(objects + preview, pageBounds: document.pageBounds)
     }
@@ -944,6 +946,7 @@ final class CanvasView: UIView {
         templateView.follow(viewTransform)
         objectLayer.follow(viewTransform)
         placeTextEditor()
+        placeImageCrop()
         inkMask.frame = inkClipView.bounds
         inkMask.path = CGPath(rect: frame, transform: nil)
         if let zoomBoxView, let zoomWindow {
@@ -1398,6 +1401,7 @@ extension CanvasView {
         textTap.delegate = self
         addGestureRecognizer(textTap)
         addInteraction(editMenu)
+        installImageDrop()
         selectionDragInteraction.isEnabled = false // see `updateSelectionBox()`
         addInteraction(selectionDragInteraction)
     }
@@ -1661,7 +1665,7 @@ extension CanvasView: UIGestureRecognizerDelegate {
 
     /// Palm rejection: a resting hand never pans, zooms, swipes or taps.
     func gestureRecognizer(_: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        !isPalm(touch) && !isInTextEditor(touch)
+        !isPalm(touch) && !isInTextEditor(touch) && !isInImageCrop(touch)
     }
 
     /// Whether the touch landed in the text box being edited.

@@ -41,6 +41,8 @@ public enum InkIcon: String, CaseIterable, Sendable {
     case newLine, close
     /// The Pen Case's pen tray (saved pens) and the colour picker's eyedropper.
     case penTray, eyedropper
+    /// The Pen Case's Insert menu: photos, the camera, files, pasted pictures and stickers.
+    case photo
 }
 
 /// How InkKit's editor looks: the colours, fonts and icons of its chrome, the paper and desk the page sits
@@ -189,13 +191,7 @@ public extension InkTheme {
     /// SF Symbols for each glyph.
     static func systemIcon(_ icon: InkIcon) -> Image {
         let name = switch icon {
-        case .pen: "pencil.tip"
-        case .pencil: "pencil"
-        case .highlighter: "highlighter"
-        case .eraser: "eraser"
-        case .lasso: "lasso"
-        case .shapes: "square.on.circle"
-        case .text: "character.textbox"
+        case .pen, .pencil, .highlighter, .eraser, .lasso, .shapes, .text, .photo: toolSymbol(icon)
         case .undo: "arrow.uturn.backward"
         case .redo: "arrow.uturn.forward"
         case .more: "ellipsis"
@@ -211,6 +207,16 @@ public extension InkTheme {
         case .eyedropper: "eyedropper"
         }
         return Image(systemName: name)
+    }
+
+    /// The Pen Case's tools and its Insert menu.
+    private static func toolSymbol(_ icon: InkIcon) -> String {
+        switch icon {
+        case .pen: "pencil.tip"
+        case .shapes: "square.on.circle"
+        case .text: "character.textbox"
+        default: icon.rawValue // pencil, highlighter, eraser, lasso, photo: named as the symbols are
+        }
     }
 
     static let standardPenInks: [InkColor] = [

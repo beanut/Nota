@@ -34,7 +34,7 @@ extension Tool {
     }
 }
 
-/// The Pen Case: the one drawing toolbar. Pen tray · tools · colours · undo/redo · more, placed in the
+/// The Pen Case: the one drawing toolbar. Pen tray · tools · insert · colours · undo/redo · more, placed in the
 /// navigation bar on the same row as the back button. The note's title and Rename live in the More menu.
 /// Tap the selected tool again for its options, and the selected colour again to change it.
 struct PenCase: View {
@@ -63,6 +63,7 @@ struct PenCase: View {
                 tools
                 ScrollView(.horizontal, showsIndicators: false) { tools }
             }
+            InsertMenu(controller: controller)
             InkBarDivider(axis: .horizontal)
             InkRow(controller: controller, axis: .horizontal, opensPicker: true)
             InkBarDivider(axis: .horizontal)

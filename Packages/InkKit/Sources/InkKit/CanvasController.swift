@@ -97,6 +97,13 @@ final class CanvasController: ObservableObject {
 
     /// The tool whose brush the brush editor is editing, while it's open.
     @Published var brushEditorTool: Tool?
+    /// The crop bar's state while a picture is being cropped (see `ImageCropView`).
+    @Published private(set) var imageCrop: ImageCropState?
+    /// Whether the pasteboard holds pictures from another app to paste.
+    @Published private(set) var canPasteImages = false
+    /// The sticker collection the picker shows and Save as Sticker adds to.
+    let stickers: StickerStore
+
     /// While set, the next touch on the canvas picks a colour from the page (see `EyedropperOverlay`).
     @Published var eyedropper: EyedropperRequest?
 
@@ -106,10 +113,13 @@ final class CanvasController: ObservableObject {
         let quickColorIndex: Int?
     }
 
-    /// `penTray` defaults to `PenTrayStore.shared` and `pasteboard` to the general pasteboard.
-    init(settingsStore: UserDefaults = .standard, penTray: PenTrayStore? = nil, pasteboard: UIPasteboard = .general) {
+    /// `penTray` defaults to `PenTrayStore.shared`, `stickers` to `StickerStore.shared` and `pasteboard` to
+    /// the general pasteboard.
+    init(settingsStore: UserDefaults = .standard, penTray: PenTrayStore? = nil, stickers: StickerStore? = nil,
+         pasteboard: UIPasteboard = .general) {
         self.settingsStore = settingsStore
         self.pasteboard = pasteboard
+        self.stickers = stickers ?? .shared
         let penTray = penTray ?? .shared
         self.penTray = penTray
         pencilSettings = PencilSettings.load(from: settingsStore)
@@ -127,9 +137,13 @@ final class CanvasController: ObservableObject {
 
     /// Checks whether the pasteboard holds a selection, without reading it (so no paste prompt).
     func refreshCanPaste() {
-        let has = pasteboard.contains(pasteboardTypes: [SelectionClip.pasteboardType])
+        let images = pasteboard.hasImages
+        let has = images || pasteboard.contains(pasteboardTypes: [SelectionClip.pasteboardType])
         if canPaste != has {
             canPaste = has
+        }
+        if canPasteImages != images {
+            canPasteImages = images
         }
     }
 
@@ -239,6 +253,7 @@ final class CanvasController: ObservableObject {
 
     func select(_ newTool: Tool) {
         guard newTool != tool else { return }
+        canvas?.finishImageCrop(commit: true)
         if tool == .lasso {
             canvas?.clearSelection()
         }
@@ -285,10 +300,12 @@ final class CanvasController: ObservableObject {
     // MARK: Commands
 
     func undo() {
+        canvas?.finishImageCrop(commit: false)
         canvas?.undo()
     }
 
     func redo() {
+        canvas?.finishImageCrop(commit: false)
         canvas?.redo()
     }
 
@@ -628,6 +645,47 @@ final class CanvasController: ObservableObject {
         if self.brush(for: tool).id == brush.id {
             setBrush(Self.baseBrush(for: tool), for: tool, width: nil)
         }
+    }
+
+    // MARK: Pictures
+
+    /// Puts pictures (image file bytes) on the current page and selects them.
+    func insertImages(_ items: [Data]) {
+        canvas?.insertImages(items)
+    }
+
+    /// Puts a photo (from the camera) on the current page.
+    func insertImage(_ image: UIImage) {
+        guard let data = CanvasView.fileData(for: image) else { return }
+        insertImages([data])
+    }
+
+    /// Pastes the pasteboard's pictures onto the current page.
+    func pasteImages() {
+        canvas?.pasteImages()
+    }
+
+    /// Places a sticker in the middle of the visible part of the current page.
+    func insertSticker(_ sticker: Sticker) {
+        canvas?.insertSticker(sticker)
+    }
+
+    func imageCropDidChange(_ state: ImageCropState?) {
+        if imageCrop != state {
+            imageCrop = state
+        }
+    }
+
+    func setImageCropMode(_ mode: ImageCropMode) {
+        canvas?.setImageCropMode(mode)
+    }
+
+    func resetImageCrop() {
+        canvas?.resetImageCrop()
+    }
+
+    func finishImageCrop(commit: Bool) {
+        canvas?.finishImageCrop(commit: commit)
     }
 
     // MARK: Text

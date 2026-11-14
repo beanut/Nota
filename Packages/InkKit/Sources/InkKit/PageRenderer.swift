@@ -181,20 +181,27 @@ public enum PageRenderer {
         guard let consumer = CGDataConsumer(data: data as CFMutableData),
               let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, info as CFDictionary)
         else { return nil }
-        for page in pages {
-            var box = page.pageSize.bounds
-            let boxData = Data(bytes: &box, count: MemoryLayout<CGRect>.size) as CFData
-            ctx.beginPDFPage([kCGPDFContextMediaBox: boxData] as CFDictionary)
-            // PDF space is y-up; canvas space is y-down.
-            ctx.translateBy(x: 0, y: box.height)
-            ctx.scaleBy(x: 1, y: -1)
-            TemplateRenderer.draw(page.template, pageSize: page.pageSize, palette: palette(page.template.paper),
-                                  artwork: page.templateArtwork, in: ctx)
-            drawObjects(page, in: ctx)
-            drawInk(page, in: ctx)
-            ctx.endPDFPage()
+        // Pictures go in at 3 pixels per point (216 dpi), not the PDF's 1-point grid.
+        ImageDrawing.with(ImageDrawing.Options(minimumScale: 3)) {
+            for page in pages {
+                drawPDFPage(page, in: ctx, palette: palette)
+            }
         }
         ctx.closePDF()
         return data as Data
+    }
+
+    private static func drawPDFPage(_ page: PageSnapshot, in ctx: CGContext, palette: (PaperColor) -> PaperPalette) {
+        var box = page.pageSize.bounds
+        let boxData = Data(bytes: &box, count: MemoryLayout<CGRect>.size) as CFData
+        ctx.beginPDFPage([kCGPDFContextMediaBox: boxData] as CFDictionary)
+        // PDF space is y-up; canvas space is y-down.
+        ctx.translateBy(x: 0, y: box.height)
+        ctx.scaleBy(x: 1, y: -1)
+        TemplateRenderer.draw(page.template, pageSize: page.pageSize, palette: palette(page.template.paper),
+                              artwork: page.templateArtwork, in: ctx)
+        drawObjects(page, in: ctx)
+        drawInk(page, in: ctx)
+        ctx.endPDFPage()
     }
 }
