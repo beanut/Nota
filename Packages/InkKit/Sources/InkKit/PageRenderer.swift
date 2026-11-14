@@ -1,34 +1,60 @@
 import CoreGraphics
 import Foundation
 
-/// A page's ink frozen at one revision. Snapshots are plain values, so they can be rendered off the
-/// main actor while the page keeps changing.
+/// A page's ink and objects frozen at one revision. Snapshots are plain values, so they can be rendered
+/// off the main actor while the page keeps changing.
 public struct PageSnapshot: Sendable {
     public let pageID: UUID
-    /// The page's `revision` when the snapshot was taken.
+    /// The page's `revision` (its ink's) when the snapshot was taken.
     public let revision: Int
+    /// The page's `objectsRevision` when the snapshot was taken.
+    public let objectsRevision: Int
     public let pageSize: PageSize
     public let template: PageTemplate
     public let templateArtwork: TemplateArtwork?
     let strokes: [Stroke]
+    /// Lowest `zIndex` first.
+    let objects: [any PageObject]
 
-    /// True when the page has no ink to draw.
+    /// True when the page has no ink and no objects to draw.
     public var isBlank: Bool {
-        !strokes.contains { !$0.brush.erases }
+        !strokes.contains { !$0.brush.erases } && !objects.contains(where: PageObjectKinds.isSelectable)
     }
 }
 
 public extension CanvasDocument {
-    /// The page's current ink, for rendering elsewhere (see `PageRenderer`).
+    /// The page's current ink and objects, for rendering elsewhere (see `PageRenderer`).
     func snapshot() -> PageSnapshot {
-        PageSnapshot(pageID: id, revision: revision, pageSize: pageSize, template: template,
-                     templateArtwork: template.background == nil ? nil : templateArtwork, strokes: strokes)
+        PageSnapshot(pageID: id, revision: revision, objectsRevision: objectsRevision, pageSize: pageSize,
+                     template: template, templateArtwork: template.background == nil ? nil : templateArtwork,
+                     strokes: strokes, objects: objects)
     }
 }
 
-/// Draws a page's ink with the same `StrokeRenderer` geometry the canvas uses, for thumbnails and other
-/// still images. Safe to call from any thread.
+/// Draws a page's objects and ink with the same code the canvas uses, for thumbnails and other still
+/// images. Safe to call from any thread.
 public enum PageRenderer {
+    /// Draws the page's objects into `ctx` (mapped to canvas space, like `drawInk`), in stacking order,
+    /// clipped to the page. Call it between the template and the ink.
+    public static func drawObjects(_ page: PageSnapshot, in ctx: CGContext) {
+        draw(page.objects, clip: page.pageSize.bounds, in: ctx)
+    }
+
+    /// Draws `objects` in canvas space, skipping those outside `visible`.
+    static func draw(_ objects: [any PageObject], clip: CGRect, visible: CGRect? = nil, in ctx: CGContext) {
+        guard !objects.isEmpty else { return }
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+        ctx.clip(to: clip)
+        for object in objects {
+            guard object.bounds.intersects(visible ?? clip) else { continue }
+            ctx.saveGState()
+            ctx.concatenate(object.transform)
+            object.draw(in: ctx)
+            ctx.restoreGState()
+        }
+    }
+
     /// Draws the page's ink into `ctx`, which must already map canvas space (points from the page's
     /// top-left, y down) onto the destination.
     ///
@@ -50,8 +76,8 @@ public enum PageRenderer {
         ctx.endTransparencyLayer()
     }
 
-    /// The page rendered `pixelWidth` pixels wide (height follows the page's aspect ratio) in sRGB.
-    /// `background` draws first, in pixel space with the origin at the top-left: fill the paper and its
+    /// The page rendered `pixelWidth` pixels wide (height follows the page's aspect ratio) in sRGB: its
+    /// objects, then its ink. `background` draws first, in pixel space with the origin at the top-left: fill the paper and its
     /// template there. Returns nil if the bitmap can't be created.
     public static func image(of page: PageSnapshot,
                              pixelWidth: Int,
@@ -69,6 +95,7 @@ public enum PageRenderer {
         background(ctx, CGSize(width: width, height: height))
         let scale = CGFloat(width) / page.pageSize.width
         ctx.scaleBy(x: scale, y: scale)
+        drawObjects(page, in: ctx)
         drawInk(page, in: ctx)
         return ctx.makeImage()
     }
@@ -90,7 +117,7 @@ public enum PageRenderer {
         ctx.restoreGState()
     }
 
-    /// A PDF of `pages`, one PDF page per page at its own size, each with its template and ink. Templates
+    /// A PDF of `pages`, one PDF page per page at its own size, each with its template, objects and ink. Templates
     /// (and PDF backgrounds) stay vector; ink is filled outlines, as on the canvas. Nil if there are no
     /// pages or the PDF context can't be made.
     public static func pdf(of pages: [PageSnapshot], title: String? = nil,
@@ -114,6 +141,7 @@ public enum PageRenderer {
             ctx.scaleBy(x: 1, y: -1)
             TemplateRenderer.draw(page.template, pageSize: page.pageSize, palette: palette(page.template.paper),
                                   artwork: page.templateArtwork, in: ctx)
+            drawObjects(page, in: ctx)
             drawInk(page, in: ctx)
             ctx.endPDFPage()
         }

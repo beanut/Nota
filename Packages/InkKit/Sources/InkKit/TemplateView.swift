@@ -59,11 +59,13 @@ final class TemplateView: UIView {
         return paper.palette.surface
     }
 
-    /// Makes `live` draw this paper and template as the opaque backdrop it previews multiply ink over.
-    func provideBackdrop(for live: LiveInkView) {
+    /// Makes `live` draw this paper and template, then `above` (the page's objects), as the opaque
+    /// backdrop it previews multiply ink over.
+    func provideBackdrop(for live: LiveInkView, above: @escaping (CGContext, ViewTransform, CGRect) -> Void = { _, _, _ in }) {
         live.drawPaper = { [weak self] ctx, transform, rect in
             guard let self else { return }
             paper.draw(at: transform, viewRect: rect, scale: contentScaleFactor, fillsPaper: true, in: ctx)
+            above(ctx, transform, rect)
         }
     }
 

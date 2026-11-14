@@ -3,8 +3,9 @@ import InkKit
 
 /// What a note package records about the note, kept as `manifest.json` in the note's `.nota` directory: its
 /// title, the page order and each page's size and template, the size new pages get, and when the note was
-/// created and last changed. Each page's ink is in `pages/<page id>.ink` beside it, and custom template
-/// backgrounds in `templates/` (see `NotePackage`).
+/// created and last changed. Each page's ink is in `pages/<page id>.ink` beside it, its objects (if any) in
+/// `pages/<page id>.json`, and custom template backgrounds in `templates/` (see `NotePackage`). Objects files
+/// carry their own format version (`PageObjectsFile`), so adding them didn't change the manifest's format.
 ///
 /// Format 3 added `title` and page files; format 2 replaced each page's `paper` name with a full
 /// `template`. Formats 1 and 2 are still read.

@@ -30,6 +30,7 @@ public final class ThumbnailStore {
     private struct CoverKey: Equatable {
         let pageID: UUID
         let revision: Int
+        let objectsRevision: Int
         let template: PageTemplate
         let artworkID: UUID?
     }
@@ -66,11 +67,11 @@ public final class ThumbnailStore {
         return cachedImage(for: noteID) ?? image
     }
 
-    /// Re-renders the note's cover from `page` (its ink on its template) unless the cached cover already
-    /// shows this revision on this template.
+    /// Re-renders the note's cover from `page` (its objects and ink on its template) unless the cached
+    /// cover already shows these revisions on this template.
     public func updateCover(of noteID: UUID, page: PageSnapshot) {
-        let key = CoverKey(pageID: page.pageID, revision: page.revision, template: page.template,
-                           artworkID: page.templateArtwork?.id)
+        let key = CoverKey(pageID: page.pageID, revision: page.revision, objectsRevision: page.objectsRevision,
+                           template: page.template, artworkID: page.templateArtwork?.id)
         guard renderedFrom[noteID] != key else { return }
         renderedFrom[noteID] = key
         renders[noteID]?.cancel()

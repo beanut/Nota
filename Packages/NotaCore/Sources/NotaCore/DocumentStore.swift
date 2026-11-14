@@ -9,18 +9,20 @@ import SwiftData
 /// opened notes in memory, so every window showing a note shares one notebook.
 ///
 /// **Loading.** A note's pages are read only when it's opened (`notebook(for:)`): the manifest and each
-/// page's `.ink` file are read and decoded off the main actor. Up to `capacity` notes stay loaded; past that,
+/// page's `.ink` file and objects file (`pages/<page id>.json`, if it has objects) are read and decoded off
+/// the main actor. Up to `capacity` notes stay loaded; past that,
 /// the least recently used note that no editor is showing is saved and dropped.
 ///
 /// **Saving.** The store watches every loaded page and autosaves a note `autosaveDelay` after its last
-/// change, writing only the pages whose ink changed since they were last saved, then the manifest. Editors
+/// change, writing only the pages whose ink or objects changed since they were last saved, then the
+/// manifest. A page whose last object is removed has its objects file removed. Editors
 /// also save when they close (`endEditing`), and the app calls `saveAll()` when it goes to the background.
 /// Writes run in order on a background queue (`flush()` waits for them); each file is replaced atomically
 /// and the manifest goes last, so a save cut short by the app being killed leaves the note as it was before
 /// that save (see `PackageFiles`).
 ///
 /// A page file that can't be read (damaged, or from a newer app) is set aside in the package rather than
-/// overwritten, and the page opens without ink.
+/// overwritten, and the page opens without that ink or those objects.
 @Observable
 @MainActor
 public final class DocumentStore {
@@ -50,21 +52,28 @@ public final class DocumentStore {
     @ObservationIgnored private var lastChange = ContinuousClock.now
     @ObservationIgnored private var autosave: Task<Void, Never>?
 
-    /// A loaded note: its notebook, and each page's revision when its ink was last written.
+    /// A loaded note: its notebook, and each page's revisions when its ink and objects were last written.
+    @MainActor
     private final class OpenNote {
         let note: Note
         let notebook: InkNotebook
         var savedRevisions: [UUID: Int]
+        var savedObjectRevisions: [UUID: Int]
         /// Editors showing the note; it's never dropped while there are any.
         var editors = 0
         /// Set when a save failed, so the next one writes every page.
         var needsFullSave = false
         var pagesObservation: AnyCancellable?
 
-        init(note: Note, notebook: InkNotebook, savedRevisions: [UUID: Int]) {
+        init(note: Note, notebook: InkNotebook) {
             self.note = note
             self.notebook = notebook
-            self.savedRevisions = savedRevisions
+            savedRevisions = Self.revisions(of: notebook, \.revision)
+            savedObjectRevisions = Self.revisions(of: notebook, \.objectsRevision)
+        }
+
+        static func revisions(of notebook: InkNotebook, _ revision: KeyPath<CanvasDocument, Int>) -> [UUID: Int] {
+            Dictionary(uniqueKeysWithValues: notebook.pages.map { ($0.id, $0[keyPath: revision]) })
         }
     }
 
@@ -285,7 +294,8 @@ public final class DocumentStore {
         }
         let manifest = package.manifest
         let pages = manifest.pages.map { page in
-            let document = CanvasDocument(file: package.ink[page.id] ?? InkPageFile(pageID: page.id), pageSize: page.size)
+            let document = CanvasDocument(file: package.ink[page.id] ?? InkPageFile(pageID: page.id),
+                                          objects: package.objects[page.id], pageSize: page.size)
             document.setTemplate(page.template, artwork: page.template.background.flatMap { artworks[$0.id] })
             return document
         }
@@ -303,8 +313,7 @@ public final class DocumentStore {
         if manifests[id] == nil {
             manifests[id] = manifest
         }
-        let entry = OpenNote(note: note, notebook: notebook,
-                             savedRevisions: Dictionary(uniqueKeysWithValues: pages.map { ($0.id, $0.revision) }))
+        let entry = OpenNote(note: note, notebook: notebook)
         open[id] = entry
         observe(entry)
         touch(id)
@@ -385,8 +394,8 @@ public final class DocumentStore {
 
     // MARK: Writing
 
-    /// Queues a write of the note's changed pages and manifest, if anything changed: ink, page layout or
-    /// title. Ink or layout changes also make it the note's modification date.
+    /// Queues a write of the note's changed pages and manifest, if anything changed: ink, objects, page
+    /// layout or title. Ink, object or layout changes also make it the note's modification date.
     private func save(noteID: UUID) {
         guard let entry = open[noteID] else { return }
         if failedSaves.remove(noteID) {
@@ -407,7 +416,15 @@ public final class DocumentStore {
                 pageFiles.append(page.inkFile)
             }
         }
-        let inkChanged = !pageFiles.isEmpty
+        var objectFiles: [PageObjectsFile] = []
+        for page in notebook.pages {
+            let saved = entry.savedObjectRevisions[page.id]
+            let changed = entry.needsFullSave || (saved.map { $0 != page.objectsRevision } ?? (page.objectCount > 0))
+            if changed {
+                objectFiles.append(page.objectsFile)
+            }
+        }
+        let inkChanged = !pageFiles.isEmpty || !objectFiles.isEmpty
         let layoutChanged = !new.hasSameLayout(as: old)
         guard inkChanged || layoutChanged || new.title != old.title || entry.needsFullSave else { return }
 
@@ -419,17 +436,20 @@ public final class DocumentStore {
                 artworks[artwork.id] = artwork
             }
         }
-        entry.savedRevisions = Dictionary(uniqueKeysWithValues: notebook.pages.map { ($0.id, $0.revision) })
+        entry.savedRevisions = OpenNote.revisions(of: notebook, \.revision)
+        entry.savedObjectRevisions = OpenNote.revisions(of: notebook, \.objectsRevision)
         entry.needsFullSave = false
-        store(new, for: note, pageFiles: pageFiles)
+        store(new, for: note, pageFiles: pageFiles, objectFiles: objectFiles)
     }
 
-    private func store(_ manifest: NoteManifest, for note: Note, pageFiles: [InkPageFile] = []) {
+    private func store(_ manifest: NoteManifest, for note: Note, pageFiles: [InkPageFile] = [],
+                       objectFiles: [PageObjectsFile] = []) {
         var manifest = manifest
         manifest.formatVersion = NoteManifest.currentFormatVersion
         manifests[note.id] = manifest
         mirror(manifest, onto: note)
-        let job = SaveJob(noteID: note.id, manifest: manifest, pageFiles: pageFiles, artworks: artworkData(for: manifest))
+        let job = SaveJob(noteID: note.id, manifest: manifest, pageFiles: pageFiles, objectFiles: objectFiles,
+                          artworks: artworkData(for: manifest))
         let library = library, files = files, tombstones = tombstones
         let failedSaves = failedSaves
         queue.enqueue {
@@ -489,6 +509,8 @@ extension DocumentStore {
         var manifest: NoteManifest
         /// Each page's ink, for pages with a readable file.
         var ink: [UUID: InkPageFile]
+        /// Each page's objects, for pages with a readable objects file.
+        var objects: [UUID: PageObjectsFile]
         /// Bytes of backgrounds that weren't in memory yet.
         var artworks: [UUID: Data]
     }
@@ -498,6 +520,8 @@ extension DocumentStore {
         let manifest: NoteManifest
         /// Pages whose ink changed since they were last written.
         let pageFiles: [InkPageFile]
+        /// Pages whose objects changed since they were last written; an empty one removes the page's file.
+        let objectFiles: [PageObjectsFile]
         /// Background bytes in memory, for any the package lacks.
         let artworks: [UUID: Data]
     }
@@ -529,7 +553,22 @@ extension DocumentStore {
             ?? readManifest(at: NotePackage.manifestURL(for: noteID, in: library), files: files)
             ?? fallback
         var ink: [UUID: InkPageFile] = [:]
+        var objects: [UUID: PageObjectsFile] = [:]
         for page in manifest.pages {
+            let objectsURL = NotePackage.objectsURL(for: page.id, noteID: noteID, in: library)
+            if let data = try? Data(contentsOf: objectsURL) {
+                do {
+                    var file = try PageObjectsFile(data: data)
+                    file.pageID = page.id
+                    objects[page.id] = file
+                } catch {
+                    Logger.documents
+                        .error(
+                            "Setting aside unreadable objects \(objectsURL.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)"
+                        )
+                    files.setAside(objectsURL)
+                }
+            }
             let url = NotePackage.pageURL(for: page.id, noteID: noteID, in: library)
             guard let data = try? Data(contentsOf: url) else { continue }
             do {
@@ -549,16 +588,25 @@ extension DocumentStore {
             let url = NotePackage.templateURL(for: background, noteID: noteID, in: library)
             artworks[background.id] = try? Data(contentsOf: url)
         }
-        return LoadedPackage(manifest: manifest, ink: ink, artworks: artworks)
+        return LoadedPackage(manifest: manifest, ink: ink, objects: objects, artworks: artworks)
     }
 
-    /// Writes changed pages, then missing backgrounds, then the manifest, then removes what it no longer lists.
+    /// Writes changed pages (ink, then objects), then missing backgrounds, then the manifest, then removes what
+    /// it no longer lists.
     nonisolated static func perform(_ job: SaveJob, in library: URL, files: PackageFiles, tombstones: NoteIDSet) throws {
         guard !tombstones.contains(job.noteID) else { return }
         let id = job.noteID
         removeTemporaryFiles(of: id, in: library, files: files)
         for file in job.pageFiles {
             try files.write(file.encoded(), to: NotePackage.pageURL(for: file.pageID, noteID: id, in: library))
+        }
+        for file in job.objectFiles {
+            let url = NotePackage.objectsURL(for: file.pageID, noteID: id, in: library)
+            if file.isEmpty {
+                try files.remove(url)
+            } else {
+                try files.write(file.encoded(), to: url)
+            }
         }
         for background in job.manifest.backgrounds {
             let url = NotePackage.templateURL(for: background, noteID: id, in: library)
@@ -575,8 +623,15 @@ extension DocumentStore {
         let fileManager = FileManager.default
         for (from, to) in job.pageIDs {
             let source = NotePackage.pageURL(for: from, noteID: job.from, in: library)
-            guard fileManager.fileExists(atPath: source.path) else { continue }
-            try files.copy(source, to: NotePackage.pageURL(for: to, noteID: job.to, in: library))
+            if fileManager.fileExists(atPath: source.path) {
+                try files.copy(source, to: NotePackage.pageURL(for: to, noteID: job.to, in: library))
+            }
+            // Objects: the copy's file names its own page.
+            let objectsSource = NotePackage.objectsURL(for: from, noteID: job.from, in: library)
+            if let data = try? Data(contentsOf: objectsSource), var file = try? PageObjectsFile(data: data) {
+                file.pageID = to
+                try files.write(file.encoded(), to: NotePackage.objectsURL(for: to, noteID: job.to, in: library))
+            }
         }
         for background in job.manifest.backgrounds {
             let source = NotePackage.templateURL(for: background, noteID: job.from, in: library)
@@ -596,15 +651,17 @@ extension DocumentStore {
         files.removeTemporaryFiles(in: NotePackage.templatesURL(for: noteID, in: library))
     }
 
-    /// Removes page files for pages the manifest no longer has, and backgrounds no page uses. Files set
-    /// aside as unreadable are kept.
+    /// Removes page files (ink and objects) for pages the manifest no longer has, and backgrounds no page
+    /// uses. Files set aside as unreadable are kept.
     private nonisolated static func removeUnlisted(by manifest: NoteManifest, noteID: UUID, in library: URL,
                                                    files: PackageFiles) throws {
         let fileManager = FileManager.default
-        let pages = Set(manifest.pages.map { NotePackage.pageURL(for: $0.id, noteID: noteID, in: library).lastPathComponent })
+        let pageIDs = Set(manifest.pages.map(\.id.uuidString))
+        let pageExtensions: Set = [InkPageFile.fileExtension, PageObjectsFile.fileExtension]
         let pagesFolder = NotePackage.pagesURL(for: noteID, in: library)
         for url in (try? fileManager.contentsOfDirectory(at: pagesFolder, includingPropertiesForKeys: nil)) ?? []
-            where url.pathExtension == InkPageFile.fileExtension && !pages.contains(url.lastPathComponent) {
+            where pageExtensions.contains(url.pathExtension) && !PackageFiles.isTemporary(url)
+            && !pageIDs.contains(url.deletingPathExtension().lastPathComponent) {
             try files.remove(url)
         }
         let backgrounds = Set(manifest.backgrounds.map {

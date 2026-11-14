@@ -24,7 +24,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | --- | --- |
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
 | `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes |
-| `CanvasDocument.swift` | One page's strokes, size, template and undo/redo command stack (`add`, which carries any pixel-eraser splits, `erase`, `replace` for a standard erase, `clear`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
+| `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
 | `TestingSupport.swift` | `@_spi(Testing)` hooks for other packages' tests to put ink on a page (`drawTestStroke(through:)`, `undoForTesting()`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
 | `PageTemplate.swift` | `PageTemplate` (pattern, spacing, margins, paper colour, custom background), the built-in presets, `PaperColor` / `PaperPalette` |
@@ -60,10 +60,15 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
 | `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
 | `Lasso.swift` | Freeform and rectangle lasso regions and hit-testing |
+| `PageObject.swift` | `PageObject` (frame, transform, z-order, drawing), `PageObjectPlacement` (the shared JSON keys), `PlaceholderObject` (the test object), objects of unknown kinds |
+| `PageObjectsFile.swift` | `PageObjectsFile`, a page's objects as `pages/<page id>.json`: format version, reading, writing |
+| `Selection.swift` | `PageSelection`, `SelectionBox` and `SelectionGeometry`: lasso and tap selection of strokes and objects, the box's handles and the transforms they make; `Stroke.applying(_:)` |
+| `ObjectLayerView.swift` | The canvas layer that draws the page's objects between the template and the ink |
+| `CanvasView+Selection.swift` | The lasso on the canvas: selecting, dragging the box and its handles, deleting, adding the test object |
 | `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes built in parallel, culling, drawing in parallel bands), shared by the canvas and the benchmarks |
 | `CommittedRaster.swift` | A page's committed layer kept compressed with the page, so reopening it restores the pixels instead of re-rendering |
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
-| `PageRenderer.swift` | Renders a page snapshot (template + ink) to an image off the main actor (thumbnails), or pages to a PDF |
+| `PageRenderer.swift` | Renders a page snapshot (template + objects + ink) to an image off the main actor (thumbnails), or pages to a PDF |
 | `Stroke.swift` | `Stroke`, `StrokePoint`, tool enums, `RGBA` |
 | `InkFile.swift` | `InkPageFile`, the `.ink` page format: encoder, decoder and `InkFileError` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit: each tool's brush, colour and width, quick sizes and colours, saved pens, the brush editor and the eyedropper |
@@ -219,6 +224,7 @@ let pdf = PageRenderer.pdf(of: notebook.pages.map { $0.snapshot() }) { theme.pal
 ### Data model
 
 - `StrokePoint { location, force, altitude, azimuth, timestamp }`: `location` is in **canvas space**, independent of zoom and pan. `force` is normalised to 0…1 (`force / maximumPossibleForce`).
+- Objects: see Page objects below.
 - `Stroke { id, color, brush, points, createdAt }`: `brush` is a **snapshot** of the `BrushDescriptor` taken when the stroke began (see Brushes), so later brush or slider changes never restyle existing ink. `createdAt` is wall-clock time (point timestamps are touch uptime), for replaying ink against audio later; pieces a pixel eraser cuts keep it.
 - View transform: canvas → view is a uniform scale plus translation with no rotation, so azimuth angles are the same in both spaces.
 
@@ -251,6 +257,66 @@ Each record is `type u8 · payload length (varint) · payload`:
 - **Any other type** is kept as it is, with its position among the strokes, and written back on save. A newer minor version adds data that must survive older apps as new record types; fields it appends to a known record are skipped by older readers (and lost if they re-save).
 
 Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size may be at most 256× the stored size, so a reader can bound its allocation. Decoding checks every length, count and index against what's left and rejects non-finite numbers, so damaged or truncated input throws an `InkFileError` (`notAnInkFile`, `unsupportedVersion`, `truncated`, `checksumMismatch`, `corrupt`) and never traps. Nota stores one per page with ink in the note package (`pages/<page id>.ink`, written by NotaCore's `DocumentStore`).
+
+### Page objects
+
+A page holds objects as well as ink (Architecture §5): shapes, text boxes, images and tape as they land.
+Every object is a `PageObject`: an `id`, a `frame` in its own space, a `transform` (`CGAffineTransform`)
+that puts the frame on the page, and a `zIndex`. Each type only draws itself and encodes its own fields; the
+lasso, the handles, undo and storage work on that placement. Today there's one type, `PlaceholderObject`
+(More › Add Test Object), a rectangle with a cross that exercises the layer.
+
+```swift
+page.addObject(PlaceholderObject(frame: CGRect(x: 72, y: 72, width: 200, height: 120), color: PenColor(rgb: 0x2563EB)))
+let file = page.objectsFile                         // → pages/<page id>.json; empty: no file
+let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json), pageSize: size)
+```
+
+- **Layers**, bottom to top: background (paper and template), objects in `zIndex` order (`ObjectLayerView`,
+  vectors at the current transform; hidden on a page without objects), ink (committed bitmap and live layer),
+  overlay (lasso and selection box). Objects are never in the committed ink bitmap, so adding or moving one
+  doesn't re-render ink, and the pixel eraser never erases one. The live layer's multiply backdrop draws the
+  objects too, so a highlighter previews over an object as it will commit.
+- **Revisions.** `objectsRevision` counts object changes, separately from `revision` (the ink's), so an
+  object edit doesn't drop the page's `CommittedRaster`. Object-only edits notify `.objectsEdited`.
+- **One undo stack.** `addObject`, deleting a selection (`erase` with strokes and objects), `clear` and
+  `transform` are commands on the page's stack, so one undo takes back whichever came last. `transform`
+  replaced the move-only `move`: it records the strokes and objects as they were plus the affine transform;
+  undo puts the saved values back exactly, redo applies the transform to them again, so neither drifts.
+- **Transforming ink** (`Stroke.applying(_:)`) maps every point, turns the azimuth and a flat nib's angle
+  with any rotation, and scales the brush's widths and taper by √|det|, so ink made twice as big is drawn
+  twice as thick. A rigid move or rotation leaves the brush's size untouched.
+- **Selection** (`SelectionGeometry`, shared by the lasso, tap-to-select and circle-to-select): a loop or
+  rectangle selects strokes whose centerline touches it and objects whose outline touches it or that hold it;
+  a tap (under 8 view points of movement) selects the topmost thing under it, ink first (it's drawn over
+  objects), newest first, then objects from the top down. The box is axis-aligned around the selection, or a
+  single object's own frame, and follows each transform, so it rotates with what it holds. Dragging inside
+  moves, a corner knob resizes in the box's own axes about the opposite corner (never flipping, at least
+  8 view points a side), the knob above rotates about the centre. Pixel-eraser strokes and objects of unknown
+  kinds are never selected.
+
+#### Objects file
+
+`pages/<page id>.json`, written beside the page's `.ink` file only when the page has objects (NotaCore's
+`DocumentStore` removes it when the last one goes), so notes from before objects open unchanged and older
+apps, which only look at `.ink` files, leave it alone:
+
+```json
+{ "formatVersion": 1, "pageID": "…",
+  "objects": [ { "kind": "placeholder", "id": "…", "frame": { "x": 72, "y": 72, "width": 200, "height": 120 },
+                 "transform": [1, 0, 0, 1, 0, 0], "zIndex": 0, "color": "#2563EB" } ] }
+```
+
+- `formatVersion` 1. A reader refuses a higher version (`unsupportedVersion`); the app sets such a file
+  aside, as it does a damaged `.ink` file, rather than overwrite it. New object kinds don't need a new
+  version.
+- Every object has `kind` and the shared keys (`PageObjectPlacement`): `id`, `frame`, `transform`
+  (`[a, b, c, d, tx, ty]`, default identity) and `zIndex` (default 0), next to its own fields. A missing
+  frame, a non-finite number, a negative size, a transform that can't be inverted or a repeated id is
+  `corrupt`.
+- An object of a kind this version doesn't know is kept verbatim, in its place in the stack, and written back;
+  it isn't drawn or selectable.
+- Objects are written in stacking order with sorted keys: the same page always writes the same bytes.
 
 ### Rendering pipeline
 

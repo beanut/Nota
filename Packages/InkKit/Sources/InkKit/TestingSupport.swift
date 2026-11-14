@@ -17,4 +17,24 @@ public extension CanvasDocument {
     func undoForTesting() {
         undo()
     }
+
+    /// Redoes the page's last undone edit, as the redo button would.
+    func redoForTesting() {
+        redo()
+    }
+
+    /// Adds a placeholder object at `frame` as one undoable edit, as More › Add Test Object would.
+    @discardableResult
+    func addTestObject(frame: CGRect, color: PenColor = PenColor(rgb: 0x2563EB)) -> PlaceholderObject {
+        let object = PlaceholderObject(frame: frame, color: color)
+        addObject(object)
+        return object
+    }
+
+    /// Moves, resizes or rotates the objects with these ids, and every stroke too if `includingInk`, by
+    /// `transform` as one undoable edit, as dragging a lasso selection or its handles would.
+    func transformForTesting(objectIDs: Set<UUID>, includingInk: Bool = false, by transform: CGAffineTransform) {
+        let strokeIDs = includingInk ? Set(strokes.map(\.id)) : []
+        self.transform(PageSelection(strokeIDs: strokeIDs, objectIDs: objectIDs), by: transform)
+    }
 }
