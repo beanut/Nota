@@ -51,6 +51,8 @@ private extension NotaIcon {
         case .delete: .trash
         case .newLine: .newLine
         case .close: .xmark
+        case .penTray: .pens
+        case .eyedropper: .eyedropper
         }
     }
 }

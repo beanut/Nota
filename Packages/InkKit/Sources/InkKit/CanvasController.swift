@@ -1,13 +1,15 @@
+import Combine
 import SwiftUI
 
 /// Observable tool state shared by the SwiftUI shell and the UIKit canvas.
 @MainActor
 final class CanvasController: ObservableObject {
     struct ToolSettings: Equatable {
-        var colorIndex: Int
+        /// The colour the tool draws in; nil is the first quick colour (`quickColors(for:)`).
+        var color: PenColor?
         var width: Double
-        /// The built-in brush the tool draws with (`CanvasController.brushes(for:)`); nil is the first.
-        var brushID: UUID?
+        /// The brush the tool draws with: built in, custom or a saved pen's; nil is the tool's default.
+        var brush: BrushDescriptor?
     }
 
     @Published private(set) var tool: Tool = .pen
@@ -20,11 +22,11 @@ final class CanvasController: ObservableObject {
     @Published var lassoMode: LassoMode = .freeform
     @Published private(set) var hasSelection = false
     @Published var settings: [Tool: ToolSettings] = [
-        .pen: ToolSettings(colorIndex: 0, width: 4),
-        .pencil: ToolSettings(colorIndex: 0, width: 3),
-        .highlighter: ToolSettings(colorIndex: 0, width: 22),
-        .eraser: ToolSettings(colorIndex: 0, width: 30),
-        .lasso: ToolSettings(colorIndex: 0, width: 4)
+        .pen: ToolSettings(width: 4),
+        .pencil: ToolSettings(width: 3),
+        .highlighter: ToolSettings(width: 22),
+        .eraser: ToolSettings(width: 30),
+        .lasso: ToolSettings(width: 4)
     ]
 
     /// The last width used with each brush, so switching brushes in a tool brings back each one's width.
@@ -59,10 +61,32 @@ final class CanvasController: ObservableObject {
     }
 
     private let settingsStore: UserDefaults
+    /// Saved pens, quick sizes and colours, custom brushes, palettes and recent colours, shared by every
+    /// editor and saved across launches.
+    let penTray: PenTrayStore
+    private var penTrayObservation: AnyCancellable?
 
-    init(settingsStore: UserDefaults = .standard) {
+    // Pen tray, colour picker and brush editor
+
+    /// The tool whose brush the brush editor is editing, while it's open.
+    @Published var brushEditorTool: Tool?
+    /// While set, the next touch on the canvas picks a colour from the page (see `EyedropperOverlay`).
+    @Published var eyedropper: EyedropperRequest?
+
+    struct EyedropperRequest: Equatable {
+        let tool: Tool
+        /// The quick colour to replace with the picked colour, if the picker was editing one.
+        let quickColorIndex: Int?
+    }
+
+    /// `penTray` defaults to `PenTrayStore.shared`.
+    init(settingsStore: UserDefaults = .standard, penTray: PenTrayStore? = nil) {
         self.settingsStore = settingsStore
+        let penTray = penTray ?? .shared
+        self.penTray = penTray
         pencilSettings = PencilSettings.load(from: settingsStore)
+        // Views reading quick colours, sizes and pens through the controller redraw when the tray changes.
+        penTrayObservation = penTray.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     /// Space kept around the page when it's fitted to the view, on top of the safe area: room for the
@@ -156,7 +180,7 @@ final class CanvasController: ObservableObject {
     }
 
     var current: ToolSettings {
-        get { settings[tool] ?? ToolSettings(colorIndex: 0, width: 4) }
+        get { settings[tool] ?? ToolSettings(width: 4) }
         set { settings[tool] = newValue }
     }
 
@@ -299,38 +323,237 @@ final class CanvasController: ObservableObject {
         }
     }
 
-    /// The brush `tool` currently draws with, before the width and pressure settings are applied.
-    func brush(for tool: Tool) -> BrushDescriptor {
-        let id = settings[tool]?.brushID
-        return Self.brushes(for: tool).first { $0.id == id } ?? Self.baseBrush(for: tool)
+    /// The brushes the brush picker offers for `tool`: the built-in ones, then the user's own.
+    func availableBrushes(for tool: Tool) -> [BrushDescriptor] {
+        guard let kind = tool.penKind else { return [] }
+        return Self.brushes(for: tool) + penTray.tray[presets: kind].brushes
     }
 
-    /// Makes `tool` draw with `brush` (one of `brushes(for:)`), at the width last used with it or, the
-    /// first time, its own default width.
+    /// Whether `brush` is one the user made (it can be edited in place and deleted).
+    func isCustomBrush(_ brush: BrushDescriptor, for tool: Tool) -> Bool {
+        guard let kind = tool.penKind else { return false }
+        return penTray.tray[presets: kind].brushes.contains { $0.id == brush.id }
+    }
+
+    /// The brush `tool` currently draws with, before the width and pressure settings are applied.
+    func brush(for tool: Tool) -> BrushDescriptor {
+        settings[tool]?.brush ?? Self.baseBrush(for: tool)
+    }
+
+    /// Makes `tool` draw with `brush` (one of `availableBrushes(for:)`), at the width last used with it
+    /// or, the first time, its own default width.
     func selectBrush(_ brush: BrushDescriptor, for tool: Tool) {
-        guard Self.brushes(for: tool).contains(where: { $0.id == brush.id }) else { return }
-        var s = settings[tool] ?? ToolSettings(colorIndex: 0, width: Double(brush.maxWidth))
+        guard availableBrushes(for: tool).contains(where: { $0.id == brush.id }) else { return }
+        setBrush(brush, for: tool, width: nil)
+    }
+
+    /// Makes `tool` draw with `brush` at `width`, or at the width last used with the brush.
+    private func setBrush(_ brush: BrushDescriptor, for tool: Tool, width: Double?) {
+        var s = settings[tool] ?? ToolSettings(width: Double(brush.maxWidth))
         let current = self.brush(for: tool)
-        guard current.id != brush.id else { return }
+        guard current != brush || width != nil else { return }
         brushWidths[current.id] = s.width
-        let range = Self.widthRange(for: tool)
-        s.width = min(max(brushWidths[brush.id] ?? Double(brush.maxWidth), range.lowerBound), range.upperBound)
-        s.brushID = brush.id
+        s.width = clampedWidth(width ?? brushWidths[brush.id] ?? Double(brush.maxWidth), for: tool)
+        s.brush = brush
         settings[tool] = s
     }
+
+    private func clampedWidth(_ width: Double, for tool: Tool) -> Double {
+        let range = Self.widthRange(for: tool)
+        return min(max(width.isFinite ? width : range.lowerBound, range.lowerBound), range.upperBound)
+    }
+
+    // MARK: Quick sizes and colours
+
+    /// The three quick widths for `tool`: the user's, or the defaults (`widthPresets(for:)`).
+    func quickSizes(for tool: Tool) -> [Double] {
+        let defaults = Self.widthPresets(for: tool)
+        guard let kind = tool.penKind, let sizes = penTray.tray[presets: kind].sizes,
+              sizes.count == defaults.count else { return defaults }
+        return sizes.map { clampedWidth($0, for: tool) }
+    }
+
+    /// Makes quick size `index` of `tool` its current width.
+    func setQuickSize(at index: Int, for tool: Tool) {
+        guard let kind = tool.penKind, let width = settings[tool]?.width else { return }
+        penTray.update { $0.setQuickSize(width, at: index, for: kind, defaults: Self.widthPresets(for: tool)) }
+    }
+
+    func resetQuickSizes(for tool: Tool) {
+        guard let kind = tool.penKind else { return }
+        penTray.update { $0.resetQuickSizes(for: kind) }
+    }
+
+    /// The theme's inks for `tool`, as pen colours.
+    func themeColors(for tool: Tool) -> [PenColor] {
+        theme.inks(for: tool.usesInk ? tool : .pen).map(PenColor.init)
+    }
+
+    /// The Pen Case's colours for `tool`: the user's, or the theme's inks. Tools that don't draw in a
+    /// colour get the pen's.
+    func quickColors(for tool: Tool) -> [PenColor] {
+        let kind = tool.penKind ?? .pen
+        return penTray.tray[presets: kind].colors ?? themeColors(for: tool.usesInk ? tool : .pen)
+    }
+
+    /// Whether `tool`'s quick colours are the user's own.
+    func hasCustomQuickColors(for tool: Tool) -> Bool {
+        guard let kind = tool.penKind else { return false }
+        return penTray.tray[presets: kind].colors != nil
+    }
+
+    /// Replaces quick colour `index` of `tool`.
+    func setQuickColor(_ color: PenColor, at index: Int, for tool: Tool) {
+        guard let kind = tool.penKind else { return }
+        let defaults = themeColors(for: tool)
+        penTray.update { $0.setQuickColor(color, at: index, for: kind, defaults: defaults) }
+    }
+
+    func resetQuickColors(for tool: Tool) {
+        guard let kind = tool.penKind else { return }
+        penTray.update { $0.resetQuickColors(for: kind) }
+    }
+
+    /// The colour `tool` draws in.
+    func color(for tool: Tool) -> PenColor {
+        settings[tool]?.color ?? quickColors(for: tool).first ?? PenColor(rgb: 0)
+    }
+
+    /// Makes `tool` draw in `color`. `remember` adds it to the recent colours (colours from the picker
+    /// and the eyedropper; not the quick colours, which are always there anyway).
+    func setColor(_ color: PenColor, for tool: Tool, remember: Bool = false) {
+        guard tool.usesInk else { return }
+        var s = settings[tool] ?? ToolSettings(width: 4)
+        s.color = color
+        settings[tool] = s
+        if remember {
+            penTray.update { $0.addRecentColor(color) }
+        }
+    }
+
+    /// A colour's name for VoiceOver: the theme ink's, or its hex code.
+    func colorName(_ color: PenColor, for tool: Tool) -> String {
+        theme.inks(for: tool.usesInk ? tool : .pen).first { PenColor($0) == color }?.name ?? "Color \(color.hex)"
+    }
+
+    // MARK: Pen tray
+
+    /// What a pen tool draws with right now.
+    struct CurrentPen: Equatable {
+        let kind: PenKind
+        let brush: BrushDescriptor
+        let color: PenColor
+        let width: Double
+    }
+
+    /// The pen `tool` is now: its brush, colour and width. Nil for tools that aren't pens.
+    func currentPen(for tool: Tool) -> CurrentPen? {
+        guard let kind = tool.penKind else { return nil }
+        let brush = brush(for: tool)
+        return CurrentPen(kind: kind, brush: brush, color: color(for: tool),
+                          width: settings[tool]?.width ?? Double(brush.maxWidth))
+    }
+
+    /// Saves the current tool's pen to the end of the tray, named after its brush.
+    @discardableResult
+    func saveCurrentPen() -> SavedPen? {
+        guard let pen = currentPen(for: tool) else { return nil }
+        let saved = SavedPen(name: pen.brush.name, kind: pen.kind, brush: pen.brush, color: pen.color, width: pen.width)
+        penTray.update { $0.add(saved) }
+        return saved
+    }
+
+    /// Makes a saved pen's brush, colour and width the current ones and switches to its tool.
+    func use(_ pen: SavedPen) {
+        let tool = pen.kind.tool
+        setBrush(pen.brush, for: tool, width: pen.width)
+        settings[tool]?.color = pen.color
+        select(tool)
+    }
+
+    /// Whether the current tool draws exactly as `pen` does.
+    func isCurrent(_ pen: SavedPen) -> Bool {
+        guard let now = currentPen(for: tool) else { return false }
+        return now.kind == pen.kind && now.brush == pen.brush && now.color == pen.color && abs(now.width - pen.width) < 0.05
+    }
+
+    /// Overwrites a saved pen with the current tool's brush, colour and width.
+    func updatePenToCurrent(_ pen: SavedPen) {
+        guard let now = currentPen(for: tool) else { return }
+        penTray.update { $0.updatePen(id: pen.id, kind: now.kind, brush: now.brush, color: now.color, width: now.width) }
+    }
+
+    // MARK: Brush editor
+
+    /// Opens the brush editor on `tool`'s current brush.
+    func editBrush(for tool: Tool) {
+        guard tool.penKind != nil else { return }
+        brushEditorTool = tool
+    }
+
+    /// Saves an edited brush and makes `tool` draw with it. A brush the user made is changed in place;
+    /// editing a built-in brush, or a pen's, makes a new brush of the user's own.
+    @discardableResult
+    func saveEditedBrush(_ edited: BrushDescriptor, for tool: Tool) -> BrushDescriptor? {
+        guard let kind = tool.penKind else { return nil }
+        var brush = edited.clamped()
+        if !isCustomBrush(brush, for: tool) {
+            brush.id = UUID()
+        }
+        if brush.erases {
+            brush.blend = .normal // an ink tool never erases
+        }
+        penTray.update { $0.saveBrush(brush, for: kind) }
+        let saved = penTray.tray[presets: kind].brushes.first { $0.id == brush.id } ?? brush
+        setBrush(saved, for: tool, width: Double(saved.maxWidth))
+        return saved
+    }
+
+    /// Deletes one of the user's brushes. A tool drawing with it goes back to its default brush.
+    func deleteCustomBrush(_ brush: BrushDescriptor, for tool: Tool) {
+        guard let kind = tool.penKind, isCustomBrush(brush, for: tool) else { return }
+        penTray.update { $0.removeBrush(id: brush.id, for: kind) }
+        if self.brush(for: tool).id == brush.id {
+            setBrush(Self.baseBrush(for: tool), for: tool, width: nil)
+        }
+    }
+
+    // MARK: Eyedropper
+
+    /// Puts the canvas into eyedropper mode for `tool`'s colour (or one of its quick colours).
+    func startEyedropper(for tool: Tool, quickColorIndex: Int?) {
+        guard tool.usesInk else { return }
+        eyedropper = EyedropperRequest(tool: tool, quickColorIndex: quickColorIndex)
+    }
+
+    /// The colour on screen at `point` in canvas-view coordinates (paper, template and ink as shown).
+    func sampleColor(at point: CGPoint) -> PenColor? {
+        canvas?.sampledColor(at: point)
+    }
+
+    /// Ends eyedropper mode, using `color` if one was picked.
+    func finishEyedropper(with color: PenColor?) {
+        guard let request = eyedropper else { return }
+        eyedropper = nil
+        guard let color else { return }
+        if let index = request.quickColorIndex {
+            setQuickColor(color, at: index, for: request.tool)
+        }
+        setColor(color, for: request.tool, remember: true)
+    }
+
+    // MARK: New strokes
 
     /// Brush snapshot for a new stroke. `viewScale` converts the eraser's on-screen size to canvas units.
     func strokeTemplate(viewScale: CGFloat) -> StrokeTemplate {
         let s = current
-        let inks = theme.inks(for: tool)
-        let color = RGBA(inks[min(max(s.colorIndex, 0), inks.count - 1)])
         let base = brush(for: tool)
         if tool == .eraser {
             return StrokeTemplate(color: RGBA(r: 0, g: 0, b: 0),
                                   brush: base.sized(CGFloat(s.width) / viewScale, minimumRatio: 1))
         }
         // Pressure & Tilt settings adjust every ink brush, on top of its own character.
-        return StrokeTemplate(color: color,
+        return StrokeTemplate(color: color(for: tool).rgba,
                               brush: base.personalized(width: CGFloat(s.width),
                                                        minimumWidthRatio: CGFloat(minWidthRatio),
                                                        pressureExponent: CGFloat(pressureGamma),

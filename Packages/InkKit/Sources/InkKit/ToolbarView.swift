@@ -30,14 +30,15 @@ extension Tool {
     }
 }
 
-/// The Pen Case: the one drawing toolbar. Tools · inks · undo/redo · more, placed in the navigation bar on
-/// the same row as the back button. The note's title and Rename live in the More menu. Tap the selected
-/// tool again for its options.
+/// The Pen Case: the one drawing toolbar. Pen tray · tools · colours · undo/redo · more, placed in the
+/// navigation bar on the same row as the back button. The note's title and Rename live in the More menu.
+/// Tap the selected tool again for its options, and the selected colour again to change it.
 struct PenCase: View {
     @ObservedObject var controller: CanvasController
     var title: Binding<String>?
 
     @State private var optionsTool: Tool?
+    @State private var showPenTray = false
     @State private var showSettings = false
     @State private var showPencilSettings = false
     @State private var confirmClear = false
@@ -46,12 +47,20 @@ struct PenCase: View {
 
     var body: some View {
         HStack(spacing: InkSpacing.xxxs) {
+            Button { showPenTray = true } label: { InkIconView(.penTray) }
+                .buttonStyle(.inkIcon(selected: showPenTray))
+                .accessibilityLabel("Pens")
+                .accessibilityHint("Shows your saved pens.")
+                .popover(isPresented: $showPenTray, arrowEdge: .top) {
+                    PenTrayView(controller: controller)
+                }
+            InkBarDivider(axis: .horizontal)
             ViewThatFits(in: .horizontal) {
                 tools
                 ScrollView(.horizontal, showsIndicators: false) { tools }
             }
             InkBarDivider(axis: .horizontal)
-            InkRow(controller: controller, axis: .horizontal)
+            InkRow(controller: controller, axis: .horizontal, opensPicker: true)
             InkBarDivider(axis: .horizontal)
             Button { controller.undo() } label: { InkIconView(.undo) }
                 .buttonStyle(.inkIcon)
@@ -175,25 +184,48 @@ private struct ToolButton: View {
     }
 }
 
-/// The current tool's colour presets. Tools that don't draw in a colour keep showing the pen inks, dimmed,
-/// so the bar doesn't change length as you switch tools.
+/// The current tool's quick colours. Tools that don't draw in a colour keep showing the pen's, dimmed, so
+/// the bar doesn't change length as you switch tools. With `opensPicker` (the Pen Case), tapping the
+/// selected colour again edits it in the colour picker, and a colour well after the swatches opens the
+/// picker for any colour.
 private struct InkRow: View {
     @ObservedObject var controller: CanvasController
     let axis: Axis
+    var opensPicker = false
     var onPick: () -> Void = {}
-    @Environment(\.inkTheme) private var theme
+    /// The open picker: a quick colour's index, or -1 for the colour well.
+    @State private var pickerSlot: Int?
 
     var body: some View {
         let tool = controller.tool
-        let inks = theme.inks(for: tool.usesInk ? tool : .pen)
+        let colors = controller.quickColors(for: tool)
+        let current = controller.color(for: tool)
         let layout = axis == .horizontal
             ? AnyLayout(HStackLayout(spacing: InkSpacing.xxxs))
             : AnyLayout(VStackLayout(spacing: InkSpacing.xxxs))
         layout {
-            ForEach(inks.indices, id: \.self) { i in
-                InkSwatchButton(ink: inks[i], isSelected: tool.usesInk && controller.current.colorIndex == i) {
-                    controller.current.colorIndex = i
-                    onPick()
+            ForEach(colors.indices, id: \.self) { i in
+                let isSelected = tool.usesInk && current == colors[i]
+                InkSwatchButton(color: colors[i], name: controller.colorName(colors[i], for: tool),
+                                isSelected: isSelected) {
+                    if opensPicker, isSelected {
+                        pickerSlot = i
+                    } else {
+                        controller.setColor(colors[i], for: tool)
+                        onPick()
+                    }
+                }
+                .accessibilityHint(opensPicker && isSelected ? "Double-tap again to change this color." : "")
+                .popover(isPresented: slotBinding(i), arrowEdge: .top) {
+                    ColorPickerView(controller: controller, tool: tool, quickColorIndex: i) { pickerSlot = nil }
+                }
+            }
+            if opensPicker {
+                ColorWellButton(color: current, isSelected: tool.usesInk && !colors.contains(current)) {
+                    pickerSlot = -1
+                }
+                .popover(isPresented: slotBinding(-1), arrowEdge: .top) {
+                    ColorPickerView(controller: controller, tool: tool, quickColorIndex: nil) { pickerSlot = nil }
                 }
             }
         }
@@ -202,6 +234,14 @@ private struct InkRow: View {
         .opacity(tool.usesInk ? 1 : 0.35)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Colors")
+    }
+
+    private func slotBinding(_ slot: Int) -> Binding<Bool> {
+        Binding(get: { pickerSlot == slot }, set: {
+            if !$0, pickerSlot == slot {
+                pickerSlot = nil
+            }
+        })
     }
 }
 
@@ -241,6 +281,14 @@ struct ToolOptionsView: View {
                 .disabled(!controller.hasSelection)
             case .pen, .pencil, .highlighter:
                 BrushPicker(controller: controller, tool: tool)
+                Button {
+                    controller.editBrush(for: tool)
+                } label: {
+                    Text(controller.isCustomBrush(controller.brush(for: tool), for: tool)
+                        ? "Edit Brush…" : "Customize Brush…")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(InkSecondaryButtonStyle())
                 widthControls
             }
         }
@@ -251,7 +299,7 @@ struct ToolOptionsView: View {
 
     @ViewBuilder
     private var widthControls: some View {
-        let presets = CanvasController.widthPresets(for: tool)
+        let presets = controller.quickSizes(for: tool)
         let range = CanvasController.widthRange(for: tool)
         let width = Binding(get: { settings.width }, set: { setWidth($0) })
         HStack(spacing: InkSpacing.s) {
@@ -268,8 +316,26 @@ struct ToolOptionsView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(["Fine", "Medium", "Bold"][min(i, 2)])
+                .accessibilityValue(preset.formatted(.number.precision(.fractionLength(1))) + " pt")
                 .accessibilityAddTraits(abs(settings.width - preset) < 0.05 ? .isSelected : [])
+                .contextMenu {
+                    if tool.penKind != nil {
+                        Button { controller.setQuickSize(at: i, for: tool) } label: {
+                            Label("Use \(settings.width.formatted(.number.precision(.fractionLength(1)))) pt Here",
+                                  systemImage: "arrow.down.to.line")
+                        }
+                        Button { controller.resetQuickSizes(for: tool) } label: {
+                            Label("Reset Sizes", systemImage: "arrow.counterclockwise")
+                        }
+                    }
+                }
             }
+        }
+        if tool.penKind != nil {
+            Text("Touch and hold a size to keep the current width there.")
+                .font(theme.footnoteFont)
+                .foregroundStyle(theme.color(\.textSecondary))
+                .fixedSize(horizontal: false, vertical: true)
         }
         InkSliderRow("Width", value: width, in: range,
                      valueText: settings.width.formatted(.number.precision(.fractionLength(1))) + " pt")
@@ -287,8 +353,7 @@ struct ToolOptionsView: View {
 
     private var dotColor: Color {
         guard tool.usesInk else { return theme.color(\.textSecondary) }
-        let inks = theme.inks(for: tool)
-        return inks[min(max(settings.colorIndex, 0), inks.count - 1)].color
+        return controller.color(for: tool).color
     }
 }
 

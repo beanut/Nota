@@ -85,8 +85,24 @@ public struct InkCanvasEditor: View {
                     .ignoresSafeArea()
             }
         }
+        .overlay {
+            // Same coordinate space as the canvas view, so the eyedropper samples where it's touched.
+            if controller.eyedropper != nil {
+                EyedropperOverlay(controller: controller)
+                    .ignoresSafeArea()
+            }
+        }
+        .overlay {
+            if controller.eyedropper != nil {
+                EyedropperBanner(controller: controller)
+            }
+        }
         .background(theme.color(\.desk))
         .toolbar { penCaseItem }
+        .sheet(item: $controller.brushEditorTool) { tool in
+            BrushEditorView(controller: controller, tool: tool)
+                .inkTheme(theme)
+        }
         .onAppear {
             controller.hudVisible = showsDebugHUD
             controller.writingLines = writingLines

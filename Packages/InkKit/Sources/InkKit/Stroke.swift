@@ -9,6 +9,28 @@ enum Tool: String, CaseIterable, Identifiable {
     }
 }
 
+extension Tool {
+    /// The pen kind this tool is, if it's an ink tool (pen, pencil or highlighter).
+    var penKind: PenKind? {
+        switch self {
+        case .pen: .pen
+        case .pencil: .pencil
+        case .highlighter: .highlighter
+        case .eraser, .lasso: nil
+        }
+    }
+}
+
+extension PenKind {
+    var tool: Tool {
+        switch self {
+        case .pen: .pen
+        case .pencil: .pencil
+        case .highlighter: .highlighter
+        }
+    }
+}
+
 /// How the eraser removes ink.
 enum EraserMode: String, CaseIterable, Identifiable {
     /// Pixel eraser: an invisible `pixelEraser` stroke punches out exactly the pixels under it, from
