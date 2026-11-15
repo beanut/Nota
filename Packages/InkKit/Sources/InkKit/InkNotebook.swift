@@ -19,6 +19,9 @@ public final class InkNotebook: ObservableObject {
     public var defaultPageSize: PageSize
     /// Template used for new pages when there is no page to copy.
     public var defaultTemplate: PageTemplate
+    /// Bookmarked pages and the outline's entries (see `NoteOutline`). Entries for pages that have been
+    /// removed stay until the host prunes them when it saves; the outline panel doesn't show them.
+    @Published public var outline = NoteOutline()
 
     /// A notebook of `pageCount` blank pages of `pageSize` on `template` (at least one).
     public init(pageSize: PageSize = .default, pageCount: Int = 1, template: PageTemplate = .default) {
@@ -198,6 +201,24 @@ public final class InkNotebook: ObservableObject {
         let fresh = newPages.filter { index(of: $0.id) == nil }
         guard !fresh.isEmpty else { return }
         pages.append(contentsOf: fresh)
+    }
+
+    // MARK: Gestures across pages
+
+    /// Undoes, on every page, the edits at the top of its undo history that belong to `group`: the rest
+    /// of a stroke or erase that crossed a page boundary (`CanvasDocument.editGroup`), once one of its
+    /// pages has undone its own part. A page that has been edited since keeps its part.
+    func undoGroup(_ group: UUID) {
+        for page in pages {
+            while page.undoGroup == group, page.undo() {}
+        }
+    }
+
+    /// Redoes, on every page, the edits at the top of its redo history that belong to `group`.
+    func redoGroup(_ group: UUID) {
+        for page in pages {
+            while page.redoGroup == group, page.redo() {}
+        }
     }
 
     // MARK: Writing off the end

@@ -4,7 +4,7 @@ A short summary of where Nota is going, so agents and new contributors don't hav
 out. **[Linear](https://linear.app/nota-on-inkkit/project/nota) is the source of truth**: if this file and
 Linear disagree, Linear wins, and this file should be fixed.
 
-_Last updated: 2026-11-14._
+_Last updated: 2026-11-15._
 
 ## Milestones
 
@@ -42,9 +42,12 @@ physical iPad), the pen tray with quick sizes and colours, colour picker and bru
 ([NOT-20](https://linear.app/nota-on-inkkit/issue/NOT-20), pending tuning on a physical iPad), lasso v2: cut, copy,
 paste across pages and notes, duplicate, recolour, thickness, arrange, screenshots and drag-out
 ([NOT-21](https://linear.app/nota-on-inkkit/issue/NOT-21)), and typed text boxes with rich formatting, checklists and
-search ([NOT-22](https://linear.app/nota-on-inkkit/issue/NOT-22), in review), landed early. After M0, M1 continues with
-images on the object layer and writing across page boundaries in vertical scrolling
-([NOT-89](https://linear.app/nota-on-inkkit/issue/NOT-89)).
+search ([NOT-22](https://linear.app/nota-on-inkkit/issue/NOT-22), in review), and images and stickers: insert, crop,
+resize, rotate ([NOT-23](https://linear.app/nota-on-inkkit/issue/NOT-23), in review), and tape, ruler and laser
+pointer tools with presentation mode ([NOT-24](https://linear.app/nota-on-inkkit/issue/NOT-24), in review), and links,
+bookmarks and the note outline ([NOT-31](https://linear.app/nota-on-inkkit/issue/NOT-31), in review), and writing
+across page boundaries in vertical scrolling ([NOT-89](https://linear.app/nota-on-inkkit/issue/NOT-89), in review),
+landed early.
 
 ## Keeping this current
 

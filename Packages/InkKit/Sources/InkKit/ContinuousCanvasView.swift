@@ -234,7 +234,12 @@ final class ContinuousCanvasView: UIView {
         // Nearest the middle first, when there are more than the canvases allowed.
         let live = nearby.sorted { abs(layout.frames[$0].midY - viewport.midY) < abs(layout.frames[$1].midY - viewport.midY) }
             .prefix(Self.maxLiveCanvases)
-        let liveIDs = Set(live.map { pages[$0].id })
+        var liveIDs = Set(live.map { pages[$0].id })
+        // A page taking ink, or the one a stroke across pages began on (its touch still arrives there),
+        // keeps its canvas until the stroke ends.
+        for (id, canvas) in canvases where canvas.isInking || canvas === crossing?.origin {
+            liveIDs.insert(id)
+        }
 
         for (id, canvas) in canvases where !liveIDs.contains(id) {
             if controller?.canvas === canvas {
@@ -248,8 +253,10 @@ final class ContinuousCanvasView: UIView {
         for i in live {
             let page = pages[i]
             let existing = canvases[page.id]
-            let window = ContinuousPageLayout.renderWindow(forPage: contentFrame(ofPage: i), viewport: contentViewport,
-                                                           current: existing?.frame, keepingSize: pinching)
+            // A page taking ink stays where it is, so the ink under the Pencil doesn't move.
+            let window = existing.flatMap { $0.isInking ? $0.frame : nil }
+                ?? ContinuousPageLayout.renderWindow(forPage: contentFrame(ofPage: i), viewport: contentViewport,
+                                                     current: existing?.frame, keepingSize: pinching)
             let canvas = existing ?? makeCanvas(for: page, frame: window)
             if canvas.frame != window {
                 canvas.frame = window
@@ -308,7 +315,92 @@ final class ContinuousCanvasView: UIView {
     // MARK: Working on a page
 
     var isInking: Bool {
-        canvases.values.contains { $0.isInking }
+        crossing != nil || canvases.values.contains { $0.isInking }
+    }
+
+    // MARK: Writing across pages
+
+    /// A stroke (ink or an eraser) that may carry on from the page it began on to the pages above and
+    /// below (`PageSeam`). Its touch keeps arriving at the page it began on, which hands each event here;
+    /// every page with a canvas takes part while the Pencil is within `reach` of it, with a piece of its
+    /// own. The pieces share `group`, so undo takes them back together.
+    private struct Crossing {
+        let touch: UITouch
+        weak var origin: CanvasView?
+        let group: UUID
+        let reach: CGFloat
+        /// Ink, not an eraser: writing past the last page adds a page.
+        let isInk: Bool
+        var addedPage = false
+    }
+
+    private var crossing: Crossing?
+
+    func isWritingAcrossPages(_ touch: UITouch) -> Bool {
+        crossing?.touch === touch
+    }
+
+    /// `canvas` began a stroke with `touch` that can carry on onto other pages.
+    func beginWritingAcrossPages(_ touch: UITouch, event: UIEvent?, on canvas: CanvasView) {
+        crossing = Crossing(touch: touch, origin: canvas, group: UUID(), reach: canvas.acrossPagesReach,
+                            isInk: canvas.live.map { !$0.stroke.brush.erases } ?? false)
+        canvas.strokeGroup = crossing?.group
+        writingAcrossPagesMoved(touch, event: event, from: canvas) // a page just above or below may be in reach already
+    }
+
+    /// The next event of the stroke, after the page it began on has handled it: the other pages taking
+    /// part get it too, pages coming into reach join, and pages going out of reach end their piece.
+    func writingAcrossPagesMoved(_ touch: UITouch, event: UIEvent?, from origin: CanvasView) {
+        guard var crossing, crossing.touch === touch else { return }
+        // Writing past the end of the last page adds the next page, so the stroke can carry on onto it.
+        if crossing.isInk, !crossing.addedPage, let last = notebook.pages.last, let canvas = canvases[last.id],
+           canvas.viewTransform.toCanvas(touch.preciseLocation(in: canvas)).y > last.pageSize.height {
+            crossing.addedPage = true
+            self.crossing = crossing
+            notebook.addPageIfWritingReachedEnd(of: last, inkBounds: CGRect(x: 0, y: last.pageSize.height, width: 0, height: 0))
+            layoutIfNeeded() // gives the new page its canvas now
+        }
+        var joined = false
+        for canvas in canvases.values {
+            let taking = canvas.activeTouch === touch
+            if taking, canvas !== origin {
+                canvas.continueStroke(touch, event: event)
+            }
+            let inReach = canvas.reaches(touch, within: crossing.reach)
+            if taking, !inReach {
+                canvas.leaveStroke(touch, event: event, final: false, commit: true)
+            } else if !taking, inReach {
+                canvas.joinStroke(touch, event: event, group: crossing.group)
+                joined = joined || canvas.activeTouch === touch
+            }
+        }
+        if joined {
+            // A stroke on two pages isn't a shape held still on one.
+            for canvas in canvases.values {
+                canvas.stopHoldWatch()
+            }
+        }
+    }
+
+    /// The stroke ended (or was cancelled) on the page it began on; the other pages taking part end theirs.
+    func endWritingAcrossPages(_ touch: UITouch, event: UIEvent?, commit: Bool, from origin: CanvasView) {
+        guard crossing?.touch === touch else { return }
+        crossing = nil
+        for canvas in canvases.values where canvas !== origin && canvas.activeTouch === touch {
+            canvas.leaveStroke(touch, event: event, final: true, commit: commit)
+        }
+        if commit {
+            controller?.eraserStrokeDidEnd() // goes back to the previous tool, if that's on and this was an erase
+        }
+        setNeedsLayout() // let go of pages that only kept their canvas for the stroke
+    }
+
+    /// Refined force and tilt for a stroke's samples arrive at the page it began on; the pages that took
+    /// part apply them to their own pieces.
+    func forwardEstimates(_ touches: Set<UITouch>, from origin: CanvasView) {
+        for canvas in canvases.values where canvas !== origin {
+            canvas.applyEstimates(touches, recording: false)
+        }
     }
 
     /// Called as ink starts on `canvas`: it becomes the current page, and any scroll in progress stops so
@@ -339,6 +431,20 @@ final class ContinuousCanvasView: UIView {
     /// Writing near the bottom of the last page adds the next one.
     func inkDidCommit(on document: CanvasDocument, bounds: CGRect) {
         notebook.addPageIfWritingReachedEnd(of: document, inkBounds: bounds)
+    }
+
+    /// Shows or hides the ruler over every page, to match the controller. A Pencil touch on the ruler writes
+    /// on the page under it.
+    func updateRuler() {
+        guard let controller else { return }
+        RulerView.sync(in: self, controller: controller) { [weak self] p in self?.canvas(at: p) }
+    }
+
+    /// The page's canvas at `point` (this view's space), if a page with a canvas is there.
+    func canvas(at point: CGPoint) -> CanvasView? {
+        canvases.values.first { canvas in
+            canvas.pageFrameInView.contains(canvas.convert(point, from: self))
+        }
     }
 
     func pencilSettingsDidChange() {
@@ -439,6 +545,7 @@ struct ContinuousCanvasRepresentable: UIViewRepresentable {
         controller.continuousHost = view
         controller.zoomDidChange(1)
         controller.selectionDidChange(false)
+        view.updateRuler()
         return view
     }
 

@@ -59,9 +59,12 @@ extension CanvasView {
         handleTextTap(at: viewTransform.toCanvas(g.location(in: self)), endedEditing: wasEditing)
     }
 
-    /// A tap on a box edits it (or ticks the checkbox under the tap); a tap on the page makes a new box,
-    /// unless it only finished editing another.
+    /// A tap on tape reveals or hides it; a tap on a box edits it (or ticks the checkbox under the tap); a tap
+    /// on the page makes a new box, unless it only finished editing another.
     func handleTextTap(at p: CGPoint, endedEditing: Bool) {
+        if !endedEditing, toggleTape(at: p) {
+            return // a tap on tape reveals or hides it, with the text tool too
+        }
         if let box = textBox(at: p) {
             if let target = box.checkboxTargets().first(where: { $0.rect.contains(p.applying(box.transform.inverted())) }) {
                 let toggled = box.togglingCheckbox(at: target.location)

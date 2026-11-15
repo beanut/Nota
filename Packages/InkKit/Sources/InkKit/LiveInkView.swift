@@ -55,6 +55,12 @@ final class LiveInkView: UIView {
     /// One stroke's baked ink inside one tile.
     private final class BakedTile {
         var context: CGContext?
+        /// For a raster brush (see `requestWax`): the settled chunks' pressure on the GPU, the canvas rect
+        /// still to redraw, whether a GPU job is out, and whether the GPU failed (then paths are filled).
+        var field: WaxRenderer.WaxField?
+        var waxPending = CGRect.null
+        var waxInFlight = false
+        var waxFailed = false
         /// Chunks below this index have been considered for this tile (and drawn if they reach it).
         var bakedThrough = 0
         /// Snapshot of `context`, made on demand and dropped whenever the context is drawn into.
@@ -129,6 +135,7 @@ final class LiveInkView: UIView {
     func invalidate(canvasRect: CGRect) {
         guard prune() else { return }
         markTiles(under: canvasRect)
+        requestWax(under: canvasRect)
     }
 
     /// Call when strokes were added or removed wholesale. Redraws every tile any stroke reaches.
@@ -140,24 +147,37 @@ final class LiveInkView: UIView {
         for entry in entries() {
             for rect in entry.stroke.pieceBounds {
                 markTiles(under: rect)
+                requestWax(under: rect)
             }
         }
     }
 
     private func markTiles(under canvasRect: CGRect) {
-        guard !canvasRect.isNull else { return }
+        guard let rect = viewRect(under: canvasRect) else { return }
+        for key in tileKeys(under: rect) {
+            // Only the part of the tile under the new ink: Core Animation keeps the rest of the
+            // tile's pixels and clips the redraw to this rect.
+            let tile = tile(at: key)
+            tile.setNeedsDisplay(rect.offsetBy(dx: -tile.frame.minX, dy: -tile.frame.minY).intersection(tile.bounds))
+        }
+    }
+
+    /// The view rect a redraw of `canvasRect` covers, inside the view; nil if none.
+    private func viewRect(under canvasRect: CGRect) -> CGRect? {
+        guard !canvasRect.isNull else { return nil }
         let rect = bakeTransform.toView(canvasRect).insetBy(dx: -3, dy: -3).intersection(bounds)
-        guard !rect.isNull, !rect.isEmpty else { return }
+        return rect.isNull || rect.isEmpty ? nil : rect
+    }
+
+    private func tileKeys(under viewRect: CGRect) -> [TileKey] {
         let size = Self.tileSize
-        for row in Int(rect.minY / size) ... Int((rect.maxY - 0.001) / size) {
-            for col in Int(rect.minX / size) ... Int((rect.maxX - 0.001) / size) {
-                // Only the part of the tile under the new ink: Core Animation keeps the rest of the
-                // tile's pixels and clips the redraw to this rect.
-                let tile = tile(at: TileKey(col: col, row: row))
-                tile.setNeedsDisplay(rect.offsetBy(dx: -tile.frame.minX, dy: -tile.frame.minY)
-                    .intersection(tile.bounds))
+        var keys: [TileKey] = []
+        for row in Int(viewRect.minY / size) ... Int((viewRect.maxY - 0.001) / size) {
+            for col in Int(viewRect.minX / size) ... Int((viewRect.maxX - 0.001) / size) {
+                keys.append(TileKey(col: col, row: row))
             }
         }
+        return keys
     }
 
     /// Call after `LiveStroke.refreshPoint` changed already-finalized segments: baked pixels under
@@ -168,6 +188,11 @@ final class LiveInkView: UIView {
         let rect = bakeTransform.toView(canvasRect).insetBy(dx: -3, dy: -3)
         for (key, tile) in baked where tile.bakedThrough > chunk && frame(of: key).intersects(rect) {
             tile.bakedThrough = 0
+            if tile.field != nil {
+                // A raster tile keeps showing its wax; its pressure is rebuilt and the dirty rect redrawn.
+                tile.field = nil
+                continue
+            }
             tile.invalidateImage()
             tile.context?.clear(bakeTransform.toCanvas(frame(of: key)).insetBy(dx: -1, dy: -1))
         }
@@ -207,7 +232,8 @@ final class LiveInkView: UIView {
         let tilePixels = Int((Self.tileSize * scale).rounded(.up))
         let tileBytes = tilePixels * tilePixels * 4
         let bakedCount = rasters.values.reduce(0) { $0 + $1.values.filter { $0.context != nil }.count }
-        return (tiles.count + bakedCount) * tileBytes
+        let fieldBytes = rasters.values.reduce(0) { $0 + $1.values.reduce(0) { $0 + ($1.field?.bytes ?? 0) } }
+        return (tiles.count + bakedCount) * tileBytes + fieldBytes
     }
 
     func setCursor(_ path: CGPath?) {
@@ -287,7 +313,98 @@ final class LiveInkView: UIView {
         return ctx
     }
 
+    // MARK: Raster brushes
+
+    /// Whether any raster stroke still has GPU work out or waiting: its tiles aren't up to date yet.
+    var rasterWorkPending: Bool {
+        rasters.values.contains { $0.values.contains { $0.waxInFlight || !$0.waxPending.isNull } }
+    }
+
+    /// Asks the GPU for the wax of every raster stroke under `canvasRect`, tile by tile, without waiting.
+    ///
+    /// A raster stroke's wax at a pixel depends on every stamp over it, so it can't be baked as pixels chunk
+    /// by chunk. Its pressure combines by max, though, so each tile keeps the settled chunks' pressure on the
+    /// GPU (a `WaxField`) and a job adds only the hot stamps over it. The pixels come back on the main queue
+    /// into the tile's baked bitmap, which the tile then draws like any baked ink. A touch event only
+    /// encodes work, so it never waits for the GPU; the wax shows when the GPU is done, at most about a
+    /// frame later. Each tile has at most one job out, and redraws asked for meanwhile wait for it.
+    private func requestWax(under canvasRect: CGRect) {
+        guard let wax = WaxRenderer.shared, let rect = viewRect(under: canvasRect) else { return }
+        for entry in entries() where entry.stroke.stroke.brush.isRaster && entry.previewFill == nil {
+            let stroke = entry.stroke
+            for key in tileKeys(under: rect) {
+                let tileCanvas = bakeTransform.toCanvas(frame(of: key))
+                let dirty = canvasRect.intersection(tileCanvas.insetBy(dx: -1, dy: -1))
+                guard !dirty.isNull, let baked = waxTile(stroke, key: key, wax: wax) else { continue }
+                baked.waxPending = baked.waxPending.union(dirty)
+                if !baked.waxInFlight {
+                    submitWax(stroke, key: key, baked: baked, wax: wax)
+                }
+            }
+        }
+    }
+
+    /// The stroke's state in one tile, its field brought up to date with any newly settled chunks.
+    private func waxTile(_ stroke: LiveStroke, key: TileKey, wax: WaxRenderer) -> BakedTile? {
+        let id = ObjectIdentifier(stroke)
+        let baked = rasters[id]?[key] ?? BakedTile()
+        rasters[id, default: [:]][key] = baked
+        guard !baked.waxFailed, let ctx = makeBakeContext(baked, for: frame(of: key)) else { return nil }
+        if baked.field == nil {
+            baked.bakedThrough = 0
+            let pixels = CGFloat(ctx.width)
+            baked.field = wax.makeField(covering: CGRect(x: 0, y: 0, width: pixels, height: pixels),
+                                        toDevice: ctx.userSpaceToDeviceSpaceTransform)
+        }
+        guard let field = baked.field else {
+            baked.waxFailed = true
+            return nil
+        }
+        let limit = stroke.bakeableChunkCount
+        if baked.bakedThrough < limit {
+            let tileCanvas = bakeTransform.toCanvas(frame(of: key)).insetBy(dx: -1, dy: -1)
+            var runs: [StrokeRun] = []
+            for chunk in baked.bakedThrough ..< limit where stroke.chunkBounds(chunk).intersects(tileCanvas) {
+                runs.append(contentsOf: stroke.chunkRuns(chunk))
+            }
+            wax.bake(runs, into: field)
+            baked.bakedThrough = limit
+        }
+        return baked
+    }
+
+    /// Sends the tile's pending redraw to the GPU. When it's done, its pixels replace that part of the
+    /// tile's bitmap, the tile redraws, and anything asked for in the meantime goes next.
+    private func submitWax(_ stroke: LiveStroke, key: TileKey, baked: BakedTile, wax: WaxRenderer) {
+        guard let field = baked.field, !baked.waxPending.isNull else { return }
+        let region = baked.waxPending
+        baked.waxPending = .null
+        let hot = stroke.runs(intersecting: region, fromChunk: baked.bakedThrough)
+        let ink = WaxRenderer.Ink(brush: stroke.stroke.brush, color: stroke.stroke.color)
+        let id = ObjectIdentifier(stroke)
+        baked.waxInFlight = wax.render(runs: hot, over: field, region: region.applying(field.toDevice),
+                                       ink: ink) { [weak self, weak stroke, weak baked] images in
+            guard let self, let stroke, let baked, rasters[id]?[key] === baked else { return }
+            baked.waxInFlight = false
+            if let images, let ctx = baked.context {
+                WaxRenderer.draw(images, in: ctx, blend: .copy)
+                baked.invalidateImage()
+            } else {
+                baked.waxFailed = true
+            }
+            markTiles(under: region)
+            if !baked.waxFailed, !baked.waxPending.isNull, waxTile(stroke, key: key, wax: wax) != nil {
+                submitWax(stroke, key: key, baked: baked, wax: wax)
+            }
+        }
+        if !baked.waxInFlight {
+            baked.waxFailed = true
+            markTiles(under: region)
+        }
+    }
+
     /// Rasterizes any newly settled chunks of `entry` that reach this tile. Each chunk is drawn once.
+    /// A raster brush bakes its pressure instead (`bakeField`), when the tile is drawn.
     private func bake(_ entry: Entry, key: TileKey, tileFrame: CGRect, clip: CGRect) -> BakedTile? {
         let stroke = entry.stroke
         let id = ObjectIdentifier(stroke)
@@ -335,6 +452,22 @@ final class LiveInkView: UIView {
         var items: [Item] = []
         for entry in entries() {
             let baked = bake(entry, key: tile.key, tileFrame: tileFrame, clip: tileClip)
+            // A raster stroke shows the wax the GPU last sent back (see `requestWax`); without Metal, or if
+            // the GPU failed, its paths are filled with the grain pattern instead.
+            if entry.stroke.stroke.brush.isRaster, entry.previewFill == nil {
+                let baked = rasters[ObjectIdentifier(entry.stroke)]?[tile.key]
+                if WaxRenderer.shared != nil, baked?.waxFailed != true {
+                    if let image = baked?.image {
+                        items.append(Item(entry: entry, baked: image, hot: []))
+                    }
+                } else {
+                    let hot = entry.stroke.runs(intersecting: clip)
+                    if !hot.isEmpty {
+                        items.append(Item(entry: entry, baked: nil, hot: hot))
+                    }
+                }
+                continue
+            }
             let hot = entry.stroke.runs(intersecting: clip, fromChunk: entry.stroke.bakeableChunkCount)
             if baked?.image != nil || !hot.isEmpty {
                 items.append(Item(entry: entry, baked: baked?.image, hot: hot))

@@ -29,20 +29,18 @@ extension InkTheme {
         footnoteEmphasizedFont: NotaFont.footnoteEmph,
         icon: { Image(nota: NotaIcon(inkIcon: $0)) },
         penInks: NotaInk.penPresets.map(InkColor.init),
-        highlighterInks: NotaInk.highlighterPresets.map(InkColor.init)
+        highlighterInks: NotaInk.highlighterPresets.map(InkColor.init),
+        tapeInks: NotaInk.tapePresets.map(InkColor.init),
+        laser: InkColor(NotaInk.laser),
+        link: InkColor(NotaInk.blue)
     )
 }
 
 private extension NotaIcon {
     init(inkIcon: InkIcon) {
         self = switch inkIcon {
-        case .pen: .pen
-        case .pencil: .pencil
-        case .highlighter: .highlighter
-        case .eraser: .eraser
-        case .lasso: .lasso
-        case .shapes: .shapes
-        case .text: .text
+        case .pen, .pencil, .highlighter, .eraser, .lasso, .shapes, .text, .photo, .tape, .laser, .ruler:
+            NotaIcon(tool: inkIcon)
         case .undo: .undo
         case .redo: .redo
         case .more: .ellipsis
@@ -56,6 +54,27 @@ private extension NotaIcon {
         case .close: .xmark
         case .penTray: .pens
         case .eyedropper: .eyedropper
+        case .link: .link
+        case .bookmark: .bookmark
+        case .outline: .list
+        case .back: .chevronLeft
+        }
+    }
+
+    /// The Pen Case's tools and its Insert menu.
+    init(tool: InkIcon) {
+        self = switch tool {
+        case .pencil: .pencil
+        case .highlighter: .highlighter
+        case .eraser: .eraser
+        case .lasso: .lasso
+        case .shapes: .shapes
+        case .text: .text
+        case .photo: .photo
+        case .tape: .tape
+        case .laser: .laser
+        case .ruler: .ruler
+        default: .pen
         }
     }
 }

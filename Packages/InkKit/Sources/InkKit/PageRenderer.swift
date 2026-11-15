@@ -34,10 +34,16 @@ public extension CanvasDocument {
 /// Draws a page's objects and ink with the same code the canvas uses, for thumbnails and other still
 /// images. Safe to call from any thread.
 public enum PageRenderer {
-    /// Draws the page's objects into `ctx` (mapped to canvas space, like `drawInk`), in stacking order,
-    /// clipped to the page. Call it between the template and the ink.
+    /// Draws the page's objects that sit under the ink into `ctx` (mapped to canvas space, like `drawInk`),
+    /// in stacking order, clipped to the page. Call it between the template and the ink.
     public static func drawObjects(_ page: PageSnapshot, in ctx: CGContext) {
-        draw(page.objects, clip: page.pageSize.bounds, in: ctx)
+        draw(page.objects.splitByInkLayer.under, clip: page.pageSize.bounds, in: ctx)
+    }
+
+    /// Draws the page's tape (the objects drawn over the ink) into `ctx`, like `drawObjects`. Call it after
+    /// the ink.
+    public static func drawOverlays(_ page: PageSnapshot, in ctx: CGContext) {
+        draw(page.objects.splitByInkLayer.over, clip: page.pageSize.bounds, in: ctx)
     }
 
     /// Draws `objects` in canvas space, skipping those outside `visible`.
@@ -77,7 +83,8 @@ public enum PageRenderer {
     }
 
     /// The page rendered `pixelWidth` pixels wide (height follows the page's aspect ratio) in sRGB: its
-    /// objects, then its ink. `background` draws first, in pixel space with the origin at the top-left: fill the paper and its
+    /// objects, then its ink, then its tape. `background` draws first, in pixel space with the origin at the top-left: fill the paper and
+    /// its
     /// template there. Returns nil if the bitmap can't be created.
     public static func image(of page: PageSnapshot,
                              pixelWidth: Int,
@@ -97,6 +104,7 @@ public enum PageRenderer {
         ctx.scaleBy(x: scale, y: scale)
         drawObjects(page, in: ctx)
         drawInk(page, in: ctx)
+        drawOverlays(page, in: ctx)
         return ctx.makeImage()
     }
 
@@ -121,7 +129,8 @@ public enum PageRenderer {
         ctx.scaleBy(x: scale, y: scale)
         ctx.translateBy(x: -region.minX, y: -region.minY)
         background?(ctx)
-        draw(objects, clip: region, in: ctx)
+        let layers = objects.splitByInkLayer
+        draw(layers.under, clip: region, in: ctx)
         if !strokes.isEmpty {
             PencilTexture.prepareContext(ctx)
             ctx.beginTransparencyLayer(auxiliaryInfo: nil)
@@ -133,6 +142,7 @@ public enum PageRenderer {
             }
             ctx.endTransparencyLayer()
         }
+        draw(layers.over, clip: region, in: ctx)
         return ctx.makeImage()
     }
 
@@ -181,20 +191,28 @@ public enum PageRenderer {
         guard let consumer = CGDataConsumer(data: data as CFMutableData),
               let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, info as CFDictionary)
         else { return nil }
-        for page in pages {
-            var box = page.pageSize.bounds
-            let boxData = Data(bytes: &box, count: MemoryLayout<CGRect>.size) as CFData
-            ctx.beginPDFPage([kCGPDFContextMediaBox: boxData] as CFDictionary)
-            // PDF space is y-up; canvas space is y-down.
-            ctx.translateBy(x: 0, y: box.height)
-            ctx.scaleBy(x: 1, y: -1)
-            TemplateRenderer.draw(page.template, pageSize: page.pageSize, palette: palette(page.template.paper),
-                                  artwork: page.templateArtwork, in: ctx)
-            drawObjects(page, in: ctx)
-            drawInk(page, in: ctx)
-            ctx.endPDFPage()
+        // Pictures go in at 3 pixels per point (216 dpi), not the PDF's 1-point grid.
+        ImageDrawing.with(ImageDrawing.Options(minimumScale: 3)) {
+            for page in pages {
+                drawPDFPage(page, in: ctx, palette: palette)
+            }
         }
         ctx.closePDF()
         return data as Data
+    }
+
+    private static func drawPDFPage(_ page: PageSnapshot, in ctx: CGContext, palette: (PaperColor) -> PaperPalette) {
+        var box = page.pageSize.bounds
+        let boxData = Data(bytes: &box, count: MemoryLayout<CGRect>.size) as CFData
+        ctx.beginPDFPage([kCGPDFContextMediaBox: boxData] as CFDictionary)
+        // PDF space is y-up; canvas space is y-down.
+        ctx.translateBy(x: 0, y: box.height)
+        ctx.scaleBy(x: 1, y: -1)
+        TemplateRenderer.draw(page.template, pageSize: page.pageSize, palette: palette(page.template.paper),
+                              artwork: page.templateArtwork, in: ctx)
+        drawObjects(page, in: ctx)
+        drawInk(page, in: ctx)
+        drawOverlays(page, in: ctx)
+        ctx.endPDFPage()
     }
 }

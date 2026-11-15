@@ -36,6 +36,7 @@ Nota/
 │   ├── NoteSplitView.swift   Two notes side by side in one window
 │   ├── NoteWindow.swift      A note in a window of its own
 │   ├── NoteCommands.swift    Keyboard shortcuts for windows and split notes
+│   ├── PresentationScene.swift  External display / AirPlay scene: shows InkKit's PresentationMirror
 │   └── Theme/                InkTheme.nota, model colours → NotaUI inks
 ├── Config/Nota-Info.plist    Info.plist keys the build settings can't express (merged with the generated one)
 └── Packages/
@@ -77,7 +78,7 @@ Colour, type, spacing, radius and elevation tokens, the icon set and shared cont
 
 ## InkKit
 
-The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / shapes / text / eraser / lasso with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, round and chisel highlighters), a pen tray of saved pens, quick sizes and colours per tool, a colour picker (spectrum, hex, eyedropper, palettes, recent colours) and a brush editor, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
+The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / shapes / text / tape / eraser / lasso / laser pointer, an on-screen ruler and protractor, with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, a crayon drawn with Metal, round and chisel highlighters), a pen tray of saved pens, quick sizes and colours per tool, a colour picker (spectrum, hex, eyedropper, palettes, recent colours) and a brush editor, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
 
 ```swift
 import InkKit
@@ -91,8 +92,24 @@ InkCanvasEditor(notebook: notebook)
 - **Pages** – `InkNotebook` is an ordered list of `CanvasDocument`s with add / insert / remove / move and navigation. Each page has its own paper size, ink and undo history. A notebook always keeps at least one page.
 - **Page size** – `PageSize` is in points (1/72 in) and defaults to Letter. Custom sizes can be given in inches, millimetres or points. Resizing a page keeps the ink where it is; ink past the new edge is hidden, not deleted.
 - **Templates** – each page has a `PageTemplate`: blank, narrow / college / wide ruled, small and large grid, dotted, Cornell, music staff, isometric, to-do, weekly and monthly planners, or any PDF or image, on white, cream or dark paper. Templates are drawn as vectors (crisp at every zoom, real lines in an exported PDF) and expose their line metrics for handwriting layout. The page bar's template pill changes this page or every page; the library's Template menu changes a whole note.
-- **Objects** – besides ink, a page holds objects (`PageObject`: shapes, text, images and tape as they land), each with a frame, a transform and a z-order, drawn between the template and the ink. Shapes (`ShapeObject`) are the first real kind: the shape tool, or drawing with a pen or pencil and holding the Pencil still, snaps a rough stroke to a line, arrow, rectangle, ellipse, triangle, polygon or curve, recognised on the device, and a selected shape is reshaped by its handles. Text boxes (`TextObject`) are typed with the keyboard or written into with the Pencil (Scribble): the text tool makes one with a tap (or a drag to set its width), and a floating format bar sets the typeface, size, bold / italic / underline, alignment, bullets, numbers, checkboxes and indent; the Pen Case's colours colour the selected text. Text boxes are moved, rotated, layered and recoloured like any object (resizing one rewraps its text), their text is found by the library's search, and an exported PDF keeps it as real text. There's also a test object, `PlaceholderObject` (More › Add Test Object). The lasso selects ink and objects together (or only one of them), by loop, rectangle or tap; the selection box's handles move, resize and rotate them, and its menu cuts, copies, pastes (onto any page of any note), duplicates, recolours, thickens or thins, brings to front or sends to back, and takes a screenshot; a selection can be dragged out to other apps as an image. Every change goes on the page's one undo stack.
-- **Scrolling** – More › Scroll Direction shows pages one at a time with sideways swipes (Horizontal) or all of them in one column scrolled vertically (Vertical), saved for every editor. In vertical scrolling only the pages in view get a canvas, so a 300-page note scrolls as smoothly as a short one; pinch to zoom, and writing near the bottom of the last page adds the next one.
+- **Pictures and stickers** – the Pen Case's Insert menu puts photos on the page from Photos, the camera or Files,
+  or pastes them; they can also be dropped onto the page. A picture's menu crops it to a rectangle or freehand
+  (and back), and sets its opacity; it's moved, resized (keeping its shape), rotated, layered and written over like any object.
+  Each picture is stored once in the note package's `assets/` and decoded at the size it's shown. Save as
+  Sticker keeps any lasso selection (ink or pictures) in an app-wide sticker collection to place again on any
+  page.
+- **Objects** – besides ink, a page holds objects (`PageObject`: shapes, text, images and tape), each with a frame, a transform and a z-order, drawn between the template and the ink (tape is drawn over the ink). Shapes (`ShapeObject`) are the first real kind: the shape tool, or drawing with a pen or pencil and holding the Pencil still, snaps a rough stroke to a line, arrow, rectangle, ellipse, triangle, polygon or curve, recognised on the device, and a selected shape is reshaped by its handles. Text boxes (`TextObject`) are typed with the keyboard or written into with the Pencil (Scribble): the text tool makes one with a tap (or a drag to set its width), and a floating format bar sets the typeface, size, bold / italic / underline, alignment, bullets, numbers, checkboxes and indent; the Pen Case's colours colour the selected text. Text boxes are moved, rotated, layered and recoloured like any object (resizing one rewraps its text), their text is found by the library's search, and an exported PDF keeps it as real text. There's also a test object, `PlaceholderObject` (More › Add Test Object). The lasso selects ink and objects together (or only one of them), by loop, rectangle or tap; the selection box's handles move, resize and rotate them, and its menu cuts, copies, pastes (onto any page of any note), duplicates, recolours, thickens or thins, brings to front or sends to back, and takes a screenshot; a selection can be dragged out to other apps as an image. Every change goes on the page's one undo stack.
+- **Tape** – the tape tool (`TapeObject`) covers part of the page with a strip of tape, dragged from end to end (snapping level, upright or to 45°) in the Pen Case's tape colours, plain, striped or grid. Tape is drawn over the ink, so it hides writing as well as paper and objects: a study aid. A tap on tape with any tool but the lasso and the eraser reveals it (a faint dashed outline over what it covers) or hides it again; the tape tool's options reveal or hide all the page's tape. Each strip's state is saved with the note; the lasso moves, rotates, resizes, recolours and deletes tape like any object, and every change is one undo step.
+- **Ruler** – the Pen Case's ruler button shows a ruler over the canvas (touch and hold it for the protractor). One finger moves it, two turn it (snapping to every 15°), and it shows its angle. A pen, pencil or highlighter stroke that starts on it or within 28 pt of an edge is drawn exactly along that edge (round the protractor's arc, or along its baseline), and while it's drawn its length shows by the Pencil in centimetres of page (1 pt = 1/72 in), or the angle it sweeps round the protractor. The ruler isn't saved: it stays while the editor is open.
+- **Laser pointer and presenting** – the laser tool draws a glowing line that fades after about a second (or, in Dot mode, a dot that follows the touch) and never writes on the page. When an external display or AirPlay screen is connected, it shows the page being worked on alone (no chrome, read-only, fitted to the screen) with the laser on it, instead of mirroring the whole iPad screen; the editor says it's presenting.
+- **Links, bookmarks and outline** – the selection menu's Add Link… links any selection (ink, shapes, text,
+  pictures) to a web address, another page of the note, or another note or one of its pages (`LinkObject`). A tap
+  with a pen, pencil, highlighter, the shape tool or the laser follows it; a link to another note opens that note in
+  its place (the same side of a split), and a Back button returns to the page or note the link was followed from.
+  The page bar's bookmark button bookmarks the page, and the page sidebar's Outline tab lists the bookmarks, the
+  note's own outline entries (add, rename, reorder, delete) and the outline of any PDF brought into it. A table of
+  contents is a page of links.
+- **Scrolling** – More › Scroll Direction shows all pages in one column scrolled vertically (Vertical, the default) or one at a time with sideways swipes (Horizontal), saved for every editor. Vertical scrolling reads as one long sheet: a stroke or an erase carries on from one page onto the next without lifting the Pencil, stored as one stroke per page and undone in one step. Only the pages in view get a canvas, so a 300-page note scrolls as smoothly as a short one; pinch to zoom, and writing near or past the bottom of the last page adds the next one.
 - **Page sidebar** – the page bar's pages button opens thumbnails of every page: tap one to go to it, drag to reorder, and duplicate, rotate (ink and all), delete, or copy or move pages to another note, one page from its context menu or several with Select.
 - **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page. The eraser erases pixel by pixel (Precision), the parts of strokes it passes over (Standard) or whole strokes, optionally only highlighter or only pencil ink, and can switch back to the previous tool afterwards.
 - **Zoom window** – More › Zoom Window opens a magnified writing panel above the page bar for a box on the page, for small, neat handwriting. Every tool works in it. Writing into the panel's shaded right-hand zone moves the box along the line, and at the end of the line on to the next one, following the page template's ruling. Drag the box by its tab, resize it (and so the magnification) by its corner knob, or use the panel's back, on and new-line buttons.
@@ -112,7 +129,7 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 ## Known limitations
 
 - Each note is a `.nota` package (manifest + one `.ink` file per page with ink + one `.json` objects file per
-  page with objects) that `DocumentStore` autosaves
+  page with objects + one file per picture in `assets/`) that `DocumentStore` autosaves
   about a second after each change, when the editor closes and when the app leaves the screen. Undo history
   isn't saved. Pages load a whole note at a time (decoded off the main thread); the 8 most recent notes stay
   in memory. Vertical scrolling draws only the pages in view, but a note's pages are still all read when it
@@ -121,15 +138,25 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   killed shows its previous cover until it's next opened and closed.
 - The library index (SwiftData) is rebuilt from packages at launch if notes are missing from it, with title,
   dates, page count and template; folders, favourites and tints aren't in packages, so they're lost then.
-- In vertical scrolling each page is still its own canvas: a stroke stops at the bottom of its page rather
-  than flowing onto the next (NOT-89), and the zoom window isn't offered.
+- In vertical scrolling ink and the eraser carry across page boundaries, but the lasso still works on one
+  page at a time: a selection can't span two pages or be dragged onto another. The zoom window isn't offered.
 - Rotating a page clears its undo history.
 - Pixel-eraser cuts belong to the page, not the strokes they cut: moving, copying or bringing to front a stroke
   that was partly pixel-erased shows it whole again in its new place (or order). The standard and stroke
   erasers don't have this problem.
-- Pasting only takes Nota's own selections; an image or text copied from another app can't be pasted onto the
-  page yet (it can be pasted into a text box being edited, as plain text).
-- Shapes (NOT-20) and text boxes (NOT-22) are the only real object types so far. Shape recognition is tuned on synthetic strokes,
+- Pasting takes Nota's own selections and pictures copied in other apps; text copied from another app can't be
+  pasted onto the page yet (it can be pasted into a text box being edited, as plain text). A selection dragged
+  out of Nota can't be dropped back onto a page (drops from inside the app are ignored).
+- Pictures (NOT-23): Take Photo needs a camera, so it's untested (disabled in the simulator); dropping and
+  picking from Photos have only been tried on the simulator. Pictures no page uses are deleted from a note's
+  `assets/` the next time it's opened, not when they're removed. Stickers are kept on this device only, like
+  the pen tray.
+- Tape, the ruler, the laser and presenting (NOT-24) have only been tried on the simulator: the external
+  display scene and the mirror are unit-tested but haven't been shown on a real external display or AirPlay
+  screen, and the ruler's two-finger turn and Pencil-on-ruler writing need a physical iPad (NOT-12). Ink shows
+  on the external display as each stroke finishes, not while it's drawn. The zoom window's panel doesn't show
+  tape, and the ruler doesn't guide strokes written in the zoom window.
+- Shapes (NOT-20), text boxes (NOT-22), pictures (NOT-23), tape (NOT-24) and links (NOT-31) are the only real object types so far. Shape recognition is tuned on synthetic strokes,
   not yet on real handwriting (NOT-12), and a shape is hit anywhere in its bounds, so a diagonal line can be
   selected from the empty corners of its box. The zoom window's panel doesn't show objects, and the pixel eraser's live preview paints
   paper over them until the stroke commits (objects are never erased).
@@ -137,6 +164,12 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   physical iPad yet (NOT-12). The on-screen keyboard can cover a box low on the page; the page doesn't
   scroll it into view. Undo while typing undoes typing; the page's undo takes back a whole editing session.
   Resizing a box changes the width its text wraps at, never the text's size (that's the format bar's).
+- Links (NOT-31) cover a selection's bounds rather than belonging to what they cover: moving a text box alone
+  leaves its link behind (select both with the lasso), and a link can't cover part of a text box's text. Links to
+  pages of the same note stop working in a duplicated note or in pages copied to another note (they point at the
+  original's pages). A link to a note in Recently Deleted does nothing. Back across notes lasts while the window is
+  open; it isn't restored with the scene. PDF outlines are read by `NoteOutline` but nothing imports PDFs yet, so
+  the Outline tab's "From PDF" section is only exercised by tests.
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
 - No PDF import/viewer, sharing or sync yet. A PDF-kind note opens beside a notebook like any other note, but shows the canvas until the PDF viewer lands. PDFs and images can be used as page templates (the PDF's first page), and `PageRenderer.pdf(of:)` exports pages as PDF, but the app has no export button yet.

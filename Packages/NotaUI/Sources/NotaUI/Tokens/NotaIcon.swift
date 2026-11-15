@@ -16,6 +16,8 @@ public enum NotaIcon: String, CaseIterable, Identifiable, Sendable {
     // MARK: Tools
 
     case pen, pencil, highlighter, eraser, lasso, text, shapes, photo
+    /// The tape and laser pointer tools, and the Pen Case's ruler toggle (NOT-24).
+    case tape, laser, ruler
 
     // MARK: Editor
 
@@ -23,6 +25,8 @@ public enum NotaIcon: String, CaseIterable, Identifiable, Sendable {
     case newLine = "return"
     /// The Pen Case's pen tray (saved pens) and the colour picker's eyedropper (NOT-18).
     case pens, eyedropper
+    /// Links on the page and bookmarked pages (NOT-31).
+    case link, bookmark
 
     // MARK: Audio and AI
 

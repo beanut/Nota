@@ -28,6 +28,11 @@ public struct InkColor: Hashable, Sendable {
     public var color: Color {
         Color(.sRGB, red: red, green: green, blue: blue)
     }
+
+    /// The ink as a fixed sRGB `UIColor`, for drawing.
+    var uiColor: UIColor {
+        UIColor(red: CGFloat(red), green: CGFloat(green), blue: CGFloat(blue), alpha: 1)
+    }
 }
 
 /// The glyphs InkKit's chrome uses. A theme maps each one to an image; the default is SF Symbols.
@@ -41,6 +46,12 @@ public enum InkIcon: String, CaseIterable, Sendable {
     case newLine, close
     /// The Pen Case's pen tray (saved pens) and the colour picker's eyedropper.
     case penTray, eyedropper
+    /// The Pen Case's Insert menu: photos, the camera, files, pasted pictures and stickers.
+    case photo
+    /// The tape and laser pointer tools, and the Pen Case's ruler toggle.
+    case tape, laser, ruler
+    /// Links, bookmarks, the outline panel and going back after following a link (NOT-31).
+    case link, bookmark, outline, back
 }
 
 /// How InkKit's editor looks: the colours, fonts and icons of its chrome, the paper and desk the page sits
@@ -114,6 +125,14 @@ public struct InkTheme {
     /// Highlighter inks, drawn at partial opacity with multiply blending, so they should be light and
     /// saturated. Must not be empty.
     public var highlighterInks: [InkColor]
+    /// Tape colours, in Pen Case order. Tape is drawn opaque over the page, so they should be soft enough
+    /// for ink to stay legible on them. Must not be empty.
+    public var tapeInks: [InkColor]
+    /// The laser pointer's glow, on the page and on an external display. Fixed, like the inks.
+    public var laser: InkColor
+    /// What links on the page are tinted and underlined in (`LinkObject`). Fixed, like the inks: it's saved
+    /// with each link.
+    public var link: InkColor
 
     public init(textPrimary: UIColor, textSecondary: UIColor, textTertiary: UIColor, textSelected: UIColor,
                 accent: UIColor, surfaceRaised: UIColor, surfaceFill: UIColor, surfaceSelected: UIColor,
@@ -124,7 +143,10 @@ public struct InkTheme {
                 footnoteFont: Font = .footnote, footnoteEmphasizedFont: Font = .footnote.weight(.semibold),
                 icon: @escaping (InkIcon) -> Image = InkTheme.systemIcon,
                 penInks: [InkColor] = InkTheme.standardPenInks,
-                highlighterInks: [InkColor] = InkTheme.standardHighlighterInks) {
+                highlighterInks: [InkColor] = InkTheme.standardHighlighterInks,
+                tapeInks: [InkColor] = InkTheme.standardTapeInks,
+                laser: InkColor = InkTheme.standardLaser,
+                link: InkColor = InkTheme.standardLink) {
         self.textPrimary = textPrimary
         self.textSecondary = textSecondary
         self.textTertiary = textTertiary
@@ -148,6 +170,9 @@ public struct InkTheme {
         self.icon = icon
         self.penInks = penInks
         self.highlighterInks = highlighterInks
+        self.tapeInks = tapeInks
+        self.laser = laser
+        self.link = link
     }
 
     /// The colours `paper` is drawn in.
@@ -158,10 +183,13 @@ public struct InkTheme {
     /// Paper is the same in both appearances; resolve dynamic colours as light.
     static let onPaper = UITraitCollection(userInterfaceStyle: .light)
 
-    /// The inks for `tool`: highlighters get their own set, everything else the pen inks.
+    /// The inks for `tool`: highlighters and tape get their own sets, everything else the pen inks.
     func inks(for tool: Tool) -> [InkColor] {
-        let inks = tool == .highlighter ? highlighterInks : penInks
-        return inks.isEmpty ? Self.standardPenInks : inks
+        switch tool {
+        case .highlighter: highlighterInks.isEmpty ? Self.standardHighlighterInks : highlighterInks
+        case .tape: tapeInks.isEmpty ? Self.standardTapeInks : tapeInks
+        default: penInks.isEmpty ? Self.standardPenInks : penInks
+        }
     }
 }
 
@@ -189,13 +217,7 @@ public extension InkTheme {
     /// SF Symbols for each glyph.
     static func systemIcon(_ icon: InkIcon) -> Image {
         let name = switch icon {
-        case .pen: "pencil.tip"
-        case .pencil: "pencil"
-        case .highlighter: "highlighter"
-        case .eraser: "eraser"
-        case .lasso: "lasso"
-        case .shapes: "square.on.circle"
-        case .text: "character.textbox"
+        case .pen, .pencil, .highlighter, .eraser, .lasso, .shapes, .text, .photo, .tape, .laser, .ruler: toolSymbol(icon)
         case .undo: "arrow.uturn.backward"
         case .redo: "arrow.uturn.forward"
         case .more: "ellipsis"
@@ -209,8 +231,24 @@ public extension InkTheme {
         case .close: "xmark"
         case .penTray: "tray.full"
         case .eyedropper: "eyedropper"
+        case .link: "link"
+        case .bookmark: "bookmark"
+        case .outline: "list.bullet.indent"
+        case .back: "chevron.backward"
         }
         return Image(systemName: name)
+    }
+
+    /// The Pen Case's tools and its Insert menu.
+    private static func toolSymbol(_ icon: InkIcon) -> String {
+        switch icon {
+        case .pen: "pencil.tip"
+        case .shapes: "square.on.circle"
+        case .text: "character.textbox"
+        case .tape: "bandage"
+        case .laser: "laser.burst"
+        default: icon.rawValue // pencil, highlighter, eraser, lasso, photo, ruler: named as the symbols are
+        }
     }
 
     static let standardPenInks: [InkColor] = [
@@ -220,6 +258,17 @@ public extension InkTheme {
         InkColor(name: "Green", hex: 0x1E8A4C),
         InkColor(name: "Purple", hex: 0x7B3FD0)
     ]
+
+    static let standardTapeInks: [InkColor] = [
+        InkColor(name: "Sand", hex: 0xE8D7A9),
+        InkColor(name: "Sage", hex: 0xB9D3B2),
+        InkColor(name: "Sky", hex: 0xA9C8EA),
+        InkColor(name: "Blush", hex: 0xF0BCC8),
+        InkColor(name: "Slate", hex: 0x9EA3B2)
+    ]
+
+    static let standardLaser = InkColor(name: "Laser", hex: 0xF0308A)
+    static let standardLink = InkColor(name: "Link", hex: 0x3345D9)
 
     static let standardHighlighterInks: [InkColor] = [
         InkColor(name: "Yellow", hex: 0xFFD60A),

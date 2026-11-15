@@ -4,8 +4,9 @@ import InkKit
 /// Where a note's files live: one `<id>.nota` directory per note under Application Support.
 ///
 /// Each holds `manifest.json` (the title and page layout, see `NoteManifest`), `pages/` (one `.ink` file per
-/// page that has ink and one `.json` file per page that has objects, both named by page id), `thumbs/` and
-/// `templates/` (custom template backgrounds).
+/// page that has ink and one `.json` file per page that has objects, both named by page id), `assets/` (the
+/// bytes of the pictures on its pages, one file per picture named by its content hash, so each is stored
+/// once however often it's placed), `thumbs/` and `templates/` (custom template backgrounds).
 /// `DocumentStore` reads and writes them; every file is replaced atomically (see `PackageFiles`).
 public enum NotePackage {
     public static var libraryURL: URL {
@@ -47,6 +48,24 @@ public enum NotePackage {
 
     public static func coverURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
         thumbnailsURL(for: noteID, in: library).appending(path: "cover.png")
+    }
+
+    /// The folder of the pictures on the note's pages (`ImageObject.asset`).
+    public static func assetsURL(for noteID: UUID, in library: URL = libraryURL) -> URL {
+        url(for: noteID, in: library).appending(path: "assets", directoryHint: .isDirectory)
+    }
+
+    /// The file holding picture `id`'s bytes, with the extension of its image type (`jpeg`, `heic`, `png`…).
+    public static func assetURL(for id: ImageAssetID, fileExtension: String, noteID: UUID, in library: URL = libraryURL) -> URL {
+        assetsURL(for: noteID, in: library).appending(path: "\(id).\(fileExtension)")
+    }
+
+    /// The picture a file in `assets/` holds, or nil for anything else there (temporary or set-aside files).
+    public static func assetID(ofFile url: URL) -> ImageAssetID? {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard !PackageFiles.isTemporary(url), !url.lastPathComponent.hasPrefix("."), name.count == 64,
+              name.allSatisfy(\.isHexDigit) else { return nil }
+        return name
     }
 
     /// The folder of the note's custom template backgrounds (PDFs and images used as page templates).

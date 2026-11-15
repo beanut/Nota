@@ -10,6 +10,8 @@ extension Tool {
         case .lasso: .lasso
         case .shape: .shapes
         case .text: .text
+        case .tape: .tape
+        case .laser: .laser
         }
     }
 
@@ -22,19 +24,21 @@ extension Tool {
         case .lasso: "Lasso"
         case .shape: "Shapes"
         case .text: "Text"
+        case .tape: "Tape"
+        case .laser: "Laser Pointer"
         }
     }
 
     /// Whether the tool draws in a colour picked from the Pen Case.
     var usesInk: Bool {
         switch self {
-        case .pen, .pencil, .highlighter, .shape, .text: true
-        case .eraser, .lasso: false
+        case .pen, .pencil, .highlighter, .shape, .text, .tape: true
+        case .eraser, .lasso, .laser: false
         }
     }
 }
 
-/// The Pen Case: the one drawing toolbar. Pen tray · tools · colours · undo/redo · more, placed in the
+/// The Pen Case: the one drawing toolbar. Pen tray · tools · insert · colours · undo/redo · more, placed in the
 /// navigation bar on the same row as the back button. The note's title and Rename live in the More menu.
 /// Tap the selected tool again for its options, and the selected colour again to change it.
 struct PenCase: View {
@@ -63,6 +67,7 @@ struct PenCase: View {
                 tools
                 ScrollView(.horizontal, showsIndicators: false) { tools }
             }
+            InsertMenu(controller: controller)
             InkBarDivider(axis: .horizontal)
             InkRow(controller: controller, axis: .horizontal, opensPicker: true)
             InkBarDivider(axis: .horizontal)
@@ -95,6 +100,7 @@ struct PenCase: View {
                     ToolOptionsView(controller: controller, tool: tool)
                 }
             }
+            RulerButton(controller: controller)
         }
     }
 
@@ -371,6 +377,11 @@ struct ToolOptionsView: View {
                 widthControls
             case .text:
                 TextToolOptions(controller: controller)
+            case .tape:
+                TapeOptions(controller: controller)
+                widthControls
+            case .laser:
+                LaserOptions(controller: controller)
             case .pen, .pencil, .highlighter:
                 BrushPicker(controller: controller, tool: tool)
                 Button {

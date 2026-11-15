@@ -11,11 +11,28 @@ import UIKit
 ///    inside one path, antialias with a hairline seam between them.
 struct Hull {
     let polygon: [CGPoint]
-    let left: [CGPoint]
+    /// A strip's sides. A stamp has none, so a raster brush's stamp keeps its nib in `left` instead (see `nib`).
+    private(set) var left: [CGPoint]
     let right: [CGPoint]
     let joinsPrevious: Bool
     let alpha: CGFloat
     let bounds: CGRect
+
+    /// For a raster brush's stamp, the nib it was made from: the GPU draws that, not the polygon. It's kept
+    /// in the stamp's unused `left` (centre, radii, angle and alpha as three points) rather than a field of
+    /// its own, so every other hull stays as small and as cheap to copy as before (a field cost the stamp
+    /// path over 10%).
+    var nib: Tip? {
+        get {
+            guard !polygon.isEmpty, left.count == 3 else { return nil }
+            return Tip(center: left[0], major: left[1].x, minor: left[1].y, angle: left[2].x, alpha: left[2].y)
+        }
+        set {
+            guard !polygon.isEmpty else { return }
+            left = newValue.map { [$0.center, CGPoint(x: $0.major, y: $0.minor), CGPoint(x: $0.angle, y: $0.alpha)] }
+                ?? []
+        }
+    }
 
     static func bounds(of points: [CGPoint]...) -> CGRect {
         var minX = CGFloat.infinity, minY = CGFloat.infinity
@@ -29,9 +46,9 @@ struct Hull {
         return minX > maxX ? .null : CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
-    init(stamp polygon: [CGPoint], alpha: CGFloat) {
+    init(stamp polygon: [CGPoint], alpha: CGFloat, tip: Tip? = nil) {
         self.polygon = polygon
-        left = []
+        left = tip.map { [$0.center, CGPoint(x: $0.major, y: $0.minor), CGPoint(x: $0.angle, y: $0.alpha)] } ?? []
         right = []
         joinsPrevious = false
         self.alpha = alpha
@@ -50,9 +67,11 @@ struct Hull {
 
 /// Consecutive pieces sharing one (quantised) alpha, merged into a single non-zero-winding path.
 /// Overlapping same-orientation polygons union under non-zero fill, so joints never double up.
+/// A raster brush's run also keeps its stamps' nibs, which `WaxRenderer` draws instead of the path.
 struct StrokeRun {
     let path: CGPath
     let alpha: CGFloat
+    var stamps: [Tip] = []
 }
 
 struct StrokeGeometry {
@@ -99,8 +118,10 @@ struct BrushModel {
     let usesSpeed: Bool
     let renderPath: BrushDescriptor.RenderPath
     let stampSpacing: CGFloat
+    let isRaster: Bool
 
     init(_ b: BrushDescriptor) {
+        isRaster = b.isRaster
         tip = b.tip
         size = b.size
         pressure = b.pressure
@@ -367,7 +388,11 @@ enum StrokeRenderer {
 
     static func dotHull(_ p: StrokePoint, context: StrokeContext) -> Hull {
         let t = tip(for: p, brush: context.brush, nib: context.nib(at: 0, in: [p]))
-        return makeHull(polygon(for: t), alpha: t.alpha)
+        var hull = makeHull(polygon(for: t), alpha: t.alpha)
+        if context.brush.isRaster {
+            hull.nib = t
+        }
+        return hull
     }
 
     /// A nib ellipse with its rotation cached, for support-point queries.
@@ -699,7 +724,8 @@ enum StrokeRenderer {
                 stamp.alpha *= 1 - jitter.opacity * rOpacity
             }
             guard !bristles.isEmpty else {
-                hulls.append(Hull(stamp: polygon(for: stamp), alpha: stamp.alpha))
+                hulls.append(Hull(stamp: polygon(for: stamp), alpha: stamp.alpha,
+                                  tip: brush.isRaster ? stamp : nil))
                 continue
             }
             let c = cos(stamp.angle), s = sin(stamp.angle)
@@ -752,6 +778,7 @@ enum StrokeRenderer {
         var path = CGMutablePath()
         var alpha: CGFloat = -1
         var empty = true
+        var stamps: [Tip] = []
         // The strip being welded together from consecutive pieces.
         var left: [CGPoint] = [], right: [CGPoint] = []
         func endStrip() {
@@ -768,14 +795,18 @@ enum StrokeRenderer {
             let q = (h.alpha * alphaSteps).rounded() / alphaSteps
             if q != alpha, !empty {
                 endStrip()
-                runs.append(StrokeRun(path: path, alpha: alpha))
+                runs.append(StrokeRun(path: path, alpha: alpha, stamps: stamps))
                 path = CGMutablePath()
+                stamps.removeAll()
             }
             alpha = q
             empty = false
             if isStamp {
                 path.addLines(between: h.polygon)
                 path.closeSubpath()
+                if let nib = h.nib {
+                    stamps.append(nib)
+                }
             } else {
                 if !h.joinsPrevious {
                     endStrip()
@@ -786,7 +817,7 @@ enum StrokeRenderer {
         }
         endStrip()
         if !empty {
-            runs.append(StrokeRun(path: path, alpha: alpha))
+            runs.append(StrokeRun(path: path, alpha: alpha, stamps: stamps))
         }
         return runs
     }
@@ -804,8 +835,21 @@ enum StrokeRenderer {
     /// *replaces* (`.copy`) what's under it, so overlapping joints never accumulate alpha; the layer
     /// then composites once with the stroke's blend mode.
     /// `liveEraserColor`: preview pixel-erasing by painting paper colour (the live layer can't punch holes).
+    /// A raster brush (`BrushDescriptor.isRaster`) is drawn by `WaxRenderer` on the GPU, and by the paths
+    /// below only where Metal isn't available.
     static func draw(runs: [StrokeRun], clip: CGRect, brush: BrushDescriptor, color: RGBA,
                      in ctx: CGContext, liveEraserColor: CGColor? = nil) {
+        guard !runs.isEmpty else { return }
+        if brush.isRaster, liveEraserColor == nil,
+           WaxRenderer.shared?.draw(runs: runs, clip: clip, brush: brush, color: color, in: ctx) == true {
+            return
+        }
+        fillPaths(runs: runs, clip: clip, brush: brush, color: color, in: ctx, liveEraserColor: liveEraserColor)
+    }
+
+    /// `draw` with Core Graphics fills: every brush but a raster one, which only lands here without Metal.
+    static func fillPaths(runs: [StrokeRun], clip: CGRect, brush: BrushDescriptor, color: RGBA,
+                          in ctx: CGContext, liveEraserColor: CGColor? = nil) {
         guard !runs.isEmpty else { return }
         let fill: (CGFloat) -> CGColor = { alpha in
             liveEraserColor ?? fillColor(for: brush, color: color, alpha: alpha)
@@ -838,10 +882,10 @@ enum StrokeRenderer {
 
     /// The fill for a run of `brush` at `alpha`: the colour, or the grain pattern for a textured brush.
     /// A pattern needs the context's phase set (`PencilTexture.prepareContext`) so it lines up.
+    /// A wax texture falls back to the grain pattern of the same parameters.
     static func fillColor(for brush: BrushDescriptor, color: RGBA, alpha: CGFloat) -> CGColor {
-        if case let .grain(scale, contrast, seed) = brush.texture {
-            return PencilTexture.fillColor(for: color, alpha: alpha,
-                                           grain: PencilTexture.Grain(scale: scale, contrast: contrast, seed: seed))
+        if let grain = brush.texture.grain {
+            return PencilTexture.fillColor(for: color, alpha: alpha, grain: grain)
         }
         return color.cgColor(alpha: alpha)
     }

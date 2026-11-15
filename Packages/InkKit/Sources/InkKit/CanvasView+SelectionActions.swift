@@ -69,12 +69,15 @@ extension CanvasView {
     }
 
     /// Pastes the pasteboard's clip onto this page and selects the copies: at `point` (canvas space) if
-    /// given, otherwise where `PastePlacement` puts it. False if the pasteboard has no clip this version reads.
+    /// given, otherwise where `PastePlacement` puts it. Without a clip, pastes the pasteboard's pictures
+    /// instead (copied in another app). False if it has neither.
     @discardableResult
     func paste(at point: CGPoint? = nil) -> Bool {
         guard let controller,
               let data = controller.pasteboard.data(forPasteboardType: SelectionClip.pasteboardType),
-              let clip = try? SelectionClip(data: data), !clip.isEmpty else { return false }
+              let clip = try? SelectionClip(data: data), !clip.isEmpty else {
+            return pasteImages(at: point) // pictures copied in other apps
+        }
         let onPage = Set(document.strokes.map(\.id)).union(document.objects.map(\.id))
         let originalsHere = !clip.originalIDs.isDisjoint(with: onPage)
         let earlier = pasteCounts[clip.id, default: 0]
@@ -93,7 +96,7 @@ extension CanvasView {
     }
 
     @discardableResult
-    private func insertCopies(of clip: SelectionClip, offsetBy offset: CGPoint) -> Bool {
+    func insertCopies(of clip: SelectionClip, offsetBy offset: CGPoint) -> Bool {
         guard let copies = try? clip.copies(offsetBy: offset) else { return false }
         // The copies are selected with the lasso, ready to move.
         if controller?.tool != .lasso {
@@ -136,7 +139,7 @@ extension CanvasView {
         redrawFromDocument(ink: document.revision != inkRevision)
     }
 
-    private func restyleSelection(strokes: (Stroke) -> Stroke, objects: (any PageObject) -> any PageObject) {
+    func restyleSelection(strokes: (Stroke) -> Stroke, objects: (any PageObject) -> any PageObject) {
         guard !selection.isEmpty else { return }
         dropPending(selection.strokeIDs) // the full render draws them restyled
         let inkRevision = document.revision
@@ -273,6 +276,8 @@ extension CanvasView {
                 self?.arrangeSelection(.sendToBack)
             }
         ]))
+        style.append(contentsOf: imageMenuElements())
+        style.append(contentsOf: linkMenuElements())
         style.append(UIAction(title: "Take Screenshot", image: UIImage(systemName: "camera.viewfinder")) { [weak self] _ in
             self?.takeScreenshot()
         })

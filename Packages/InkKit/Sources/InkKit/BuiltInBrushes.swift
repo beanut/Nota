@@ -66,6 +66,18 @@ public extension BrushDescriptor {
                                                                breadth: 1.2, opacityLoss: 0.65, contactShift: 0.4),
                                             texture: .grain(scale: 1.5, contrast: 0.8, seed: 7), opacity: 0.95)
 
+    /// Crayon: a waxy stick, and Nota's raster brush. It's drawn on the GPU (`WaxRenderer`): the nib's
+    /// stamps make a pressure field, and wax reaches into a paper tooth fixed to the page as far as the
+    /// press does, so a light stroke catches only the peaks, the rim is ragged and paper shows through.
+    /// Pressure widens it and lays more wax; a tilted stick broadens into a wide, light stroke.
+    static let crayon = BrushDescriptor(id: builtInID(13), name: "Crayon", size: 2.5 ... 9,
+                                        pressure: ResponseCurve(amount: 1, exponent: 0.7),
+                                        pressureOpacity: ResponseCurve(amount: 0.35, exponent: 0.8),
+                                        tilt: TiltResponse(startAltitude: 60, fullAltitude: 20, length: 4,
+                                                           breadth: 1.1, opacityLoss: 0.4, contactShift: 0.3),
+                                        texture: .wax(scale: 1, contrast: 0.8, seed: 1013), spacing: 0.1,
+                                        opacity: 0.95)
+
     // MARK: Highlighters
 
     /// Round highlighter: a wide translucent nib that multiplies, so ink underneath stays readable.
@@ -92,7 +104,7 @@ public extension BrushDescriptor {
     static let pens: [BrushDescriptor] = [.pen, .fineliner, .fountainPen, .brushPen, .marker, .dashedPen,
                                           .dottedPen]
     /// The pencils, in picker order. The first is the default.
-    static let pencils: [BrushDescriptor] = [.pencil, .softPencil]
+    static let pencils: [BrushDescriptor] = [.pencil, .softPencil, .crayon]
     /// The highlighters, in picker order. The first is the default.
     static let highlighters: [BrushDescriptor] = [.highlighter, .chiselHighlighter]
 

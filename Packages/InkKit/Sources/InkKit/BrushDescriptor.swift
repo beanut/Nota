@@ -16,6 +16,10 @@ import Foundation
 /// **Render path.** A descriptor with `spacing == 0` and no bristle texture draws on the **hull path**:
 /// the nib swept continuously along the stroke, as pens always have. Otherwise it draws on the **stamp
 /// path**: separate nib stamps every `spacing` nib widths, each moved by `jitter`, for textured brushes.
+///
+/// **Raster brushes.** A `wax` texture (the crayon) is drawn by the GPU rather than filled as paths: its
+/// stamps are rasterized with Metal into a pressure field, and wax is laid on a paper tooth fixed to the page
+/// (`WaxRenderer`). Without Metal it falls back to the grain pattern, like a pencil.
 public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
     public var id: UUID
     /// Shown in the brush picker. At most `maxNameLength` characters.
@@ -189,6 +193,12 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
         /// A dry brush: each stamp is `count` (1…64) bristle dots, spread over `spread` (0.1…2) of the nib.
         /// Always drawn on the stamp path.
         case bristle(count: Int, spread: CGFloat)
+        /// Wax on paper tooth, rasterized on the GPU (a raster brush, see `WaxRenderer`): the stamps' pressure
+        /// decides how far into the tooth the wax reaches, so a light stroke catches only the peaks and the
+        /// paper shows through. `scale` 0.25…8 (1 is a 1.6-point tooth), `contrast` 0…1 (how much paper shows),
+        /// `seed` picks the tooth. Always drawn on the stamp path. An older build, which doesn't know it,
+        /// decodes it as `none` and draws the same stamps solid.
+        case wax(scale: CGFloat, contrast: CGFloat, seed: UInt32)
     }
 
     /// Random variation per stamp (stamp path only), each 0…1 except `scatter`.
@@ -271,10 +281,10 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
         if spacing > 0 || dash.isActive {
             return .stamp
         }
-        if case .bristle = texture {
-            return .stamp
+        switch texture {
+        case .bristle, .wax: return .stamp
+        case .none, .grain: return .hull
         }
-        return .hull
     }
 
     /// Distance between stamps in nib widths on the stamp path (a bristle or dashed brush with `spacing` 0
@@ -288,9 +298,18 @@ public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
         blend == .destinationOut
     }
 
-    /// Whether the fill is a pattern (grain texture) that needs the context's pattern phase set.
+    /// Whether the fill is a pattern (grain texture) that needs the context's pattern phase set. A wax
+    /// texture counts: it falls back to the grain pattern where Metal isn't available.
     var usesPattern: Bool {
-        if case .grain = texture {
+        switch texture {
+        case .grain, .wax: true
+        case .none, .bristle: false
+        }
+    }
+
+    /// Whether strokes of this brush are rasterized on the GPU (`WaxRenderer`) instead of filled as paths.
+    var isRaster: Bool {
+        if case .wax = texture {
             return true
         }
         return false
@@ -470,6 +489,9 @@ private extension BrushDescriptor.Texture {
                    seed: seed)
         case let .bristle(count, spread):
             .bristle(count: min(max(count, 1), 64), spread: clamp(spread, 0.1 ... 2, fallback: 1))
+        case let .wax(scale, contrast, seed):
+            .wax(scale: clamp(scale, 0.25 ... 8, fallback: 1), contrast: clamp(contrast, 0 ... 1, fallback: 0.8),
+                 seed: seed)
         }
     }
 }
@@ -609,7 +631,7 @@ extension BrushDescriptor.TipShape: Codable {
 
 extension BrushDescriptor.Texture: Codable {
     private enum Keys: String, CodingKey {
-        case grain, bristle
+        case grain, bristle, wax
     }
 
     private enum FieldKeys: String, CodingKey {
@@ -631,6 +653,11 @@ extension BrushDescriptor.Texture: Codable {
             self = try .grain(scale: g.decodeIfPresent(CGFloat.self, forKey: .scale) ?? 1,
                               contrast: g.decodeIfPresent(CGFloat.self, forKey: .contrast) ?? 1,
                               seed: g.decodeIfPresent(UInt32.self, forKey: .seed) ?? 42)
+        } else if c.contains(.wax) {
+            let w = try c.nestedContainer(keyedBy: FieldKeys.self, forKey: .wax)
+            self = try .wax(scale: w.decodeIfPresent(CGFloat.self, forKey: .scale) ?? 1,
+                            contrast: w.decodeIfPresent(CGFloat.self, forKey: .contrast) ?? 0.8,
+                            seed: w.decodeIfPresent(UInt32.self, forKey: .seed) ?? 0)
         } else {
             let b = try c.nestedContainer(keyedBy: FieldKeys.self, forKey: .bristle)
             self = try .bristle(count: b.decodeIfPresent(Int.self, forKey: .count) ?? 8,
@@ -654,6 +681,12 @@ extension BrushDescriptor.Texture: Codable {
             var b = c.nestedContainer(keyedBy: FieldKeys.self, forKey: .bristle)
             try b.encode(count, forKey: .count)
             try b.encode(spread, forKey: .spread)
+        case let .wax(scale, contrast, seed):
+            var c = encoder.container(keyedBy: Keys.self)
+            var w = c.nestedContainer(keyedBy: FieldKeys.self, forKey: .wax)
+            try w.encode(scale, forKey: .scale)
+            try w.encode(contrast, forKey: .contrast)
+            try w.encode(seed, forKey: .seed)
         }
     }
 }

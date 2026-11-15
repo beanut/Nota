@@ -10,8 +10,13 @@ import Foundation
 ///
 /// ```json
 /// { "formatVersion": 1, "id": "…", "sourcePageID": "…",
-///   "ink": "<base64 .ink file>", "objects": "<base64 objects file, or absent>" }
+///   "ink": "<base64 .ink file>", "objects": "<base64 objects file, or absent>",
+///   "assets": { "<asset id>": "<base64 image bytes>", … } }
 /// ```
+///
+/// `assets` carries the bytes of the pictures among the objects (absent without any), so a clip pasted
+/// into another note, after a relaunch, or kept as a sticker, brings its pictures with it. Reading one adds
+/// them to `ImageAssets.shared`.
 ///
 /// A clip from a newer format version, or one that doesn't decode, isn't pasted
 /// (`SelectionClipError`). Objects of kinds this version doesn't know are dropped: they can't be drawn or
@@ -64,16 +69,21 @@ struct SelectionClip {
         var sourcePageID: UUID
         var ink: Data
         var objects: Data?
+        var assets: [String: Data]?
     }
 
-    func encoded() throws -> Data {
+    func encoded(assets registry: ImageAssets = .shared) throws -> Data {
         let ink = InkPageFile(pageID: sourcePageID, strokes: strokes).encoded()
         let objectsData = objects.isEmpty ? nil : try PageObjectsFile(pageID: sourcePageID, objects: objects).encoded()
+        var assets: [String: Data] = [:]
+        for id in objects.imageAssetIDs {
+            assets[id] = registry.data(for: id)
+        }
         return try JSONEncoder().encode(Envelope(formatVersion: Self.formatVersion, id: id, sourcePageID: sourcePageID,
-                                                 ink: ink, objects: objectsData))
+                                                 ink: ink, objects: objectsData, assets: assets.isEmpty ? nil : assets))
     }
 
-    init(data: Data) throws {
+    init(data: Data, assets registry: ImageAssets = .shared) throws {
         let envelope: Envelope
         do {
             envelope = try JSONDecoder().decode(Envelope.self, from: data)
@@ -87,6 +97,10 @@ struct SelectionClip {
         do {
             let strokes = try InkPageFile(data: envelope.ink).strokes
             let objects = try envelope.objects.map { try PageObjectsFile(data: $0).objects } ?? []
+            // Only bytes that are what they claim to be.
+            for (id, bytes) in envelope.assets ?? [:] where ImageAssets.id(for: bytes) == id {
+                registry.add(bytes)
+            }
             self.init(id: envelope.id, sourcePageID: envelope.sourcePageID, strokes: strokes, objects: objects)
         } catch {
             throw SelectionClipError.corrupt(String(describing: error))

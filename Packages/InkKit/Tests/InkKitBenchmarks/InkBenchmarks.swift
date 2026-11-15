@@ -188,6 +188,121 @@ final class InkBenchmarks: XCTestCase {
         BenchResults.record("live_event.stamp.p99_ms", stats.p99, unit: "ms")
     }
 
+    // MARK: Raster brush
+
+    /// `testLiveStrokeAppend` with every recorded stroke drawn with the crayon (NOT-93), a raster brush. The
+    /// live layer only encodes GPU work for each event and doesn't wait for it (`LiveInkView.requestWax`),
+    /// so after each event the main queue is drained, as the app's run loop would: the event's time
+    /// includes copying back whatever wax the GPU has finished, but not waiting for it. How long the GPU
+    /// takes to send wax back is recorded on its own (`live_event.crayon.wax_latency_*`).
+    func testCrayonLiveStroke() throws {
+        let wax = try XCTUnwrap(WaxRenderer.shared, "no Metal device")
+        let transform = Bench.fittedTransform(for: corpus.pageSize)
+        let replayer = InputReplayer(viewSize: Bench.screen, transform: transform, displayScale: Bench.displayScale)
+        let recordings = corpus.recordedStrokes.map { recorded in
+            var recorded = recorded
+            recorded.brush = Self.crayon(width: CGFloat(recorded.style.width))
+            return recorded
+        }
+        var events: [Double] = []
+        var latencies: [Double] = []
+        wax.latencyObserver = { latencies.append($0) }
+        defer { wax.latencyObserver = nil }
+        var iteration = 0
+        measure(metrics: [XCTClockMetric()], options: Bench.measureOptions) {
+            defer { iteration += 1 }
+            for recorded in recordings {
+                var last = Bench.now()
+                replayer.replay(recorded, transform: transform) { _ in
+                    RunLoop.main.run(until: Date())
+                    let now = Bench.now()
+                    if iteration > 0 {
+                        events.append(Double(now - last) / 1_000_000)
+                    }
+                    last = now
+                }
+                Self.drain(replayer.liveView)
+            }
+        }
+        XCTAssertFalse(latencies.isEmpty, "no wax came back from the GPU during the replay")
+        let stats = Stats(events), latency = Stats(latencies)
+        BenchResults.record("live_event.crayon.p50_ms", stats.median, unit: "ms")
+        BenchResults.record("live_event.crayon.p95_ms", stats.p95, unit: "ms", budget: Self.liveEventBudgetMs)
+        BenchResults.record("live_event.crayon.p99_ms", stats.p99, unit: "ms")
+        BenchResults.record("live_event.crayon.wax_latency_p50_ms", latency.median, unit: "ms")
+        BenchResults.record("live_event.crayon.wax_latency_p95_ms", latency.p95, unit: "ms")
+        check(stats.p95, under: Self.liveEventBudgetMs, "Crayon live-stroke work per touch event (p95)")
+    }
+
+    /// The longest recorded stroke drawn with the crayon: its tiles keep their settled pressure on the GPU,
+    /// so each event's work must not grow with the stroke's length.
+    func testCrayonLiveStrokeLongStroke() throws {
+        var recorded = try XCTUnwrap(corpus.longestStroke)
+        recorded.brush = Self.crayon(width: CGFloat(recorded.style.width))
+        let transform = Bench.fittedTransform(for: corpus.pageSize)
+        let replayer = InputReplayer(viewSize: Bench.screen, transform: transform, displayScale: Bench.displayScale)
+        let count = recorded.events.count
+        var first: [Double] = []
+        var lastQuarter: [Double] = []
+        var iteration = 0
+        measure(metrics: [XCTClockMetric()], options: Bench.measureOptions) {
+            defer { iteration += 1 }
+            var last = Bench.now()
+            replayer.replay(recorded, transform: transform) { n in
+                RunLoop.main.run(until: Date())
+                let now = Bench.now()
+                let ms = Double(now - last) / 1_000_000
+                last = now
+                guard iteration > 0 else { return }
+                if n < count / 4 {
+                    first.append(ms)
+                } else if n >= count * 3 / 4 {
+                    lastQuarter.append(ms)
+                }
+            }
+            Self.drain(replayer.liveView)
+        }
+        let early = Stats(first), late = Stats(lastQuarter)
+        BenchResults.record("live_event.crayon.long_stroke.first_quarter_p95_ms", early.p95, unit: "ms")
+        BenchResults.record("live_event.crayon.long_stroke.last_quarter_p95_ms", late.p95, unit: "ms",
+                            budget: Self.liveEventBudgetMs)
+        check(late.p95, under: Self.liveEventBudgetMs, "Crayon live-stroke work late in a long stroke (p95)")
+    }
+
+    /// Lets the GPU work of the last stroke finish (untimed), so it doesn't spill into the next one.
+    private static func drain(_ view: LiveInkView) {
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while view.rasterWorkPending, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
+        }
+    }
+
+    /// The crayon at a recorded stroke's width.
+    static func crayon(width: CGFloat) -> BrushDescriptor {
+        BrushDescriptor.crayon.personalized(width: width, minimumWidthRatio: BrushDescriptor.neutralMinimumWidthRatio,
+                                            pressureExponent: BrushDescriptor.neutralPressureExponent, tilt: true)
+    }
+
+    /// Redrawing a page of 500 crayon strokes into a screen-sized committed bitmap (an undo or the end of
+    /// a zoom), one GPU pass per stroke and band. No budget: page open restores the `CommittedRaster`.
+    func testCrayonPageRedraw() throws {
+        let page = corpus.distinctPage(strokes: 500).map { stroke in
+            var stroke = stroke
+            stroke.brush = Self.crayon(width: stroke.brush.maxWidth)
+            return stroke
+        }
+        let cache = Dictionary(uniqueKeysWithValues: page.map { ($0.id, StrokeRenderer.geometry(for: $0)) })
+        let transform = Bench.fittedTransform(for: corpus.pageSize)
+        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color,
+                                                      geometry: cache[$0.id], stroke: nil) }
+        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
+        let times = timed(iterations: 5) {
+            CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
+            _ = ctx.makeImage()
+        }
+        BenchResults.record("full_redraw.crayon_500_ms", Stats(times).median, unit: "ms")
+    }
+
     // MARK: Page open
 
     /// Opening a page the canvas has shown before: a fresh screen-sized committed bitmap and the page's

@@ -8,7 +8,8 @@ import InkKit
 /// carry their own format version (`PageObjectsFile`), so adding them didn't change the manifest's format.
 ///
 /// Format 3 added `title` and page files; format 2 replaced each page's `paper` name with a full
-/// `template`. Formats 1 and 2 are still read.
+/// `template`. Formats 1 and 2 are still read. `outline` (bookmarks and outline entries, NOT-31) is an optional
+/// key that older format-3 readers ignore, so it didn't need a new format version.
 ///
 /// The manifest is the source of truth for a note's page count and modification date; the SwiftData
 /// `Note` mirrors them for the library. The title's source of truth is the `Note`: it's copied here on
@@ -59,6 +60,9 @@ public struct NoteManifest: Codable, Equatable, Sendable {
     /// The size new pages get when there's no neighbouring page to copy, and the size "Use … for All
     /// Pages" last applied.
     public var defaultPageSize: PageSize
+    /// Bookmarked pages and the note's outline (`InkNotebook.outline`). Nil, and absent from the file, when
+    /// there are none.
+    public var outline: NoteOutline?
     public var createdAt: Date
     public var modifiedAt: Date
 
@@ -92,14 +96,16 @@ public struct NoteManifest: Codable, Equatable, Sendable {
         var copy = self
         copy.title = title
         copy.pages = pages.map { Page(id: UUID(), size: $0.size, template: $0.template) }
+        let newIDs = Dictionary(zip(pages.map(\.id), copy.pages.map(\.id)), uniquingKeysWith: { first, _ in first })
+        copy.outline = outline?.remapped(newIDs).nonEmpty
         copy.createdAt = date
         copy.modifiedAt = date
         return copy
     }
 
-    /// True when the two manifests describe the same pages, ignoring timestamps.
+    /// True when the two manifests describe the same pages and outline, ignoring timestamps.
     public func hasSameLayout(as other: NoteManifest) -> Bool {
-        pages == other.pages && defaultPageSize == other.defaultPageSize
+        pages == other.pages && defaultPageSize == other.defaultPageSize && (outline ?? NoteOutline()) == (other.outline ?? NoteOutline())
     }
 
     // MARK: Reading and writing
@@ -136,5 +142,12 @@ public struct NoteManifest: Codable, Equatable, Sendable {
     /// Writes the manifest to `url` atomically, creating the package directory if needed.
     public func write(to url: URL, files: PackageFiles = PackageFiles()) throws {
         try files.write(encoded(), to: url)
+    }
+}
+
+extension NoteOutline {
+    /// The outline, or nil when it has nothing in it (so the manifest leaves it out).
+    var nonEmpty: NoteOutline? {
+        isEmpty ? nil : self
     }
 }

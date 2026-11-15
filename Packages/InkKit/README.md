@@ -25,11 +25,12 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
 | `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes; several pages at once (move, duplicate, remove, rotate, append) for the page sidebar; adding a page when writing reaches the end |
 | `ContinuousPageLayout.swift` | `PageLayoutMode` (paged or continuous, saved in `UserDefaults`) and the continuous column: page frames, the pages in view, the current page |
-| `ContinuousCanvasView.swift` | Continuous vertical scrolling: a scroll view over the column, with an embedded canvas for each page in view |
+| `ContinuousCanvasView.swift` | Continuous vertical scrolling: a scroll view over the column, with an embedded canvas for each page in view, and strokes carried across page boundaries |
+| `PageSeam.swift` | Writing across a page boundary: how far past its page each page takes part in a stroke (its reach, from the brush's taper and nib), and which pieces are kept |
 | `CanvasView+Embedded.swift` | A canvas as one page among several: placed by the host, transparent around its page, taking touches only on it |
 | `PageSidebar.swift` | The page sidebar: thumbnails (rendered in the background, cached), jump, reorder, select, duplicate, rotate, delete, copy or move to another note (`PageDestination`, `PageSender`) |
 | `LassoOverlayView.swift` | Draws the lasso path and the selection outline over the canvas |
-| `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
+| `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects, each command optionally in a gesture's group (`editGroup`, for strokes across pages) (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
 | `TestingSupport.swift` | `@_spi(Testing)` hooks for other packages' tests to put ink on a page (`drawTestStroke(through:)`, `undoForTesting()`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
 | `PageTemplate.swift` | `PageTemplate` (pattern, spacing, margins, paper colour, custom background), the built-in presets, `PaperColor` / `PaperPalette` |
@@ -63,6 +64,8 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `EyedropperOverlay.swift` / `CanvasView+Eyedropper.swift` | The eyedropper's overlay, loupe and banner, and sampling one device pixel of the canvas as drawn |
 | `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
+| `WaxRenderer.swift` | The raster brush (the crayon) on the GPU: nib stamps max-blended into a pressure field, then wax laid on a paper tooth fixed to the page, drawn into any context `StrokeRenderer.draw` is given |
+| `WaxShaders.swift` | `WaxRenderer`'s Metal shaders, as source compiled at run time (in the background when a canvas is made), so the build doesn't need the Metal toolchain |
 | `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
 | `Lasso.swift` | Freeform and rectangle lasso regions and hit-testing |
 | `PageObject.swift` | `PageObject` (frame, transform, z-order, drawing), `PageObjectPlacement` (the shared JSON keys), `PlaceholderObject` (the test object), objects of unknown kinds |
@@ -72,6 +75,12 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `TextObject.swift` | `TextObject` (a text box: rewraps rather than stretches when resized, ticks checkboxes), `TextLayout` (TextKit 1 layout and list markers shared by drawing and the editor), page text for search |
 | `TextBoxEditor.swift` / `CanvasView+Text.swift` | Editing a text box in place (`InkTextView`, formatting, Return and Tab in lists) and the text tool on the canvas (tap or drag to make a box, tap to edit, tap a checkbox to tick it) |
 | `TextFormatBar.swift` | The format bar shown while a box is edited, and the text tool's options |
+| `ImageAssets.swift` | `ImageAssets`: pictures' bytes by content hash (in memory until a host persists them, then read from its files), downsampled and cached bitmaps decoded in the background; `ImageDrawing` (per-thread draw options) |
+| `ImageObject.swift` | `ImageObject`: a picture with a non-destructive rectangular or freehand crop and opacity, its drawing and hit-testing, lenient JSON; the pictures a page uses |
+| `ImageCropView.swift` | Cropping a picture on the canvas (rectangle grips or a freehand outline) and its geometry (`ImageCropGeometry`) |
+| `CanvasView+Images.swift` | Inserting pictures (Photos, camera, Files, paste, drop), their selection-menu items (Crop, Opacity, Save as Sticker), cropping, placing stickers |
+| `InsertMenu.swift` | The Pen Case's Insert menu, the camera, the sticker picker and the crop bar |
+| `StickerStore.swift` | `Sticker` and `StickerStore`: the app-wide sticker collection (`.shared` in Application Support) |
 | `CanvasView+Scribble.swift` | Scratch-out and circle-to-select |
 | `CanvasView+Shapes.swift` | The shape tool, draw-and-hold to snap (and sizing the snapped shape before lifting), dragging a selected shape's handles, restyling selected shapes |
 | `PageObjectsFile.swift` | `PageObjectsFile`, a page's objects as `pages/<page id>.json`: format version, reading, writing |
@@ -84,7 +93,17 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes built in parallel, culling, drawing in parallel bands), shared by the canvas and the benchmarks |
 | `CommittedRaster.swift` | A page's committed layer kept compressed with the page, so reopening it restores the pixels instead of re-rendering |
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
-| `PageRenderer.swift` | Renders a page snapshot (template + objects + ink) to an image off the main actor (thumbnails), or pages to a PDF |
+| `PageRenderer.swift` | Renders a page snapshot (template + objects + ink + tape) to an image off the main actor (thumbnails), or pages to a PDF |
+| `TapeObject.swift` / `CanvasView+Tape.swift` | `TapeObject` (a strip drawn over the ink, revealed or hidden, plain / striped / grid, lenient JSON), revealing and hiding tape on a page; the tape tool and tap-to-toggle on the canvas |
+| `LinkObject.swift` / `CanvasView+Links.swift` | `LinkTarget` (a web address, a page of this note, another note or one of its pages) and `LinkObject` (a link over a selection, kept as read when its target is from a newer app); following a link with a tap and the selection menu's Add / Edit / Open / Remove Link |
+| `LinkSheet.swift` | `NoteLinks` and `LinkBack` (what the host says about other notes, and Back to the note a link came from), the link sheet and the floating Back button |
+| `NoteOutline.swift` / `OutlinePanel.swift` | `NoteOutline` (bookmarks and outline entries, the user's and those from a PDF's outline), the notebook's bookmark and outline edits, `LinkHistory` for Back; the page sidebar's Outline tab |
+| `CanvasView+Tools.swift` | Routes the touches of the tools that draw no ink (text, tape, laser) to each tool |
+| `Ruler.swift` | `Ruler` (the on-screen ruler or protractor: body, edges, angle), `RulerGuide` (an edge carried into page space, and projecting points onto it), `RulerMeasurement` (length in cm, angle swept) |
+| `RulerView.swift` / `CanvasView+Ruler.swift` | Showing, moving and turning the ruler, handing Pencil touches on it to the canvas, the readout; snapping strokes to it in the input path |
+| `LaserTrail.swift` / `LaserView.swift` / `CanvasView+Laser.swift` | The laser pointer: its fading trail or dot (a value), the overlay view that draws it, and the laser tool on the canvas |
+| `InkPresentation.swift` | Presentation mode: `InkPresentation` (the page presented and its laser), `PresentationMirror` / `PageMirrorView` (the external display's chrome-free, fitted page) and `PageMirrorLayout` |
+| `PresentingTools.swift` | The tape and laser tool options, the Pen Case's ruler button and the presenting badge |
 | `Stroke.swift` | `Stroke`, `StrokePoint`, tool enums, `RGBA` |
 | `InkFile.swift` | `InkPageFile`, the `.ink` page format: encoder, decoder and `InkFileError` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit: each tool's brush, colour and width, quick sizes and colours, saved pens, the brush editor and the eyedropper |
@@ -118,7 +137,7 @@ let brush = try BrushDescriptor(json: json)          // lenient and clamped
 | `velocity` | amount 0…1, exponent 0.1…5 | Thinning with speed (full at 1500 pt/s) |
 | `taper` | start, end 0…500 pt; minimum scale 0…1 | Narrow ends. The end taper is applied when the Pencil lifts |
 | `smoothing` | 0…0.95 | Stabiliser: each sample pulled toward the stroke so far |
-| `texture` | `none`, `grain(scale 0.25…8, contrast 0…1, seed)`, `bristle(count 1…64, spread 0.1…2)` | Procedural, never a bitmap |
+| `texture` | `none`, `grain(scale 0.25…8, contrast 0…1, seed)`, `bristle(count 1…64, spread 0.1…2)`, `wax(scale 0.25…8, contrast 0…1, seed)` | Procedural, never a bitmap. `wax` is a raster brush drawn with Metal (see Raster brushes) |
 | `spacing` | 0, or 0.05…4 nib widths | 0 draws on the hull path; more draws stamps |
 | `dash` | on 0.05…50, off 0…50 full-pressure widths | Dashes by arc length from the stroke's start; off 0 is solid. Draws on the stamp path |
 | `jitter` | size, angle, opacity 0…1; scatter 0…2 nib widths; seed | Per-stamp variation (stamp path) |
@@ -135,7 +154,7 @@ highlighter and pixel eraser kept their ids (and their looks).
 | Tool | Brushes |
 | --- | --- |
 | Pen (`pens`) | Ballpoint (`.pen`), Fineliner, Fountain Pen (angled stub nib, soft taper, ink pooling), Brush Pen (wide pressure range, taper, thins when fast), Marker (chisel), Dashed, Dotted |
-| Pencil (`pencils`) | HB Pencil (`.pencil`), Soft Pencil (coarser grain, pressure darkens, broad tilt shading) |
+| Pencil (`pencils`) | HB Pencil (`.pencil`), Soft Pencil (coarser grain, pressure darkens, broad tilt shading), Crayon (`.crayon`: a raster brush; waxy, ragged, paper showing through where the press is light, wide tilt edge) |
 | Highlighter (`highlighters`) | Highlighter (round), Chisel Highlighter |
 
 A brush's `size.upperBound` is its default width, and each brush remembers the last width used with it.
@@ -159,6 +178,37 @@ with Pencil (NOT-12).
   bristle dots by a bristle texture. A dash drops the stamps in its gaps, by the arc length the live stroke
   already keeps for the taper. Segments never depend on each other, so live and committed strokes
   match and nothing grows with stroke length.
+- **Raster brushes.** A `wax` texture (the crayon) isn't filled as paths: `StrokeRenderer.draw` hands it to
+  `WaxRenderer`, which draws it with Metal into whatever context it was given, so the live layer, the
+  committed bitmap (band by band), page images, thumbnails and exports all get the same wax.
+  - Its geometry is the stamp path's, and each stamp keeps its nib (`Hull.tip`, carried into
+    `StrokeRun.stamps`), so erasing, splitting, the lasso and hit testing treat it like any stroke.
+  - For the part of the stroke inside the context's clip, in the context's own pixels, the stamps are drawn
+    as instanced ellipses into a half-float pressure field with **max** blending: each pixel keeps the
+    strongest press over it, whatever order or batches the stamps come in. A stamp presses evenly over most
+    of its patch and lightly at the rim.
+  - A compute pass then lays wax: a paper tooth (three octaves of value noise, 1.6 pt cells at scale 1) is
+    computed from the **page position** of each pixel, and wax reaches as far into it as the press does.
+    So a light stroke or the rim catches only the peaks, and a firm one fills all but the deepest pits.
+    Where a tooth cell is under a couple of pixels (zoomed out, thumbnails) it fades to the share of paper
+    covered instead of aliasing.
+  - Because each pixel depends only on the stamps over it and its page position, drawing a page whole or in
+    pieces gives the same pixels (a test checks it), so the grain can't shimmer as a stroke grows or move
+    when it's committed or reopened.
+  - **Live.** Wax at a chunk joint depends on both chunks, so a raster stroke can't bake pixels chunk by
+    chunk. It bakes **pressure** instead: each tile keeps the settled chunks' field on the GPU
+    (`WaxRenderer.WaxField`), and a redraw adds only the hot stamps over it, so it never grows with the
+    stroke's length, and max blending makes the result exactly the committed field (a test compares them).
+  - The live layer **doesn't wait for the GPU**: a touch event only encodes and commits the tile's job
+    (`LiveInkView.requestWax`). The pixels come back on the main queue into the tile's baked bitmap, which
+    the tile draws like any baked ink. Each tile has one job out at most; dirt asked for meanwhile waits and
+    goes next. So the crayon's wax shows when the GPU is done (0.5 ms p50, 1.7 ms p95 on the simulator),
+    up to about a frame after the other ink would. A wait per tile cost 0.3–1.5 ms on the simulator, several
+    times an event, which is why it's asynchronous. The committed layer and page images still draw
+    synchronously.
+  - **Fallback.** Without a Metal device, or for a region over 8192² pixels, the stroke's paths are filled
+    with the grain pattern of the same scale, contrast and seed, like a pencil. A build that doesn't know
+    `wax` decodes it as `none` (as it does any unknown texture) and draws the same stamps solid.
 - **Built-in tools look the same.** `Tests/InkKitTests/Snapshots/` holds golden images rendered by the
   engine before descriptors; the bundled descriptors match them pixel for pixel. Re-record with
   `TEST_RUNNER_INK_SNAPSHOT_RECORD=1` only for an intended change. Each brush of the built-in set has a
@@ -276,11 +326,12 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 
 ### Page objects
 
-A page holds objects as well as ink (Architecture §5): shapes, text boxes, images and tape as they land.
+A page holds objects as well as ink (Architecture §5): shapes, text boxes, images, tape and links.
 Every object is a `PageObject`: an `id`, a `frame` in its own space, a `transform` (`CGAffineTransform`)
 that puts the frame on the page, and a `zIndex`. Each type only draws itself and encodes its own fields; the
-lasso, the handles, undo and storage work on that placement. There are three types: `ShapeObject` (see
-Shapes below), `TextObject` (see Text boxes below) and `PlaceholderObject` (More › Add Test Object), a
+lasso, the handles, undo and storage work on that placement. There are six types: `ShapeObject` (see
+Shapes below), `TextObject` (see Text boxes below), `ImageObject` (see Pictures below), `TapeObject` (see Tape
+below), `LinkObject` (see Links below) and `PlaceholderObject` (More › Add Test Object), a
 rectangle with a cross that exercises the layer. A type that needs to move differently overrides
 `applying(_:)` (a text box keeps its letters' size).
 
@@ -292,7 +343,9 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
 
 - **Layers**, bottom to top: background (paper and template), objects in `zIndex` order (`ObjectLayerView`,
   vectors at the current transform; hidden on a page without objects), ink (committed bitmap and live layer),
-  overlay (lasso and selection box). Objects are never in the committed ink bitmap, so adding or moving one
+  tape (`tapeLayer`, another `ObjectLayerView`: objects whose kind `drawsOverInk`), the laser (`LaserView`),
+  overlay (lasso and selection box), the ruler. Thumbnails, screenshots and PDFs draw tape after the ink too
+  (`PageRenderer.drawOverlays`). Objects are never in the committed ink bitmap, so adding or moving one
   doesn't re-render ink, and the pixel eraser never erases one. The live layer's multiply backdrop draws the
   objects too, so a highlighter previews over an object as it will commit.
 - **Revisions.** `objectsRevision` counts object changes, separately from `revision` (the ink's), so an
@@ -310,8 +363,8 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
   twice as thick. A rigid move or rotation leaves the brush's size untouched.
 - **Selection** (`SelectionGeometry`, shared by the lasso, tap-to-select and circle-to-select): a loop or
   rectangle selects strokes whose centerline touches it and objects whose outline touches it or that hold it;
-  a tap (under 8 view points of movement) selects the topmost thing under it, ink first (it's drawn over
-  objects), newest first, then objects from the top down. The box is axis-aligned around the selection, or a
+  a tap (under 8 view points of movement) selects the topmost thing under it: tape first (it covers the ink),
+  then ink (it's drawn over other objects), newest first, then objects from the top down. The box is axis-aligned around the selection, or a
   single object's own frame, and follows each transform, so it rotates with what it holds. Dragging inside
   moves, a corner knob resizes in the box's own axes about the opposite corner (never flipping, at least
   8 view points a side), the knob above rotates about the centre. Pixel-eraser strokes and objects of unknown
@@ -322,11 +375,12 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
 
 When a selection is made (or a drag of it ends), its menu appears above it: Cut, Copy, Paste, Duplicate,
 Delete; Color (the pen's quick colours, or the highlighter's for highlighter ink alone), Thickness (Thicker /
-Thinner, ×1.25 a step, the menu staying open), Arrange (Bring to Front / Send to Back), Take Screenshot;
-then the app's `SelectionAction`s. A tap on the selection shows it again. Each action is one undo step.
+Thinner, ×1.25 a step, the menu staying open), Arrange (Bring to Front / Send to Back), Crop and Opacity (for
+pictures), Save as Sticker, Take Screenshot; then the app's `SelectionAction`s. A tap on the selection shows it again. Each action is one undo step.
 
 - **Clipboard.** Copy puts a `SelectionClip` on the pasteboard as `app.nota.inkkit.selection` (JSON: the ink
-  as an `.ink` file and the objects as an objects file, base64) next to a PNG of the selection for other apps,
+  as an `.ink` file and the objects as an objects file, base64, plus the bytes of any pictures, so they
+  survive a relaunch or a trip to another note) next to a PNG of the selection for other apps,
   so a selection reaches other pages, notes and windows. Paste makes copies with new ids (objects go through
   the objects file, so every kind copies the same way) and selects them. `PastePlacement`: a tap on nothing,
   with nothing selected, offers Paste there, centred on the tap; otherwise the clip lands in its own place
@@ -440,6 +494,131 @@ default, so text is never lost.
 - **Search.** `CanvasDocument.text` and `PageObjectsFile.text` are the plain text of a page's boxes; NotaCore
   copies them onto `Note.textContent`, which the library's search matches.
 
+#### Pictures
+
+`ImageObject` (file kind `"image"`) names its picture by `asset`, the SHA-256 of its bytes, with the picture's
+oriented `pixelSize`; its own fields are also `crop` (unit image space, absent for the whole picture), `mask`
+(a freehand outline in unit image space) and `opacity` (absent for 1, at least 5%).
+
+- **Bytes.** `ImageAssets.shared` holds pictures by id: in memory from insertion until a host writes them
+  somewhere and calls `didPersist`, then read from that file (`register(fileURL:for:)`). InkKit never knows
+  where; Nota's `DocumentStore` keeps them in each note package's `assets/`. Because ids are content hashes,
+  a picture placed twice, or pasted into another note, is stored once per note. Clips (copy, paste, stickers)
+  carry the bytes of their pictures.
+- **Display.** Pictures are drawn by the object layer, never on the ink path. A picture is decoded with ImageIO
+  as a thumbnail (orientation applied) at the next power of two above the size it's shown at (from 256 px),
+  and cached (`NSCache`, 192 MB). The canvas never waits for a decode (`ImageDrawing.defersDecoding`): it
+  draws the nearest size already decoded, or a faint stand-in, and redraws when the right size arrives.
+  Thumbnails, copies and screenshots wait for it; PDFs embed pictures at 3 px per point.
+- **Inserting.** The Pen Case's Insert menu (photo icon): Photos (`PhotosPicker`, up to 10, original bytes so
+  HEIC stays HEIC), Take Photo (`UIImagePickerController`; disabled without a camera, as in the simulator),
+  Files (`fileImporter`), Paste Image, and Stickers. Pictures also paste with ⌘V or the selection menu's Paste
+  when the pasteboard holds no lasso clip, and drop onto the page (`UIDropInteraction`; drags from inside the
+  app are ignored). A new picture is a pixel per half point, shrunk to 60% of the visible page at most,
+  centred in view (or where it was dropped), selected with the lasso.
+- **Cropping.** A selected picture's menu: Crop, Freehand Crop and Reset Crop. Cropping hides the picture from
+  the object layer and shows `ImageCropView` over the canvas: the whole picture dimmed, the part kept at full
+  strength, with grips at the corners and edges (rectangle) or an outline drawn around what to keep
+  (freehand). The crop bar switches mode, resets, cancels or finishes; Done is one undoable edit
+  (`replaceObjects`). Cropping changes the frame, never where the picture is, and can be changed again later.
+  A freehand-cropped picture is only hit inside its outline (`PageObject.contains(_:tolerance:)`).
+- **Resize, rotate, layer, opacity.** The object layer's transforms and Arrange; Opacity offers 100, 75, 50
+  and 25%. A corner resizes a selection holding a picture evenly in both directions (by whichever the drag moved
+  further, `SelectionGeometry.transform(…, keepsAspectRatio:)`), so photos never stretch; shapes, ink and text still
+  resize freely. While cropping, drags belong to the crop: the page doesn't pan, zoom, swipe or go back.
+- **Stickers.** Save as Sticker keeps the selection (ink, shapes, text and pictures) as a `SelectionClip` plus
+  a PNG preview in `StickerStore.shared` (`Application Support/InkKit/Stickers`: `Stickers.json` and each
+  sticker's `.clip` and `.png`), so ink stays vector and objects stay editable when placed. The Insert menu's
+  Stickers… shows them; a tap places a copy in the middle of the view, selected; touch and hold to rename or
+  delete.
+
+#### Tape
+
+`TapeObject` (file kind `"tape"`) is a strip: its `frame` is `length × width` centred on its own origin, and its
+`transform` turns and places it, so drawn at an angle it's a rotated rectangle. Its own fields are `color`,
+`pattern` (`plain`, `striped`, `grid`; absent for plain) and `revealed` (absent while hidden). Reading is lenient
+(a bad colour is the default sand, an unknown pattern plain).
+
+- **Over the ink.** `PageObject.drawsOverInk` is true only for tape, so the canvas splits the page's objects
+  (`splitByInkLayer`) between `objectLayer` (under the ink) and `tapeLayer` (over it). Hidden tape is opaque, so
+  it hides ink, text and pictures alike; revealed, it's a 16% tint with a dashed edge.
+- **The tool.** A drag draws a strip from the touch-down point to the touch, snapping to 0°, 45° and 90° like a
+  line, `width` page points wide (the tool's width, 8–60), in the Pen Case's tape colour and the options'
+  pattern. A tape tool drag shorter than 8 view points is a tap.
+- **Toggling.** A tap on tape with any tool but the lasso (which selects it) and the eraser reveals or hides it
+  (`CanvasDocument.toggleTape(id:)`): a pen or highlighter tap (a stroke under 8 view points and 0.5 s) is turned
+  into the toggle in `endStroke` instead of leaving a dot; the tape, text and laser tools toggle on their own taps;
+  a finger tap does it when fingers don't draw (`TapeTapGestureRecognizer`). `setAllTape(revealed:)` reveals or
+  hides the whole page. Each is one `replaceObjects` command, so it's undoable and saved with the note.
+
+#### Links
+
+`LinkObject` (file kind `"link"`) is a rectangle that goes somewhere when it's tapped. Its fields are `target`
+(`LinkTarget`: `{ "url": … }`, `{ "page": <page id> }`, or `{ "note": <note id>, "page": <page id>? }`), an optional
+`title` (what menus and VoiceOver call it, e.g. "Page 3") and `color` (`InkTheme.link`). A target this version can't
+read is kept as read and written back; such a link does nothing.
+
+- **Adding.** The selection menu's Add Link… (any selection that isn't a link) asks the editor for a target
+  (`CanvasController.linkRequest`), and `CanvasDocument.addLink(to:covering:)` puts a link over the selection's
+  bounds, padded 4 pt, on top of the page's objects. A link is an object of its own, not part of what it covers, so
+  ink, shapes, text boxes and pictures are all linked the same way, and the lasso picks a link up with what's under
+  it. With one link selected the menu has Open Link, Edit Link… (`setLinkTarget`) and Remove Link (which leaves
+  what it covered). Each is one undoable edit.
+- **Drawing.** Under the ink like other objects: an 8% tint of its colour with a dotted underline.
+- **Following.** A pen, pencil, highlighter, shape tool or laser tap on a link follows it (`Tool.followsLinks`);
+  tape over a link is toggled first (`tapObject(at:tool:)`). The lasso selects links, the eraser ignores them, and
+  the text and tape tools keep their own taps. The editor follows `.url` with `openURL`, turns to a `.page` (pushing
+  the page it was on onto `LinkHistory`) and hands `.note` to the host's `NoteLinks.open`. The Back button returns
+  along `LinkHistory`, skipping deleted pages, and when that's empty, to `NoteLinks.back` (the note a link came
+  from).
+
+#### Bookmarks and outline
+
+`InkNotebook.outline` (`NoteOutline`) holds bookmarked page ids and outline entries (title, page id, `level`, and
+`source`: the user's own or `.pdf`). The page bar's bookmark button and a page's context menu in the sidebar
+bookmark the page; bookmarked thumbnails show a bookmark. The sidebar's Outline tab lists the bookmarks in page
+order, the user's entries (Add This Page, Rename…, Delete, drag to reorder) and the entries from a PDF, indented
+by level. `NoteOutline.entries(fromOutlineOf:pageIDs:)` turns a `PDFDocument`'s outline into entries for the
+pages showing its pages, and `InkNotebook.importPDFOutline` replaces the PDF entries with them. Entries and
+bookmarks refer to pages by id: a deleted page's drop out of the panel, and `pruned(keeping:)` drops them when the
+host saves. The host stores the outline (Nota keeps it in the note's manifest).
+
+### Ruler
+
+The Pen Case's ruler button shows `RulerView` over the canvas (over the continuous view in vertical scrolling,
+over the page's canvas in paged mode). The ruler (`Ruler`) lives in that view's space, not the page's: it stays
+put as the page pans and zooms, and isn't saved (the controller keeps its place while the editor is open).
+
+- **Touches.** Only the ruler's body takes touches (`point(inside:with:)`). Fingers on it move it (one) or turn it
+  (two, snapping to multiples of 15° within 1.5°), and the canvas's pan, pinch and taps won't begin there. A
+  Pencil touch on it is handed to the canvas under it, so the Pencil writes along the ruler as on paper.
+- **Snapping.** When a live stroke begins (pen, pencil or highlighter; not the eraser, not in the zoom window),
+  `Ruler.guide(at:)` picks the edge it starts by: within 28 view points outside either long edge, or anywhere on
+  the body (the nearer edge). The protractor guides along its arc or its baseline. The edge is mapped into page
+  space once (`RulerGuide.mapped`), and `makePoint` projects every sample onto it, predicted ones included: one
+  dot product and a multiply-add per point, so the live-ink path does the same work with the ruler as without,
+  and nothing else in it changes. Hold-to-snap shapes is off for these strokes.
+- **Measuring.** Once per touch event, `RulerMeasurement` advances with the stroke's newest point: the length
+  along the edge in page centimetres (page points are 1/72 in, so 1 cm = 28.35 pt), or the angle swept round
+  the protractor, shown in a capsule above the Pencil. The ruler's ticks are page millimetres and centimetres at
+  the current zoom, and it shows its angle (0–179° for the ruler, 0–359° for the protractor).
+
+### Laser pointer and presenting
+
+- **Laser.** The laser tool draws nothing on the page. `LaserTrail` keeps its points in page space with their
+  times: in Trail mode each point fades over 1 s (the point under the touch stays while it's down); in Dot mode
+  only the latest point is kept, and it fades 0.3 s after the lift. `LaserView`, an overlay over the tape layer,
+  draws it (a glow, a line and a white core, in a dozen opacity steps so a long trail is a dozen paths) and runs a
+  display link only while something shows. A laser tap (under 8 view points) toggles tape or follows a link like any tool.
+- **Presentation mode.** `InkPresentation.shared` holds the page being presented: each editor presents its
+  current page when it appears and when the page changes, and stops when it goes away. The canvas hands it the
+  laser trail on every touch event. `PresentationMirror` (SwiftUI, over `PageMirrorView`) shows that page fitted
+  to the display with a 24 pt margin (`PageMirrorLayout`), rendered off the main thread with `PageRenderer` each
+  time the page changes (one render at a time, at most 4096 px across), with its own `LaserView` mapped through
+  the fitted transform. The host shows it on an external display: Nota's app delegate gives the
+  `windowExternalDisplayNonInteractive` scene role a scene delegate whose window hosts `PresentationMirror` and
+  sets `isMirroring`, which shows the editor's "Presenting this page" badge.
+
 ### Rendering pipeline
 
 1. **Committed layer.** All finished strokes live in one screen-resolution bitmap. A finished stroke is drawn onto it incrementally. A full re-render happens only on undo, erase, clear, or the end of a zoom/pan.
@@ -450,6 +629,7 @@ default, so text is never lost.
    - Only the **hot** part (the newest chunk or two and the provisional tail) is re-filled each frame, and only in the tiles under the new ink, clipped to the invalidated rect.
    - Baking uses `.copy`, the same "later run replaces earlier" rule as the committed path, so live and committed pixels match.
    - A late estimate that changes a baked chunk re-bakes just the tiles it touches. Tiles are freed once every stroke has been committed.
+   - A raster brush (the crayon) bakes its pressure on the GPU instead and gets its pixels back asynchronously (see Brushes › Raster brushes).
 3. **During pinch/pan** the cached bitmap is transformed. If a full re-render takes under 5 ms it is re-rendered live instead, and it is always re-rendered crisply when the gesture ends.
 
 ### Stroke geometry
@@ -477,13 +657,14 @@ More › Zoom Window shows a writing panel at the bottom of the canvas that magn
 
 ### Continuous scrolling
 
-More › Scroll Direction › Vertical (`PageLayoutMode.continuous`) shows every page in one column. `ContinuousPageLayout` fits the widest page to the width and stacks the pages with a gap, all at one scale; finding the pages in view and the current page (the one at the middle of the view) are binary searches, so the column's length doesn't matter.
+More › Scroll Direction › Vertical (`PageLayoutMode.continuous`, the default) shows every page in one column, like one long sheet. `ContinuousPageLayout` fits the widest page to the width and stacks the pages with a 6-point gap, all at one scale; finding the pages in view and the current page (the one at the middle of the view) are binary searches, so the column's length doesn't matter.
 
 - **Only the pages in or near the view are real.** A `UIScrollView` scrolls and zooms an empty stand-in for the column. Each page in view, and each page within half a screen of it, gets an embedded `CanvasView`, transparent outside its page; the canvas's own pan and pinch are off. A page scrolled away loses its canvas and bitmap, so memory follows what's on screen (at most 6 canvases), not the note's length. Embedded canvases leave no `CommittedRaster` behind: they're placed wherever the scroll left them, so it wouldn't match next time.
 - **Scrolling doesn't re-render ink.** Each canvas sits in the scroll content over its *render window* (`ContinuousPageLayout.renderWindow`): the viewport plus half a screen above and below and a quarter to each side, cut to the page. At zoom 1 that's the whole page. The scroll view moves the canvas, and its already-rendered ink, with the paper, so a page only renders when it gets its canvas (before it scrolls into view), when the zoom changes, and, when zoomed in, when the view comes within a quarter screen of the window's edge and the window re-centres. During a pinch the window keeps its size (no new bitmap every frame) and the ink re-renders at the new scale as before. The host places each page with `place(_:settled:)`.
 - **Touches.** A canvas takes touches only on its page (`point(inside:with:)`); the gaps belong to the scroll view, whose pan and pinch accept only fingers (two when one draws) and won't begin while a page is taking ink. Writing on a page makes it the current one, and the tools, undo and selection act on it.
 - **Paged and continuous share the page bar and sidebar:** choosing a page scrolls to it, and reordering keeps the page being read where it was on screen. Writing in the bottom 15% of the last page adds a page like it.
-- **Not yet:** a stroke can't cross from one page to the next (NOT-89), and the zoom window is offered only in paged mode.
+- **Writing across pages** (`PageSeam`). Ink and the eraser (every mode) carry on from one page onto the next without lifting the Pencil. The touch keeps arriving at the page the stroke began on, which hands each event to `ContinuousCanvasView`; every page with a canvas takes part while the Pencil is within its *reach* above or below it, and runs a piece of the stroke of its own, in its own coordinates, through the same `LiveStroke` path as any stroke (`joinStroke`, `continueStroke`, `leaveStroke`). The reach is the brush's longest taper plus twice its nib radius plus 12 points (at most 160), so neighbouring pages' pieces overlap across the gap: the piece above runs on past its bottom edge and the piece below starts above its top. Each page clips its ink to the page, so what shows is the same ink from the same samples up to the edge, and the pieces' ends, tapers and the stabiliser settling in all fall off the page. Each piece is committed as an ordinary stroke of its page, so saving needs nothing new. A piece whose ink never reached its page is dropped; a joined piece is never a tap or a shape (the shape tool, the lasso and the gesture tools stay on their page, and holding still doesn't snap a stroke on two pages). The pages' pieces share one `CanvasDocument.editGroup`, and undo or redo on any of them takes back the others' (`InkNotebook.undoGroup(_:)`), unless a page was edited since. Refined force and tilt are forwarded to the pages that joined. While a stroke is under way, the pages taking part keep their canvases and stay put, the scroll view doesn't pan or zoom, and writing past the end of the last page adds the next page at once, so the stroke carries on onto it. The cost per event is a location check for each page with a canvas (at most six).
+- **Not yet:** the lasso works on one page at a time, so a selection can't span two pages or be dragged onto another; and the zoom window is offered only in paged mode.
 
 ### Input handling
 
@@ -564,6 +745,10 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `ink_file.encode_5k_ms` / `decode_5k_ms` | Encoding that page, and decoding it back (which joins page open in NOT-6) | decode < 50 ms |
 | `stroke_geometry.stamp.*` | `stroke_geometry.*` with every stroke drawn by a stamp brush (bristles, jitter) | – (baseline only) |
 | `live_event.stamp.p50/p95/p99_ms` | `live_event.*` with the same stamp brush | – (baseline only) |
+| `live_event.crayon.p50/p95/p99_ms` | `live_event.*` with every stroke drawn with the crayon: encoding each dirty tile's GPU job, plus copying back the wax that's finished (the main queue is drained after each event, without waiting) | p95 < 2 ms |
+| `live_event.crayon.wax_latency_p50/p95_ms` | From committing a tile's crayon job to its pixels being back on the main queue | – |
+| `live_event.crayon.long_stroke.*` | `live_event.long_stroke.*` with the crayon: its baked pressure must keep the work flat as the stroke grows | last-quarter p95 < 2 ms |
+| `full_redraw.crayon_500_ms` | Re-rendering a page of 500 crayon strokes into the committed bitmap, one GPU pass per stroke and band | – |
 | `memory.6x.*` | Physical footprint with a 5k page open at 6× zoom while the corpus is written on top: cached geometry, committed bitmap, live tiles. Measured from a settled baseline (free memory returned first), so earlier benchmarks don't change it | – |
 
 ### Recorded input
@@ -610,5 +795,13 @@ or locally `scripts/bench-compare.py results.json --write-baseline <path>`.
 ```bash
 xcodebuild test -scheme InkKit -skip-testing:InkKitBenchmarks -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
 ```
+
+Tape, the ruler, the laser and the presentation mirror have tests of their own (`TapeObjectTests`, `RulerTests`,
+`PresentingTests`): tape's file format, hit-testing, toggling and undo and its rendering over ink; ruler edge
+selection, projection, length and angle; the laser's fading; the presentation model, the mirror's layout and
+render. The external-display scene itself is only exercised by hand. `LinkObjectTests` covers links' file format,
+web-address tidying, adding and retargeting with undo, following with a tap (and tape over a link), and the
+selection menu; `NoteOutlineTests` covers bookmarks, outline entries, pruning and remapping, lenient reading, PDF
+outline import and `LinkHistory`.
 
 A physical-iPad verification checklist (pressure, tilt, sample rate, eraser, lasso) lives in the InkCanvas README.

@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Floating bar under the page: previous / next, the page number, adding pages, the page size and template.
+/// Floating bar under the page: previous / next, the page number, bookmarking the page, adding pages, the page
+/// size and template.
 struct PageBar: View {
     @ObservedObject var notebook: InkNotebook
     let allowsMultiplePages: Bool
@@ -35,6 +36,7 @@ struct PageBar: View {
                     .buttonStyle(.inkIcon)
                     .disabled(!notebook.canGoToNextPage)
                     .accessibilityLabel("Next page")
+                bookmarkButton
                 InkBarDivider()
                 addMenu
             }
@@ -55,6 +57,15 @@ struct PageBar: View {
         } message: {
             Text("Its ink is deleted too. This can't be undone.")
         }
+    }
+
+    private var bookmarkButton: some View {
+        let id = notebook.currentPage.id
+        let isBookmarked = notebook.isBookmarked(id)
+        return Button { notebook.toggleBookmark(id) } label: { InkIconView(.bookmark) }
+            .buttonStyle(.inkIcon(selected: isBookmarked))
+            .accessibilityLabel(isBookmarked ? "Remove Bookmark" : "Bookmark Page")
+            .accessibilityAddTraits(isBookmarked ? .isSelected : [])
     }
 
     private var currentSize: PageSize {

@@ -44,6 +44,11 @@ enum InkMetrics {
     static let panelRadius: CGFloat = 16
     /// The page sidebar: room for a portrait thumbnail about 150 pt wide.
     static let pageSidebarWidth: CGFloat = 184
+    /// A sticker's tile in the sticker picker, and the picker's tallest scrolling grid.
+    static let stickerTile: CGFloat = 96
+    static let stickerGridHeight: CGFloat = 360
+    /// The crop bar's Rectangle / Freehand switch.
+    static let cropModeWidth: CGFloat = 200
 }
 
 extension InkTheme {
