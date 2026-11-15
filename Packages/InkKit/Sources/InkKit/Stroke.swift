@@ -124,3 +124,20 @@ struct Stroke: Identifiable, Equatable, Sendable {
     /// cuts a stroke into keep the original's.
     var createdAt = Date()
 }
+
+extension Stroke {
+    /// Where a crayon stroke's own wax texture sits, in tooth cells (see `RasterStamp`): up to 32 cells in
+    /// some direction (few enough that the shaders' page positions keep their precision), picked by
+    /// `createdAt`, so each stroke misses different bits of the paper and layering strokes fills it in. It's
+    /// taken from `createdAt` because that's saved exactly and kept by the pieces a pixel eraser cuts, so the
+    /// grain never changes after the stroke is drawn.
+    var waxGrain: CGPoint {
+        var h = createdAt.timeIntervalSinceReferenceDate.bitPattern
+        // SplitMix64's finalizer: nearby times land far apart.
+        h = (h ^ (h >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        h = (h ^ (h >> 27)) &* 0x94D0_49BB_1331_11EB
+        h ^= h >> 31
+        let x = CGFloat(h & 0xFFFF) / 65535, y = CGFloat((h >> 16) & 0xFFFF) / 65535
+        return CGPoint(x: (x - 0.5) * 64, y: (y - 0.5) * 64)
+    }
+}

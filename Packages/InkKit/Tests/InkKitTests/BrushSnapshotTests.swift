@@ -145,7 +145,9 @@ func brushStroke(_ brush: TestBrush, width: CGFloat, tilt: Bool, wave: Int) -> S
                            timestamp: Double(i) / 240)
     }
     let color = brush == .highlighter ? RGBA(r: 1, g: 0.85, b: 0.2) : RGBA(r: 0.12, g: 0.2, b: 0.55)
-    return Stroke(id: UUID(), color: color, brush: brush.brush(width: width, tilt: tilt), points: points)
+    // A fixed creation time per wave, since it picks a crayon stroke's own grain (`Stroke.waxGrain`).
+    return Stroke(id: UUID(), color: color, brush: brush.brush(width: width, tilt: tilt), points: points,
+                  createdAt: Date(timeIntervalSinceReferenceDate: 800_000_000 + Double(wave)))
 }
 
 /// `brushStroke`'s path drawn with a built-in brush at its default width, as the canvas would with the

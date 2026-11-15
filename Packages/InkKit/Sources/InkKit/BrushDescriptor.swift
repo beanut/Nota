@@ -18,8 +18,8 @@ import Foundation
 /// path**: separate nib stamps every `spacing` nib widths, each moved by `jitter`, for textured brushes.
 ///
 /// **Raster brushes.** A `wax` texture (the crayon) is drawn by the GPU rather than filled as paths: its
-/// stamps are rasterized with Metal into a pressure field, and wax is laid on a paper tooth fixed to the page
-/// (`WaxRenderer`). Without Metal it falls back to the grain pattern, like a pencil.
+/// stamps are rasterized with Metal, each laying wax on a paper tooth fixed to the page and roughened by the
+/// stroke's own grain (`WaxRenderer`). Without Metal it falls back to the grain pattern, like a pencil.
 public struct BrushDescriptor: Codable, Hashable, Sendable, Identifiable {
     public var id: UUID
     /// Shown in the brush picker. At most `maxNameLength` characters.

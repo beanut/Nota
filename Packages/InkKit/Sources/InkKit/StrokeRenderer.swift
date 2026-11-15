@@ -11,27 +11,34 @@ import UIKit
 ///    inside one path, antialias with a hairline seam between them.
 struct Hull {
     let polygon: [CGPoint]
-    /// A strip's sides. A stamp has none, so a raster brush's stamp keeps its nib in `left` instead (see `nib`).
+    /// A strip's sides. A stamp has none, so a raster brush's stamp keeps its nib in `left` instead (see
+    /// `rasterStamp`).
     private(set) var left: [CGPoint]
     let right: [CGPoint]
     let joinsPrevious: Bool
     let alpha: CGFloat
     let bounds: CGRect
 
-    /// For a raster brush's stamp, the nib it was made from: the GPU draws that, not the polygon. It's kept
-    /// in the stamp's unused `left` (centre, radii, angle and alpha as three points) rather than a field of
-    /// its own, so every other hull stays as small and as cheap to copy as before (a field cost the stamp
-    /// path over 10%).
-    var nib: Tip? {
+    /// For a raster brush's stamp, the nib it was made from and its grain: the GPU draws that, not the
+    /// polygon. It's kept in the stamp's unused `left` (centre, radii, angle and alpha, grain as four points)
+    /// rather than a field of its own, so every other hull stays as small and as cheap to copy as before (a
+    /// field cost the stamp path over 10%).
+    var rasterStamp: RasterStamp? {
         get {
-            guard !polygon.isEmpty, left.count == 3 else { return nil }
-            return Tip(center: left[0], major: left[1].x, minor: left[1].y, angle: left[2].x, alpha: left[2].y)
+            guard !polygon.isEmpty, left.count == 4 else { return nil }
+            return RasterStamp(tip: Tip(center: left[0], major: left[1].x, minor: left[1].y, angle: left[2].x,
+                                        alpha: left[2].y),
+                               grain: left[3])
         }
         set {
             guard !polygon.isEmpty else { return }
-            left = newValue.map { [$0.center, CGPoint(x: $0.major, y: $0.minor), CGPoint(x: $0.angle, y: $0.alpha)] }
-                ?? []
+            left = newValue.map(Self.packed) ?? []
         }
+    }
+
+    private static func packed(_ stamp: RasterStamp) -> [CGPoint] {
+        let tip = stamp.tip
+        return [tip.center, CGPoint(x: tip.major, y: tip.minor), CGPoint(x: tip.angle, y: tip.alpha), stamp.grain]
     }
 
     static func bounds(of points: [CGPoint]...) -> CGRect {
@@ -46,9 +53,9 @@ struct Hull {
         return minX > maxX ? .null : CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
-    init(stamp polygon: [CGPoint], alpha: CGFloat, tip: Tip? = nil) {
+    init(stamp polygon: [CGPoint], alpha: CGFloat, raster: RasterStamp? = nil) {
         self.polygon = polygon
-        left = tip.map { [$0.center, CGPoint(x: $0.major, y: $0.minor), CGPoint(x: $0.angle, y: $0.alpha)] } ?? []
+        left = raster.map(Self.packed) ?? []
         right = []
         joinsPrevious = false
         self.alpha = alpha
@@ -67,11 +74,25 @@ struct Hull {
 
 /// Consecutive pieces sharing one (quantised) alpha, merged into a single non-zero-winding path.
 /// Overlapping same-orientation polygons union under non-zero fill, so joints never double up.
-/// A raster brush's run also keeps its stamps' nibs, which `WaxRenderer` draws instead of the path.
+/// A raster brush's run also keeps its stamps, which `WaxRenderer` draws instead of the path.
 struct StrokeRun {
     let path: CGPath
     let alpha: CGFloat
-    var stamps: [Tip] = []
+    var stamps: [RasterStamp] = []
+}
+
+/// One nib stamp of a raster brush, as `WaxRenderer` draws it: the nib, and where the crayon's own texture
+/// sits under it (in tooth cells). Wax lands where the paper's tooth *and* the crayon's texture let it, so
+/// moving the crayon's texture moves the holes: each stroke has its own offset (`Stroke.waxGrain`), and
+/// it shifts with the direction of travel, so drawing back over ink, in another stroke or the same one,
+/// lays wax in some of the paper it missed.
+struct RasterStamp {
+    var tip: Tip
+    var grain: CGPoint
+
+    /// How far the crayon's texture moves with the direction of travel, in tooth cells: going back the
+    /// other way moves it twice this, far enough that the holes are mostly new ones.
+    static let headingShift: CGFloat = 0.75
 }
 
 struct StrokeGeometry {
@@ -153,19 +174,23 @@ struct StrokeContext {
     var distances: [CGFloat] = []
     /// The stroke's whole length once it has ended; nil while it's drawn, so there's no end taper yet.
     var totalLength: CGFloat?
+    /// For a raster brush, the stroke's own offset into the crayon's texture (`Stroke.waxGrain`).
+    var grain: CGPoint = .zero
 
-    init(brush: BrushDescriptor, firstIndex: Int = 0, distances: [CGFloat] = [], totalLength: CGFloat? = nil) {
+    init(brush: BrushDescriptor, firstIndex: Int = 0, distances: [CGFloat] = [], totalLength: CGFloat? = nil,
+         grain: CGPoint = .zero) {
         self.brush = BrushModel(brush)
         self.firstIndex = firstIndex
         self.distances = distances
         self.totalLength = totalLength
+        self.grain = grain
         plain = !brush.usesSpeed && !brush.taper.isActive
     }
 
     /// A finished stroke's context: distances measured, total length known.
-    init(finished points: [StrokePoint], brush: BrushDescriptor) {
+    init(finished points: [StrokePoint], brush: BrushDescriptor, grain: CGPoint = .zero) {
         let distances = brush.measuresDistance ? Self.distances(along: points) : []
-        self.init(brush: brush, distances: distances, totalLength: distances.last)
+        self.init(brush: brush, distances: distances, totalLength: distances.last, grain: grain)
     }
 
     /// True when every nib is the identity context: the common case, kept free of extra work.
@@ -390,7 +415,7 @@ enum StrokeRenderer {
         let t = tip(for: p, brush: context.brush, nib: context.nib(at: 0, in: [p]))
         var hull = makeHull(polygon(for: t), alpha: t.alpha)
         if context.brush.isRaster {
-            hull.nib = t
+            hull.rasterStamp = RasterStamp(tip: t, grain: context.grain)
         }
         return hull
     }
@@ -724,8 +749,15 @@ enum StrokeRenderer {
                 stamp.alpha *= 1 - jitter.opacity * rOpacity
             }
             guard !bristles.isEmpty else {
-                hulls.append(Hull(stamp: polygon(for: stamp), alpha: stamp.alpha,
-                                  tip: brush.isRaster ? stamp : nil))
+                var raster: RasterStamp?
+                if brush.isRaster {
+                    // The direction of travel here, from the spline's tangent so it turns smoothly.
+                    let u = 1 - t
+                    let tangent = (c1 - p1) * (3 * u * u) + (c2 - c1) * (6 * u * t) + (p2 - c2) * (3 * t * t)
+                    let heading = unitNormal(tangent).map { CGPoint(x: $0.y, y: -$0.x) } ?? .zero
+                    raster = RasterStamp(tip: stamp, grain: context.grain + heading * RasterStamp.headingShift)
+                }
+                hulls.append(Hull(stamp: polygon(for: stamp), alpha: stamp.alpha, raster: raster))
                 continue
             }
             let c = cos(stamp.angle), s = sin(stamp.angle)
@@ -760,8 +792,8 @@ enum StrokeRenderer {
         let alpha: CGFloat
     }
 
-    static func hulls(for points: [StrokePoint], brush: BrushDescriptor) -> [Hull] {
-        let context = StrokeContext(finished: points, brush: brush)
+    static func hulls(for points: [StrokePoint], brush: BrushDescriptor, grain: CGPoint = .zero) -> [Hull] {
+        let context = StrokeContext(finished: points, brush: brush, grain: grain)
         switch points.count {
         case 0: return []
         case 1: return [dotHull(points[0], context: context)]
@@ -778,7 +810,7 @@ enum StrokeRenderer {
         var path = CGMutablePath()
         var alpha: CGFloat = -1
         var empty = true
-        var stamps: [Tip] = []
+        var stamps: [RasterStamp] = []
         // The strip being welded together from consecutive pieces.
         var left: [CGPoint] = [], right: [CGPoint] = []
         func endStrip() {
@@ -804,8 +836,8 @@ enum StrokeRenderer {
             if isStamp {
                 path.addLines(between: h.polygon)
                 path.closeSubpath()
-                if let nib = h.nib {
-                    stamps.append(nib)
+                if let stamp = h.rasterStamp {
+                    stamps.append(stamp)
                 }
             } else {
                 if !h.joinsPrevious {
@@ -823,7 +855,7 @@ enum StrokeRenderer {
     }
 
     static func geometry(for stroke: Stroke) -> StrokeGeometry {
-        let hulls = hulls(for: stroke.points, brush: stroke.brush)
+        let hulls = hulls(for: stroke.points, brush: stroke.brush, grain: stroke.waxGrain)
         let bounds = hulls.reduce(CGRect.null) { $0.union($1.bounds) }
         return StrokeGeometry(runs: runs(from: hulls), bounds: bounds)
     }
@@ -997,9 +1029,12 @@ final class LiveStroke {
     /// Set by `finish()`, for the end taper.
     private var totalLength: CGFloat?
     private(set) var isFinished = false
+    /// The stroke's offset into the crayon's texture, for a raster brush.
+    private let grain: CGPoint
 
     init(stroke: Stroke) {
         self.stroke = stroke
+        grain = stroke.brush.isRaster ? stroke.waxGrain : .zero
         if stroke.brush.measuresDistance {
             distances = StrokeContext.distances(along: stroke.points)
         }
@@ -1007,7 +1042,8 @@ final class LiveStroke {
 
     /// Context for geometry over `stroke.points[firstIndex...]`.
     private func context(firstIndex: Int = 0) -> StrokeContext {
-        StrokeContext(brush: stroke.brush, firstIndex: firstIndex, distances: distances, totalLength: totalLength)
+        StrokeContext(brush: stroke.brush, firstIndex: firstIndex, distances: distances, totalLength: totalLength,
+                      grain: grain)
     }
 
     /// Samples a tail rebuild reaches back before the first unfinalized segment: the segment's own
