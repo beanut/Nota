@@ -118,13 +118,13 @@ struct ContinuousPageLayoutTests {
         #expect(elapsed < .milliseconds(200))
     }
 
-    @Test func layoutModeIsSavedAndDefaultsToPaged() throws {
+    @Test func layoutModeIsSavedAndDefaultsToContinuous() throws {
         let defaults = try #require(UserDefaults(suiteName: "ContinuousPageLayoutTests-\(UUID().uuidString)"))
-        #expect(PageLayoutMode.load(from: defaults) == .paged)
-        PageLayoutMode.continuous.save(to: defaults)
         #expect(PageLayoutMode.load(from: defaults) == .continuous)
-        defaults.set("sideways", forKey: PageLayoutMode.defaultsKey)
+        PageLayoutMode.paged.save(to: defaults)
         #expect(PageLayoutMode.load(from: defaults) == .paged)
+        defaults.set("sideways", forKey: PageLayoutMode.defaultsKey)
+        #expect(PageLayoutMode.load(from: defaults) == .continuous)
     }
 }
 

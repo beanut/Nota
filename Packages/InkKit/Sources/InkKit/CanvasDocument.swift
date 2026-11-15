@@ -191,6 +191,24 @@ public final class CanvasDocument: Identifiable {
     private(set) var strokes: [Stroke] = []
     private var undoStack: [Command] = []
     private var redoStack: [Command] = []
+    /// The gesture each command on the stacks belongs to (`editGroup` when it was made), in step with them.
+    private var undoGroups: [UUID?] = []
+    private var redoGroups: [UUID?] = []
+
+    /// While set, each new undoable edit is marked as part of this gesture. A stroke written across a page
+    /// boundary in continuous scrolling is one piece per page, each an edit of its own page; they share a
+    /// group so undo and redo (`InkNotebook.undoGroup(_:)`) take them all back in one step.
+    var editGroup: UUID?
+
+    /// The gesture the edit undo would take back belongs to, if it was marked with one.
+    var undoGroup: UUID? {
+        undoGroups.last ?? nil
+    }
+
+    /// The gesture the edit redo would put back belongs to, if it was marked with one.
+    var redoGroup: UUID? {
+        redoGroups.last ?? nil
+    }
 
     /// What a change to the page was, for the views showing it.
     enum Change {
@@ -554,6 +572,7 @@ public final class CanvasDocument: Identifiable {
     @discardableResult
     func undo() -> Bool {
         guard let command = undoStack.popLast() else { return false }
+        let group = undoGroups.popLast() ?? nil
         lastReshapedIDs = []
         switch command {
         case let .add(stroke, splits):
@@ -591,6 +610,9 @@ public final class CanvasDocument: Identifiable {
             place([], before)
             redoStack.append(command)
         }
+        while redoGroups.count < redoStack.count {
+            redoGroups.append(group)
+        }
         announce(command)
         return true
     }
@@ -598,6 +620,7 @@ public final class CanvasDocument: Identifiable {
     @discardableResult
     func redo() -> Bool {
         guard let command = redoStack.popLast() else { return false }
+        let group = redoGroups.popLast() ?? nil
         lastReshapedIDs = []
         switch command {
         case let .add(stroke, splits):
@@ -630,6 +653,9 @@ public final class CanvasDocument: Identifiable {
         case let .replaceObjects(_, after):
             place([], after)
             undoStack.append(command)
+        }
+        while undoGroups.count < undoStack.count {
+            undoGroups.append(group)
         }
         announce(command)
         return true
@@ -719,6 +745,8 @@ public final class CanvasDocument: Identifiable {
         }
         undoStack.removeAll()
         redoStack.removeAll()
+        undoGroups.removeAll()
+        redoGroups.removeAll()
         lastReshapedIDs = Set(strokes.map(\.id))
         revision += 1
         if !objects.isEmpty {
@@ -730,7 +758,9 @@ public final class CanvasDocument: Identifiable {
 
     private func push(_ command: Command, reshaping reshaped: Set<UUID> = []) {
         undoStack.append(command)
+        undoGroups.append(editGroup)
         redoStack.removeAll()
+        redoGroups.removeAll()
         lastReshapedIDs = reshaped
         announce(command)
     }
