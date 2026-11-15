@@ -38,7 +38,7 @@ extension CanvasView {
         switch controller.tool {
         case .shape: true
         case .pen, .pencil: controller.pencilSettings.holdToSnapShapes
-        case .highlighter, .text, .eraser, .lasso: false
+        case .highlighter, .text, .tape, .eraser, .lasso, .laser: false
         }
     }
 

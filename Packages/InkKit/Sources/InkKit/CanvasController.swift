@@ -37,7 +37,9 @@ final class CanvasController: ObservableObject {
         .eraser: ToolSettings(width: 30),
         .lasso: ToolSettings(width: 4),
         .shape: ToolSettings(width: 3),
-        .text: ToolSettings(width: 17)
+        .text: ToolSettings(width: 17),
+        .tape: ToolSettings(width: Double(TapeObject.defaultWidth)),
+        .laser: ToolSettings(width: 4)
     ]
 
     /// The last width used with each brush, so switching brushes in a tool brings back each one's width.
@@ -104,6 +106,34 @@ final class CanvasController: ObservableObject {
     /// The sticker collection the picker shows and Save as Sticker adds to.
     let stickers: StickerStore
 
+    // Tape, ruler, laser and presenting
+
+    /// What new tape is printed with; its colour is the Pen Case's and its width the tool's.
+    @Published var tapePattern: TapeObject.Pattern = .plain
+    /// Whether the laser leaves a fading trail or is a dot that follows the touch.
+    @Published var laserMode: LaserTrail.Mode = .trail
+    /// Shows the ruler over the canvas (`RulerView`). Not saved: it's for this editor while it's open.
+    @Published var rulerVisible = false {
+        didSet {
+            if rulerVisible != oldValue {
+                canvas?.updateRuler()
+                continuousHost?.updateRuler()
+            }
+        }
+    }
+
+    /// A straight ruler, or a protractor.
+    @Published var rulerMode: Ruler.Mode = .ruler {
+        didSet { rulerView?.setMode(rulerMode) }
+    }
+
+    /// Where the ruler is, kept as it's moved so it stays put across pages and layouts. Nil until it's first shown.
+    var ruler: Ruler?
+    /// The ruler on screen, while it's shown.
+    weak var rulerView: RulerView?
+    /// Where the laser goes to be shown on an external display, and which page that display shows.
+    let presentation: InkPresentation
+
     /// While set, the next touch on the canvas picks a colour from the page (see `EyedropperOverlay`).
     @Published var eyedropper: EyedropperRequest?
 
@@ -113,11 +143,12 @@ final class CanvasController: ObservableObject {
         let quickColorIndex: Int?
     }
 
-    /// `penTray` defaults to `PenTrayStore.shared`, `stickers` to `StickerStore.shared` and `pasteboard` to
-    /// the general pasteboard.
+    /// `penTray` defaults to `PenTrayStore.shared`, `stickers` to `StickerStore.shared`, `pasteboard` to
+    /// the general pasteboard and `presentation` to `InkPresentation.shared`.
     init(settingsStore: UserDefaults = .standard, penTray: PenTrayStore? = nil, stickers: StickerStore? = nil,
-         pasteboard: UIPasteboard = .general) {
+         pasteboard: UIPasteboard = .general, presentation: InkPresentation? = nil) {
         self.settingsStore = settingsStore
+        self.presentation = presentation ?? .shared
         self.pasteboard = pasteboard
         self.stickers = stickers ?? .shared
         let penTray = penTray ?? .shared
@@ -225,9 +256,9 @@ final class CanvasController: ObservableObject {
         case .pencil: 1 ... 16
         case .highlighter: 8 ... 48
         case .eraser: 8 ... 100
-        case .lasso: 1 ... 1
+        case .lasso, .text, .laser: 1 ... 1
         case .shape: 1 ... 20
-        case .text: 1 ... 1
+        case .tape: 8 ... 60
         }
     }
 
@@ -238,9 +269,9 @@ final class CanvasController: ObservableObject {
         case .pencil: [2, 3, 6]
         case .highlighter: [14, 22, 34]
         case .eraser: [16, 30, 60]
-        case .lasso: []
+        case .lasso, .text, .laser: []
         case .shape: [2, 3, 6]
-        case .text: []
+        case .tape: [12, 20, 32]
         }
     }
 
@@ -378,6 +409,11 @@ final class CanvasController: ObservableObject {
         canvas?.insertPlaceholderObject(color: color)
     }
 
+    /// Reveals every tape on the current page, or hides it again (one undo step).
+    func setAllTape(revealed: Bool) {
+        canvas?.setAllTape(revealed: revealed)
+    }
+
     func zoomWindowBack() {
         canvas?.moveZoomWindow(.back)
     }
@@ -415,6 +451,7 @@ final class CanvasController: ObservableObject {
     }
 
     func zoomDidChange(_ scale: CGFloat) {
+        rulerView?.pageScaleDidChange()
         let rounded = (scale * 100).rounded() / 100
         if rounded != zoom {
             zoom = rounded
@@ -432,7 +469,7 @@ final class CanvasController: ObservableObject {
     /// The bundled brush each tool draws with by default, before the width and pressure settings are applied.
     static func baseBrush(for tool: Tool) -> BrushDescriptor {
         switch tool {
-        case .pen, .lasso, .shape, .text: .pen
+        case .pen, .lasso, .shape, .text, .tape, .laser: .pen
         case .pencil: .pencil
         case .highlighter: .highlighter
         case .eraser: .pixelEraser
@@ -445,7 +482,7 @@ final class CanvasController: ObservableObject {
         case .pen: BrushDescriptor.pens
         case .pencil: BrushDescriptor.pencils
         case .highlighter: BrushDescriptor.highlighters
-        case .shape, .text, .eraser, .lasso: []
+        case .shape, .text, .tape, .eraser, .lasso, .laser: []
         }
     }
 
@@ -518,6 +555,9 @@ final class CanvasController: ObservableObject {
     /// The Pen Case's colours for `tool`: the user's, or the theme's inks. Tools that don't draw in a
     /// colour get the pen's.
     func quickColors(for tool: Tool) -> [PenColor] {
+        if tool == .tape {
+            return themeColors(for: .tape) // tape has its own colours, not the pens'
+        }
         let kind = tool.penKind ?? .pen
         return penTray.tray[presets: kind].colors ?? themeColors(for: tool.usesInk ? tool : .pen)
     }

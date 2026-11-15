@@ -21,6 +21,7 @@ struct CanvasRepresentable: UIViewRepresentable {
         if controller.zoomWindowVisible {
             view.zoomWindowVisibilityDidChange()
         }
+        view.updateRuler()
         return view
     }
 

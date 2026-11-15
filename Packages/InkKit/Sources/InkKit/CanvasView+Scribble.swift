@@ -39,7 +39,8 @@ extension CanvasView {
     /// Starts watching the live stroke for circle-and-hold.
     func startHoldWatch(at location: CGPoint, time: TimeInterval) {
         stopHoldWatch()
-        guard let controller, live != nil,
+        // A stroke along the ruler is straight already: holding at its end mustn't turn it into a shape.
+        guard let controller, live != nil, rulerSnap == nil,
               controller.pencilSettings.circleToSelect || snapsShapesOnHold(controller) else { return }
         lastMovement = (location, time)
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in

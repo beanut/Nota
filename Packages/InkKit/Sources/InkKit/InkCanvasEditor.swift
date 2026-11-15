@@ -29,6 +29,11 @@ import SwiftUI
 /// menu's Save as Sticker (`StickerStore.shared`). A selected picture's menu crops it (to a rectangle or
 /// freehand, and back) and sets its opacity. Pictures' bytes live in `ImageAssets.shared`; a host that
 /// stores notes registers where it keeps them there.
+///
+/// The tape tool covers part of the page with tape that a tap reveals or hides (a study aid; saved with the
+/// note). The ruler button shows a ruler or protractor that strokes snap to, measuring them as they're drawn.
+/// The laser pointer draws a fading trail or a dot that's never written on the page. While an external display
+/// is connected, the host can show `PresentationMirror` on it: the current page alone, with the laser.
 public struct InkCanvasEditor: View {
     @ObservedObject private var notebook: InkNotebook
     private let showsDebugHUD: Bool
@@ -127,6 +132,11 @@ public struct InkCanvasEditor: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
+            PresentingBadge(presentation: controller.presentation)
+                .padding(.top, InkSpacing.s)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+
             if controller.hudVisible {
                 PencilHUD(telemetry: telemetry)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -174,6 +184,13 @@ public struct InkCanvasEditor: View {
             controller.selectionActions = selectionActions
             controller.onSwipeToPage = { [notebook] swipe in turnPage(swipe, in: notebook) }
             controller.canSwipeToPage = { [notebook] swipe in canTurnPage(swipe, in: notebook) }
+            controller.presentation.present(notebook.currentPage)
+        }
+        .onChange(of: notebook.currentPage.id) {
+            controller.presentation.present(notebook.currentPage)
+        }
+        .onDisappear {
+            controller.presentation.stopPresenting(notebook.currentPage)
         }
     }
 

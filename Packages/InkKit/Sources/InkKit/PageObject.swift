@@ -9,8 +9,9 @@ import Foundation
 /// encodes its own fields.
 ///
 /// **Layers.** A page draws its background (paper and template), then its objects in `zIndex` order,
-/// then its ink, then the selection overlay. Objects are always under the ink, so handwriting over an
-/// image stays on top of it, and the pixel eraser never erases an object.
+/// then its ink, then the selection overlay. Objects are under the ink, so handwriting over an image stays
+/// on top of it, and the pixel eraser never erases an object. The one exception is tape (`drawsOverInk`),
+/// which covers the ink too: it's drawn after the ink, in its own layer, still in `zIndex` order.
 ///
 /// **Storage.** A page's objects are kept in `pages/<page id>.json` beside its `.ink` file
 /// (`PageObjectsFile`). Each object is one JSON object with a `kind` and the shared placement keys
@@ -18,6 +19,9 @@ import Foundation
 public protocol PageObject: Codable, Sendable {
     /// Names the type in `pages/<page id>.json`, e.g. `"placeholder"`. Never changes once shipped.
     static var kind: String { get }
+    /// Whether objects of this kind are drawn over the page's ink rather than under it: only tape, which
+    /// covers what's written. False by default.
+    static var drawsOverInk: Bool { get }
 
     var id: UUID { get }
     /// The object's own rectangle, before `transform`.
@@ -47,6 +51,15 @@ public extension PageObject {
     /// The kind of this object, as written in the file.
     var kind: String {
         Self.kind
+    }
+
+    static var drawsOverInk: Bool {
+        false
+    }
+
+    /// Whether this object is drawn over the page's ink (see `PageObject.drawsOverInk`).
+    var drawsOverInk: Bool {
+        Self.drawsOverInk
     }
 
     /// The four corners of `frame` on the page, clockwise from the top-left.
@@ -352,7 +365,8 @@ enum PageObjectKinds {
         PlaceholderObject.kind: PlaceholderObject.self,
         ShapeObject.kind: ShapeObject.self,
         TextObject.kind: TextObject.self,
-        ImageObject.kind: ImageObject.self
+        ImageObject.kind: ImageObject.self,
+        TapeObject.kind: TapeObject.self
     ]
 
     /// Whether objects of this type can be seen and selected (objects of unknown kinds can't).

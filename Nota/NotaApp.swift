@@ -11,6 +11,8 @@ struct NotaApp: App {
     @State private var documents = DocumentStore()
     @State private var thumbnails = ThumbnailStore()
     @Environment(\.scenePhase) private var scenePhase
+    /// Gives an external display or AirPlay screen the presentation scene (`PresentationScene`).
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
         do {

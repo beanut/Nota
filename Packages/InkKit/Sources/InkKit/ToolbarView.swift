@@ -10,6 +10,8 @@ extension Tool {
         case .lasso: .lasso
         case .shape: .shapes
         case .text: .text
+        case .tape: .tape
+        case .laser: .laser
         }
     }
 
@@ -22,14 +24,16 @@ extension Tool {
         case .lasso: "Lasso"
         case .shape: "Shapes"
         case .text: "Text"
+        case .tape: "Tape"
+        case .laser: "Laser Pointer"
         }
     }
 
     /// Whether the tool draws in a colour picked from the Pen Case.
     var usesInk: Bool {
         switch self {
-        case .pen, .pencil, .highlighter, .shape, .text: true
-        case .eraser, .lasso: false
+        case .pen, .pencil, .highlighter, .shape, .text, .tape: true
+        case .eraser, .lasso, .laser: false
         }
     }
 }
@@ -96,6 +100,7 @@ struct PenCase: View {
                     ToolOptionsView(controller: controller, tool: tool)
                 }
             }
+            RulerButton(controller: controller)
         }
     }
 
@@ -372,6 +377,11 @@ struct ToolOptionsView: View {
                 widthControls
             case .text:
                 TextToolOptions(controller: controller)
+            case .tape:
+                TapeOptions(controller: controller)
+                widthControls
+            case .laser:
+                LaserOptions(controller: controller)
             case .pen, .pencil, .highlighter:
                 BrushPicker(controller: controller, tool: tool)
                 Button {
