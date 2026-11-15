@@ -19,6 +19,9 @@ public final class InkNotebook: ObservableObject {
     public var defaultPageSize: PageSize
     /// Template used for new pages when there is no page to copy.
     public var defaultTemplate: PageTemplate
+    /// Bookmarked pages and the outline's entries (see `NoteOutline`). Entries for pages that have been
+    /// removed stay until the host prunes them when it saves; the outline panel doesn't show them.
+    @Published public var outline = NoteOutline()
 
     /// A notebook of `pageCount` blank pages of `pageSize` on `template` (at least one).
     public init(pageSize: PageSize = .default, pageCount: Int = 1, template: PageTemplate = .default) {

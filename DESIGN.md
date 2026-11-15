@@ -68,6 +68,7 @@ The app's `AccentColor` asset is `accentInk`, so system controls (toggles, links
 | Labels *(addition)* | `label/rose #C2255C`, `label/green #2B8A3E` | The two folder colours with no matching ink |
 | Tape *(addition)* | `tape/sand #E8D7A9`, `/sage #B9D3B2`, `/sky #A9C8EA`, `/blush #F0BCC8`, `/slate #9EA3B2` | Tape tool presets (`InkTheme.tapeInks`). Drawn opaque over the ink, so soft and papery, with ink still legible on them. |
 | Laser *(addition)* | `laser/magenta #F0308A` | The laser pointer's glow (`InkTheme.laser`), on the page and on an external display. Magenta, never the record red. |
+| Links | `ink/blue #3345D9` | Links on the page (`InkTheme.link`): an 8% tint with a dotted underline, saved with each link. |
 
 ## Type
 
@@ -92,7 +93,7 @@ The Figma styles use Inter at exactly the iOS Dynamic Type sizes, so the app use
 
 ## Icons
 
-`NotaIcon` holds the 47 line icons (`icon/*`) as template SVGs in `NotaUI/Resources/Icons.xcassets`: 20 pt grid, 1.75 pt round stroke, recoloured with `foregroundStyle`. Use `NotaIconView(.pen)` (or `size:` for 12–18 pt uses). Nota's own chrome uses these; menus, alerts and sheets keep SF Symbols.
+`NotaIcon` holds the 49 line icons (`icon/*`) as template SVGs in `NotaUI/Resources/Icons.xcassets`: 20 pt grid, 1.75 pt round stroke, recoloured with `foregroundStyle`. Use `NotaIconView(.pen)` (or `size:` for 12–18 pt uses). Nota's own chrome uses these; menus, alerts and sheets keep SF Symbols.
 
 Tools: pen, pencil, highlighter, eraser, lasso, text, shapes, photo (the Pen Case's Insert menu), tape, laser and ruler (the tape and laser pointer tools and the ruler toggle; drawn in code for NOT-24, not yet in Figma). Editor: undo, redo, fit, grip, pressure, gauge, split (the editor's window menu; drawn in code for NOT-30 and not yet in Figma), return (the zoom window's new line; added in code, not yet in Figma), pens (the Pen Case's pen tray) and eyedropper (the colour picker's; both drawn in code for NOT-18, not yet in Figma). Library: grid, star, clock, trash, folder, plus, minus, search, filter, list, chevrons, xmark, ellipsis, share, arrow.up. Audio and AI: sparkles, mic, waveform, play, pause, stop, flashcards, quiz, calc.
 
@@ -136,8 +137,21 @@ App-only: `SidebarRow` (Figma Sidebar Row: 44 pt, selected = ink tint), `NoteCar
 - **Tape, laser and ruler** (NOT-24): the tape tool (`tape` icon) sits after the text tool, the laser pointer (`laser`) after the lasso, then the ruler toggle (`ruler`, Icon Button with its selected state while the ruler shows; touch and hold for Ruler / Protractor, a system menu). Tape's Tool Options: Plain / Striped / Grid (segmented), Reveal All · Hide All (secondary buttons), a one-line hint and the width controls (8–60 pt; quick sizes 12 / 20 / 32); its colours are the tape inks. Hidden tape is opaque with a zigzag-cut end and a hairline edge in its own colour darkened; revealed tape is its colour at 16% with a dashed edge. The laser's Tool Options: Trail / Dot (segmented) and a hint. The laser is the `laser` ink: a 14 pt glow at 22%, a 4.5 pt line and a 1.5 pt white core, fading over a second, with an 8 pt dot at its head.
 - **Ruler** (`InkKit/RulerView.swift`): an 88 pt strip (or a 200 pt-radius half disc for the protractor) of `surfaceRaised` at 86% with a `border` hairline and `controlRadius` corners, ticks and numbers in `textSecondary` (page millimetres, half-centimetres and centimetres at the current zoom; degrees on the protractor), and its angle in the middle in `textPrimary`. While a stroke is drawn along it, a capsule by the Pencil (`surfaceRaised`, `border` hairline, `textPrimary`) shows the length in cm or the angle swept. *Exemption:* the ruler's numbers and readout are UIKit text drawn with the system font at the footnote and caption-2 text style sizes (monospaced digits), as `NotaFont` uses SF Pro at those sizes; `InkTheme` only carries SwiftUI fonts.
 - **Presenting badge**: while an external display mirrors the page, a small floating capsule (`surfaceRaised`, `laser` icon, footnote emphasised, `textSecondary`) at the top of the editor says "Presenting this page". The external display itself shows only the page on the `desk` colour, with a `paper`-style shadow; with no note open, one line in headline `textSecondary`.
+- **Links, bookmarks and outline** (NOT-31): the selection menu adds Add Link… (Open Link, Edit Link…, Remove Link
+  for a selected link; SF Symbols, as menus keep them). The link sheet is a system sheet: Web / This Note / Another
+  Note (segmented), then a web-address field, the note's pages (checkmark in `accent`; "This page", "Bookmarked"
+  and outline titles as footnote `textSecondary`), or a note menu and its pages. A link is drawn in `ink/blue`.
+  After a link is followed, a floating Back capsule (`surfaceRaised`, `back` glyph, footnote emphasised,
+  `textPrimary`) sits at the top right: "Back to Page 3" or "Back to <note>". The page bar has a bookmark button
+  (`bookmark` icon, Icon Button selected while the page is bookmarked) after the page number. The page sidebar has
+  Pages / Outline (segmented) under its title; bookmarked thumbnails show a 14 pt `bookmark` in `accent` at the top
+  right. The Outline tab: section headers in footnote emphasised `textSecondary` (Bookmarks, Outline, From PDF),
+  rows in body with the page number in footnote `textSecondary` (the current page's title in `accent`), PDF entries
+  indented 12 pt per level, Add This Page in `accent`, and a one-line hint in `textTertiary` when there are no
+  bookmarks. New icons: `link` and `bookmark` (`InkIcon.link`, `.bookmark`); the outline and Back glyphs map to
+  `list` and `chevron.left`.
 - **More** (ellipsis): fit page (with zoom level), zoom window, Add Test Object (a placeholder object for the object layer, until shapes, text and images land), pressure and tilt, Apple Pencil, debug HUD, clear page.
-- **Page Bar** (`InkKit/PageBar.swift`): previous · Page n of m · next · add (hold for add before/after/size and Delete Page) · paper-size pill.
+- **Page Bar** (`InkKit/PageBar.swift`): previous · Page n of m · next · bookmark · add (hold for add before/after/size and Delete Page) · paper-size pill.
 
 Not yet built (tracked in NOT-87): choosing which tools live in the Pen Case (Customize Toolbar), and the Liquid Glass variants for iOS 26+.
 

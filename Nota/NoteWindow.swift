@@ -11,20 +11,26 @@ struct NoteWindow: View {
     @Binding var noteID: UUID?
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismissWindow) private var dismissWindow
+    /// Where links between notes have led in this window, for Back.
+    @State private var linkTrail = LinkTrail()
 
     var body: some View {
         NavigationStack {
             if let noteID, let note = modelContext.note(withID: noteID) {
-                NoteEditorView(note: note)
-                    .navigationTitle(note.title)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button { dismissWindow() } label: { NotaIconView(.xmark) }
-                                .buttonStyle(.notaIcon(selected: false))
-                                .accessibilityLabel("Close Window")
-                        }
+                // A fresh editor for each note, so following a link closes the one it left.
+                NoteEditorView(note: note, trail: $linkTrail) { other in
+                    self.noteID = other
+                }
+                .id(note.id)
+                .navigationTitle(note.title)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { dismissWindow() } label: { NotaIconView(.xmark) }
+                            .buttonStyle(.notaIcon(selected: false))
+                            .accessibilityLabel("Close Window")
                     }
-                    .focusedSceneValue(\.noteSceneActions, NoteSceneActions(closeNote: { dismissWindow() }))
+                }
+                .focusedSceneValue(\.noteSceneActions, NoteSceneActions(closeNote: { dismissWindow() }))
             } else {
                 // Until a dragged-in note arrives, or after the note was deleted permanently elsewhere.
                 NotaEmptyState(.grid, title: "Note Unavailable", message: "This note was deleted or can’t be opened.")

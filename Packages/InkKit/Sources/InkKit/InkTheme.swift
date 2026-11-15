@@ -50,6 +50,8 @@ public enum InkIcon: String, CaseIterable, Sendable {
     case photo
     /// The tape and laser pointer tools, and the Pen Case's ruler toggle.
     case tape, laser, ruler
+    /// Links, bookmarks, the outline panel and going back after following a link (NOT-31).
+    case link, bookmark, outline, back
 }
 
 /// How InkKit's editor looks: the colours, fonts and icons of its chrome, the paper and desk the page sits
@@ -128,6 +130,9 @@ public struct InkTheme {
     public var tapeInks: [InkColor]
     /// The laser pointer's glow, on the page and on an external display. Fixed, like the inks.
     public var laser: InkColor
+    /// What links on the page are tinted and underlined in (`LinkObject`). Fixed, like the inks: it's saved
+    /// with each link.
+    public var link: InkColor
 
     public init(textPrimary: UIColor, textSecondary: UIColor, textTertiary: UIColor, textSelected: UIColor,
                 accent: UIColor, surfaceRaised: UIColor, surfaceFill: UIColor, surfaceSelected: UIColor,
@@ -140,7 +145,8 @@ public struct InkTheme {
                 penInks: [InkColor] = InkTheme.standardPenInks,
                 highlighterInks: [InkColor] = InkTheme.standardHighlighterInks,
                 tapeInks: [InkColor] = InkTheme.standardTapeInks,
-                laser: InkColor = InkTheme.standardLaser) {
+                laser: InkColor = InkTheme.standardLaser,
+                link: InkColor = InkTheme.standardLink) {
         self.textPrimary = textPrimary
         self.textSecondary = textSecondary
         self.textTertiary = textTertiary
@@ -166,6 +172,7 @@ public struct InkTheme {
         self.highlighterInks = highlighterInks
         self.tapeInks = tapeInks
         self.laser = laser
+        self.link = link
     }
 
     /// The colours `paper` is drawn in.
@@ -224,6 +231,10 @@ public extension InkTheme {
         case .close: "xmark"
         case .penTray: "tray.full"
         case .eyedropper: "eyedropper"
+        case .link: "link"
+        case .bookmark: "bookmark"
+        case .outline: "list.bullet.indent"
+        case .back: "chevron.backward"
         }
         return Image(systemName: name)
     }
@@ -257,6 +268,7 @@ public extension InkTheme {
     ]
 
     static let standardLaser = InkColor(name: "Laser", hex: 0xF0308A)
+    static let standardLink = InkColor(name: "Link", hex: 0x3345D9)
 
     static let standardHighlighterInks: [InkColor] = [
         InkColor(name: "Yellow", hex: 0xFFD60A),

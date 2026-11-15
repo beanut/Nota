@@ -7,6 +7,7 @@ import SwiftUI
 struct NoteSplitView: View {
     let notes: [Note]
     @Binding var workspace: NoteWorkspace
+    @Binding var trail: LinkTrail
 
     var body: some View {
         HStack(spacing: 0) {
@@ -18,18 +19,21 @@ struct NoteSplitView: View {
                 }
                 // Each side gets its own navigation bar for its Pen Case.
                 NavigationStack {
-                    NoteEditorView(note: note, workspace: $workspace)
-                        .toolbar {
-                            ToolbarItem(placement: .topBarLeading) {
-                                Button {
-                                    withAnimation { workspace.close(note.id) }
-                                } label: {
-                                    NotaIconView(.xmark)
-                                }
-                                .buttonStyle(.notaIcon(selected: false))
-                                .accessibilityLabel("Close \(note.title)")
+                    NoteEditorView(note: note, workspace: $workspace, trail: $trail) { other in
+                        withAnimation { workspace.replace(note.id, with: other) }
+                    }
+                    .id(note.id)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button {
+                                withAnimation { workspace.close(note.id) }
+                            } label: {
+                                NotaIconView(.xmark)
                             }
+                            .buttonStyle(.notaIcon(selected: false))
+                            .accessibilityLabel("Close \(note.title)")
                         }
+                    }
                 }
                 .frame(maxWidth: .infinity)
             }

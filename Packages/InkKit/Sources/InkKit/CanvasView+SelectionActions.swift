@@ -277,6 +277,7 @@ extension CanvasView {
             }
         ]))
         style.append(contentsOf: imageMenuElements())
+        style.append(contentsOf: linkMenuElements())
         style.append(UIAction(title: "Take Screenshot", image: UIImage(systemName: "camera.viewfinder")) { [weak self] _ in
             self?.takeScreenshot()
         })

@@ -728,6 +728,32 @@ final class CanvasController: ObservableObject {
         canvas?.finishImageCrop(commit: commit)
     }
 
+    // MARK: Links
+
+    /// What the link sheet is choosing a target for, while it's open.
+    @Published var linkRequest: LinkRequest?
+    /// The pages links were followed from in this editor, for Back.
+    @Published var linkHistory = LinkHistory()
+    /// Goes where a followed link points, from the page it was on. Set by the editor.
+    var onFollowLink: ((LinkTarget, UUID) -> Void)?
+
+    /// A link on the page `pageID` was tapped (or opened from its menu).
+    func followLink(_ target: LinkTarget, from pageID: UUID) {
+        onFollowLink?(target, pageID)
+    }
+
+    /// Opens the link sheet for a new link over the selection, or for a selected link.
+    func requestLink(_ request: LinkRequest) {
+        linkRequest = request
+    }
+
+    /// The link sheet chose `target`: puts the link on the page (or changes the one being edited).
+    func applyLink(_ target: LinkTarget, title: String?) {
+        guard let request = linkRequest else { return }
+        linkRequest = nil
+        canvas?.applyLink(request, target: target, title: title)
+    }
+
     // MARK: Text
 
     /// The typeface and size of new text boxes (the text tool's options); their colour is the Pen Case's.

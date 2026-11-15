@@ -34,6 +34,12 @@ import SwiftUI
 /// note). The ruler button shows a ruler or protractor that strokes snap to, measuring them as they're drawn.
 /// The laser pointer draws a fading trail or a dot that's never written on the page. While an external display
 /// is connected, the host can show `PresentationMirror` on it: the current page alone, with the laser.
+///
+/// The selection menu's Add Link… puts a link over the selection (`LinkObject`): to a web address, another page
+/// of this note, or (with `links`) another note or one of its pages. A tap with a pen, pencil, highlighter, the
+/// shape tool or the laser follows it, and a Back button returns to the page it was followed from (or, through
+/// `NoteLinks.back`, to the note it came from). The page bar bookmarks pages, and the page sidebar's Outline
+/// shows the bookmarks, the note's own outline entries and any imported PDF outline (`NoteOutline`).
 public struct InkCanvasEditor: View {
     @ObservedObject private var notebook: InkNotebook
     private let showsDebugHUD: Bool
@@ -43,6 +49,7 @@ public struct InkCanvasEditor: View {
     private let pageDestinations: [PageDestination]
     private let sendPages: PageSender?
     private let selectionActions: [SelectionAction]
+    private let links: NoteLinks?
 
     @StateObject private var controller = CanvasController()
     @StateObject private var telemetry = PencilTelemetry()
@@ -53,13 +60,15 @@ public struct InkCanvasEditor: View {
     @State private var isTurningPage = false
     @State private var showsSidebar = false
     @Environment(\.inkTheme) private var theme
+    @Environment(\.openURL) private var openURL
 
-    /// A multi-page editor.
+    /// A multi-page editor. Pass `links` for links to other notes and Back to the note a link came from.
     public init(notebook: InkNotebook, title: Binding<String>? = nil, showsDebugHUD: Bool = false,
                 writingLines: ((CanvasDocument) -> WritingLines?)? = nil,
                 pageDestinations: [PageDestination] = [], sendPages: PageSender? = nil,
-                selectionActions: [SelectionAction] = []) {
+                selectionActions: [SelectionAction] = [], links: NoteLinks? = nil) {
         self.notebook = notebook
+        self.links = links
         self.title = title
         self.showsDebugHUD = showsDebugHUD
         self.writingLines = writingLines
@@ -76,6 +85,7 @@ public struct InkCanvasEditor: View {
         self.title = title
         self.selectionActions = selectionActions
         notebook = InkNotebook(pages: [document], defaultPageSize: document.pageSize)
+        links = nil
         self.showsDebugHUD = showsDebugHUD
         self.writingLines = writingLines
         pageDestinations = []
@@ -112,6 +122,14 @@ public struct InkCanvasEditor: View {
                 .padding(.bottom, InkSpacing.s + InkMetrics.barHeight + InkSpacing.s) // clear of the page bar
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+
+            if let backTitle {
+                LinkBackButton(title: backTitle, action: goBack)
+                    .padding(.top, InkSpacing.s)
+                    .padding(.trailing, InkSpacing.m)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             if let format = controller.textFormat {
@@ -177,6 +195,12 @@ public struct InkCanvasEditor: View {
             BrushEditorView(controller: controller, tool: tool)
                 .inkTheme(theme)
         }
+        .sheet(item: $controller.linkRequest) { request in
+            LinkSheet(notebook: notebook, request: request, links: links,
+                      onDone: { controller.applyLink($0, title: $1) },
+                      onCancel: { controller.linkRequest = nil })
+                .inkTheme(theme)
+        }
         .onAppear {
             controller.hudVisible = showsDebugHUD
             controller.allowsContinuousLayout = showsPageControls
@@ -184,6 +208,7 @@ public struct InkCanvasEditor: View {
             controller.selectionActions = selectionActions
             controller.onSwipeToPage = { [notebook] swipe in turnPage(swipe, in: notebook) }
             controller.canSwipeToPage = { [notebook] swipe in canTurnPage(swipe, in: notebook) }
+            controller.onFollowLink = { target, pageID in follow(target, from: pageID) }
             controller.presentation.present(notebook.currentPage)
         }
         .onChange(of: notebook.currentPage.id) {
@@ -191,6 +216,49 @@ public struct InkCanvasEditor: View {
         }
         .onDisappear {
             controller.presentation.stopPresenting(notebook.currentPage)
+        }
+    }
+
+    // MARK: Links
+
+    /// Goes where a link points: opens a web page, turns to a page of this note (remembering where it was
+    /// followed from, for Back), or asks the host to open another note.
+    private func follow(_ target: LinkTarget, from pageID: UUID) {
+        switch target {
+        case let .url(url):
+            openURL(url)
+        case let .page(id):
+            guard let index = notebook.index(of: id), showsPageControls, index != notebook.currentPageIndex else { return }
+            controller.linkHistory.push(pageID)
+            show(pageAt: index)
+        case let .note(id, page):
+            links?.open(id, page)
+        }
+    }
+
+    /// What Back returns to: the page the last link here was followed from, or the note a link came from.
+    private var backTitle: String? {
+        if let id = controller.linkHistory.peek(where: { notebook.index(of: $0) != nil }),
+           let index = notebook.index(of: id) {
+            return "Page \(index + 1)"
+        }
+        return links?.back?.title
+    }
+
+    private func goBack() {
+        if let id = controller.linkHistory.pop(where: { notebook.index(of: $0) != nil }),
+           let index = notebook.index(of: id) {
+            show(pageAt: index)
+        } else {
+            links?.back?.action()
+        }
+    }
+
+    /// Turns to the page at `index`, sliding it in from the side it's on.
+    private func show(pageAt index: Int) {
+        pageTransitionEdge = index > notebook.currentPageIndex ? .trailing : .leading
+        withAnimation(.snappy(duration: 0.3)) {
+            notebook.goToPage(index)
         }
     }
 

@@ -44,7 +44,8 @@ paste across pages and notes, duplicate, recolour, thickness, arrange, screensho
 ([NOT-21](https://linear.app/nota-on-inkkit/issue/NOT-21)), and typed text boxes with rich formatting, checklists and
 search ([NOT-22](https://linear.app/nota-on-inkkit/issue/NOT-22), in review), and images and stickers: insert, crop,
 resize, rotate ([NOT-23](https://linear.app/nota-on-inkkit/issue/NOT-23), in review), and tape, ruler and laser
-pointer tools with presentation mode ([NOT-24](https://linear.app/nota-on-inkkit/issue/NOT-24), in review), landed early. After M0, M1
+pointer tools with presentation mode ([NOT-24](https://linear.app/nota-on-inkkit/issue/NOT-24), in review), and links,
+bookmarks and the note outline ([NOT-31](https://linear.app/nota-on-inkkit/issue/NOT-31), in review), landed early. After M0, M1
 continues with writing across page boundaries in vertical scrolling
 ([NOT-89](https://linear.app/nota-on-inkkit/issue/NOT-89)).
 

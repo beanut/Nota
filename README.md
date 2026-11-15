@@ -102,6 +102,13 @@ InkCanvasEditor(notebook: notebook)
 - **Tape** – the tape tool (`TapeObject`) covers part of the page with a strip of tape, dragged from end to end (snapping level, upright or to 45°) in the Pen Case's tape colours, plain, striped or grid. Tape is drawn over the ink, so it hides writing as well as paper and objects: a study aid. A tap on tape with any tool but the lasso and the eraser reveals it (a faint dashed outline over what it covers) or hides it again; the tape tool's options reveal or hide all the page's tape. Each strip's state is saved with the note; the lasso moves, rotates, resizes, recolours and deletes tape like any object, and every change is one undo step.
 - **Ruler** – the Pen Case's ruler button shows a ruler over the canvas (touch and hold it for the protractor). One finger moves it, two turn it (snapping to every 15°), and it shows its angle. A pen, pencil or highlighter stroke that starts on it or within 28 pt of an edge is drawn exactly along that edge (round the protractor's arc, or along its baseline), and while it's drawn its length shows by the Pencil in centimetres of page (1 pt = 1/72 in), or the angle it sweeps round the protractor. The ruler isn't saved: it stays while the editor is open.
 - **Laser pointer and presenting** – the laser tool draws a glowing line that fades after about a second (or, in Dot mode, a dot that follows the touch) and never writes on the page. When an external display or AirPlay screen is connected, it shows the page being worked on alone (no chrome, read-only, fitted to the screen) with the laser on it, instead of mirroring the whole iPad screen; the editor says it's presenting.
+- **Links, bookmarks and outline** – the selection menu's Add Link… links any selection (ink, shapes, text,
+  pictures) to a web address, another page of the note, or another note or one of its pages (`LinkObject`). A tap
+  with a pen, pencil, highlighter, the shape tool or the laser follows it; a link to another note opens that note in
+  its place (the same side of a split), and a Back button returns to the page or note the link was followed from.
+  The page bar's bookmark button bookmarks the page, and the page sidebar's Outline tab lists the bookmarks, the
+  note's own outline entries (add, rename, reorder, delete) and the outline of any PDF brought into it. A table of
+  contents is a page of links.
 - **Scrolling** – More › Scroll Direction shows pages one at a time with sideways swipes (Horizontal) or all of them in one column scrolled vertically (Vertical), saved for every editor. In vertical scrolling only the pages in view get a canvas, so a 300-page note scrolls as smoothly as a short one; pinch to zoom, and writing near the bottom of the last page adds the next one.
 - **Page sidebar** – the page bar's pages button opens thumbnails of every page: tap one to go to it, drag to reorder, and duplicate, rotate (ink and all), delete, or copy or move pages to another note, one page from its context menu or several with Select.
 - **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page. The eraser erases pixel by pixel (Precision), the parts of strokes it passes over (Standard) or whole strokes, optionally only highlighter or only pencil ink, and can switch back to the previous tool afterwards.
@@ -149,7 +156,7 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   screen, and the ruler's two-finger turn and Pencil-on-ruler writing need a physical iPad (NOT-12). Ink shows
   on the external display as each stroke finishes, not while it's drawn. The zoom window's panel doesn't show
   tape, and the ruler doesn't guide strokes written in the zoom window.
-- Shapes (NOT-20), text boxes (NOT-22), pictures (NOT-23) and tape (NOT-24) are the only real object types so far. Shape recognition is tuned on synthetic strokes,
+- Shapes (NOT-20), text boxes (NOT-22), pictures (NOT-23), tape (NOT-24) and links (NOT-31) are the only real object types so far. Shape recognition is tuned on synthetic strokes,
   not yet on real handwriting (NOT-12), and a shape is hit anywhere in its bounds, so a diagonal line can be
   selected from the empty corners of its box. The zoom window's panel doesn't show objects, and the pixel eraser's live preview paints
   paper over them until the stroke commits (objects are never erased).
@@ -157,6 +164,12 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   physical iPad yet (NOT-12). The on-screen keyboard can cover a box low on the page; the page doesn't
   scroll it into view. Undo while typing undoes typing; the page's undo takes back a whole editing session.
   Resizing a box changes the width its text wraps at, never the text's size (that's the format bar's).
+- Links (NOT-31) cover a selection's bounds rather than belonging to what they cover: moving a text box alone
+  leaves its link behind (select both with the lasso), and a link can't cover part of a text box's text. Links to
+  pages of the same note stop working in a duplicated note or in pages copied to another note (they point at the
+  original's pages). A link to a note in Recently Deleted does nothing. Back across notes lasts while the window is
+  open; it isn't restored with the scene. PDF outlines are read by `NoteOutline` but nothing imports PDFs yet, so
+  the Outline tab's "From PDF" section is only exercised by tests.
 - A note's page sizes aren't stored in SwiftData, so a note reopened after relaunch starts as Letter pages.
 - Thumbnails are placeholders, not renders of the ink.
 - No PDF import/viewer, sharing or sync yet. A PDF-kind note opens beside a notebook like any other note, but shows the canvas until the PDF viewer lands. PDFs and images can be used as page templates (the PDF's first page), and `PageRenderer.pdf(of:)` exports pages as PDF, but the app has no export button yet.

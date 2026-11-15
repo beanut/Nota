@@ -1264,7 +1264,7 @@ final class CanvasView: UIView {
                 erased = commit
             }
             // A scratch-out erases the ink under it, and the scratch itself is dropped like a cancelled stroke.
-            if commit, !live.stroke.points.isEmpty, !toggleTapeIfTapped(live), !convertToShape(live), !scratchOut(with: live) {
+            if commit, !live.stroke.points.isEmpty, !tapObjectIfTapped(live), !convertToShape(live), !scratchOut(with: live) {
                 if let (segment, dirty) = live.finish() { // the end taper, now the end is known
                     liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
                     zoomPanel?.liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)

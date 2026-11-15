@@ -31,7 +31,8 @@ extension InkTheme {
         penInks: NotaInk.penPresets.map(InkColor.init),
         highlighterInks: NotaInk.highlighterPresets.map(InkColor.init),
         tapeInks: NotaInk.tapePresets.map(InkColor.init),
-        laser: InkColor(NotaInk.laser)
+        laser: InkColor(NotaInk.laser),
+        link: InkColor(NotaInk.blue)
     )
 }
 
@@ -53,6 +54,10 @@ private extension NotaIcon {
         case .close: .xmark
         case .penTray: .pens
         case .eyedropper: .eyedropper
+        case .link: .link
+        case .bookmark: .bookmark
+        case .outline: .list
+        case .back: .chevronLeft
         }
     }
 
