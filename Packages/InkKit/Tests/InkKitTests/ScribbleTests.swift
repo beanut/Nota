@@ -62,6 +62,18 @@ struct ScribbleTests {
         #expect(!Scribble.isScratchOut([CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 0)], minSize: 24))
     }
 
+    @Test("Going back and forth along a stroke to darken it isn't a scratch-out")
+    func retraceIsNotScratch() {
+        // Retracing a line five times, dead on and with a hand's few points of drift: drawing, not erasing.
+        #expect(!Scribble.isScratchOut(zigzag(passes: 5, drop: 0), minSize: 24))
+        #expect(!Scribble.isScratchOut(zigzag(passes: 6, drop: 1.5), minSize: 24))
+        let diagonal = zigzag(passes: 6, drop: 1).map { CGPoint(x: $0.x * 0.7 - $0.y * 0.7, y: $0.x * 0.7 + $0.y * 0.7) }
+        #expect(!Scribble.isScratchOut(diagonal, minSize: 24))
+        // A short scratch still needs to spread across its axis by half the minimum size.
+        #expect(Scribble.isScratchOut(zigzag(passes: 6, width: 40, drop: 3), minSize: 24))
+        #expect(!Scribble.isScratchOut(zigzag(passes: 6, width: 40, drop: 1), minSize: 24))
+    }
+
     @Test("Small wobbles don't count as turns")
     func hysteresis() {
         let values: [CGFloat] = [0, 50, 48, 100, 98, 0, 2, 100]

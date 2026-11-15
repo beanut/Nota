@@ -4,8 +4,9 @@ import Foundation
 /// Pure geometry for the Pencil's scribble gestures, in canvas space:
 ///
 /// - **Scratch-out:** scribbling back and forth over ink erases the strokes underneath. A stroke counts
-///   as a scratch when it runs to and fro along one axis at least four times; it only erases if strokes
-///   lie mostly inside it, otherwise it's kept as ink (shading, a zigzag).
+///   as a scratch when it runs to and fro along one axis at least four times and covers an area across it
+///   (retracing a line back and forth is still ink); it only erases if strokes lie mostly inside it,
+///   otherwise it's kept as ink (shading, a zigzag).
 /// - **Circle to select:** drawing a loop around ink and holding the Pencil still selects the strokes
 ///   mostly inside the loop.
 enum Scribble {
@@ -18,9 +19,13 @@ enum Scribble {
 
     /// Back-and-forth passes a scratch needs.
     static let minReversals = 4
+    /// How wide a scratch must be across its main axis, as a fraction of its length.
+    static let minCrossSpread: CGFloat = 0.15
 
     /// Whether `points` scribble back and forth: at least `minReversals` turns along their main axis,
-    /// each pass covering a good part of the scratch, and the scratch at least `minSize` long.
+    /// each pass covering a good part of the scratch, and the scratch at least `minSize` long. It must also
+    /// cover an area, spreading across its axis by `minCrossSpread` of its length (and half of `minSize`):
+    /// going back and forth along one line, as when retracing a stroke to darken it, is drawing, not a scratch.
     static func isScratchOut(_ points: [CGPoint], minSize: CGFloat) -> Bool {
         guard points.count >= 12 else { return false }
         let axis = principalAxis(points)
@@ -28,6 +33,9 @@ enum Scribble {
         guard let lo = s.min(), let hi = s.max() else { return false }
         let range = hi - lo
         guard range >= minSize else { return false }
+        let across = points.map { $0.y * axis.x - $0.x * axis.y }
+        guard let acrossLo = across.min(), let acrossHi = across.max(),
+              acrossHi - acrossLo >= max(minCrossSpread * range, minSize / 2) else { return false }
         let length = zip(points, points.dropFirst()).reduce(0) { $0 + $1.0.distance(to: $1.1) }
         guard length >= 2.5 * range else { return false }
         // A pass must cover at least a third of the scratch's span to count, so a wobble doesn't.
