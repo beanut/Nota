@@ -203,6 +203,24 @@ public final class InkNotebook: ObservableObject {
         pages.append(contentsOf: fresh)
     }
 
+    // MARK: Gestures across pages
+
+    /// Undoes, on every page, the edits at the top of its undo history that belong to `group`: the rest
+    /// of a stroke or erase that crossed a page boundary (`CanvasDocument.editGroup`), once one of its
+    /// pages has undone its own part. A page that has been edited since keeps its part.
+    func undoGroup(_ group: UUID) {
+        for page in pages {
+            while page.undoGroup == group, page.undo() {}
+        }
+    }
+
+    /// Redoes, on every page, the edits at the top of its redo history that belong to `group`.
+    func redoGroup(_ group: UUID) {
+        for page in pages {
+            while page.redoGroup == group, page.redo() {}
+        }
+    }
+
     // MARK: Writing off the end
 
     /// How far down the last page ink has to reach (as a fraction of its height) for a new page to be

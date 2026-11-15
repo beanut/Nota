@@ -114,8 +114,12 @@ final class CanvasView: UIView {
     private var pending: [PendingStroke] = []
     private var isCommitScheduled = false
 
-    // Input state
+    /// The touch drawing the stroke, erase or lasso under way.
     private(set) var activeTouch: UITouch?
+    /// The group of a stroke carried across pages (`CanvasDocument.editGroup`), while it's under way here.
+    var strokeGroup: UUID?
+    /// Whether this page joined the stroke under way from another page, rather than a touch beginning it here.
+    private(set) var joinedStroke = false
     var live: LiveStroke?
     var eraseSession: EraseSession?
 
@@ -842,24 +846,6 @@ final class CanvasView: UIView {
         }
     }
 
-    @discardableResult
-    func undo() -> Bool {
-        endEditingText()
-        let inkRevision = document.revision
-        guard live == nil, lassoSession == nil, shapeSnap == nil, editDocument({ document.undo() }) else { return false }
-        redrawFromDocument(ink: document.revision != inkRevision)
-        return true
-    }
-
-    @discardableResult
-    func redo() -> Bool {
-        endEditingText()
-        let inkRevision = document.revision
-        guard live == nil, lassoSession == nil, shapeSnap == nil, editDocument({ document.redo() }) else { return false }
-        redrawFromDocument(ink: document.revision != inkRevision)
-        return true
-    }
-
     func clearCanvas() {
         endEditingText()
         editDocument { document.clear() }
@@ -1002,6 +988,9 @@ final class CanvasView: UIView {
             beginStroke(at: inputTransform.toCanvas(location))
             startHoldWatch(at: location, time: touch.timestamp)
             ingest(touch, event: event, final: false)
+            if isEmbedded, carriesAcrossPages {
+                controller?.continuousHost?.beginWritingAcrossPages(touch, event: event, on: self)
+            }
         }
         updateFingerState(event)
     }
@@ -1010,14 +999,10 @@ final class CanvasView: UIView {
         if let touch = zoomTouch, touches.contains(touch) {
             updateZoomDrag(touch)
         }
-        guard let touch = activeTouch, touches.contains(touch) else { return }
-        if touch.type == .pencil {
-            palmRejector.pencilSeen(at: touch.location(in: self), time: touch.timestamp)
-        } else if isPalm(touch) {
-            endStroke(commit: false) // finger ink whose contact grew into a palm
-            return
+        if let touch = activeTouch, touches.contains(touch) {
+            moveStroke(touch, event: event)
         }
-        ingest(touch, event: event, final: false)
+        handOnAcrossPages(touches, event: event)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -1028,6 +1013,7 @@ final class CanvasView: UIView {
             ingest(touch, event: event, final: true)
             endStroke(commit: true)
         }
+        handOnAcrossPages(touches, event: event, endingWith: true)
         updateFingerState(event, ending: touches)
         palmTouches.subtract(touches)
     }
@@ -1039,17 +1025,61 @@ final class CanvasView: UIView {
         if let touch = activeTouch, touches.contains(touch) {
             endStroke(commit: false)
         }
+        handOnAcrossPages(touches, event: event, endingWith: false)
         updateFingerState(event, ending: touches)
         palmTouches.subtract(touches)
     }
 
+    /// The next event of the stroke under way.
+    func moveStroke(_ touch: UITouch, event: UIEvent?) {
+        if touch.type == .pencil {
+            palmRejector.pencilSeen(at: touch.location(in: self), time: touch.timestamp)
+        } else if isPalm(touch) {
+            endStroke(commit: false) // finger ink whose contact grew into a palm
+            return
+        }
+        ingest(touch, event: event, final: false)
+    }
+
+    /// Starts this page's piece of a stroke begun on another page (or of this page's own stroke, back
+    /// after leaving it), as it comes within reach. The piece may start off the page.
+    func joinStroke(_ touch: UITouch, event: UIEvent?, group: UUID) {
+        guard activeTouch == nil, activeGestureCount == 0, zoomTouch == nil else { return }
+        activeTouch = touch
+        strokeGroup = group
+        joinedStroke = true
+        strokeBeganAt = touch.timestamp
+        inputInZoomPanel = false
+        inputTransform = viewTransform
+        beginStroke(at: inputTransform.toCanvas(touch.preciseLocation(in: self)), offPage: true)
+        ingest(touch, event: event, final: false)
+    }
+
+    /// Ends this page's piece: the stroke went out of reach, or it ended.
+    func leaveStroke(_ touch: UITouch, event: UIEvent?, final: Bool, commit: Bool) {
+        guard activeTouch === touch else { return }
+        if final, commit {
+            ingest(touch, event: event, final: true)
+        }
+        endStroke(commit: commit)
+    }
+
     /// Pencil force/tilt are often first reported as estimates and refined a few ms later.
     override func touchesEstimatedPropertiesUpdated(_ touches: Set<UITouch>) {
+        applyEstimates(touches, recording: true)
+        // Pages that joined a stroke begun here hear about their samples' refinements from this page.
+        if isEmbedded {
+            controller?.continuousHost?.forwardEstimates(touches, from: self)
+        }
+    }
+
+    /// Patches refined force and tilt into the live and committed strokes whose samples they belong to.
+    func applyEstimates(_ touches: Set<UITouch>, recording: Bool) {
         var liveDirty = CGRect.null
         var liveTouchesTail = false
         var pendingDirty = CGRect.null
         for touch in touches {
-            if let recorder = controller?.inputRecorder, let key = touch.estimationUpdateIndex {
+            if recording, let recorder = controller?.inputRecorder, let key = touch.estimationUpdateIndex {
                 let v = sampleValues(touch)
                 recorder.update(estimationKey: key, force: v.force, altitude: v.altitude, azimuth: v.azimuth,
                                 final: touch.estimatedPropertiesExpectingUpdates.isEmpty)
@@ -1126,7 +1156,7 @@ final class CanvasView: UIView {
 
     /// `start` is the touch-down point in canvas space. Ink only starts on the page; erasing and the
     /// lasso work from anywhere, since they may need to reach strokes hanging off the edge.
-    private func beginStroke(at start: CGPoint) {
+    private func beginStroke(at start: CGPoint, offPage: Bool = false) {
         guard let controller else { return }
         if pendingEstimates.count > 1024 {
             pendingEstimates.removeAll()
@@ -1141,7 +1171,7 @@ final class CanvasView: UIView {
         } else if controller.tool == .eraser && controller.eraserMode != .precision {
             eraseSession = EraseSession(target: controller.effectiveEraserTarget,
                                         before: controller.eraserMode == .standard ? document.strokes : nil)
-        } else if controller.tool == .eraser || document.contains(start) {
+        } else if controller.tool == .eraser || offPage || document.contains(start) {
             let template = controller.strokeTemplate(viewScale: inputTransform.scale)
             let stroke = Stroke(id: UUID(), color: template.color, brush: template.brush, points: [])
             live = LiveStroke(stroke: stroke)
@@ -1246,6 +1276,14 @@ final class CanvasView: UIView {
 
     private func endStroke(commit: Bool) {
         activeTouch = nil
+        // Edits made by a stroke carried across pages share its group, for undo.
+        document.editGroup = strokeGroup
+        let joined = joinedStroke
+        defer {
+            document.editGroup = nil
+            strokeGroup = nil
+            joinedStroke = false
+        }
         stopHoldWatch()
         if lassoPending || lassoSession != nil {
             finishLasso(commit: commit)
@@ -1264,7 +1302,9 @@ final class CanvasView: UIView {
                 erased = commit
             }
             // A scratch-out erases the ink under it, and the scratch itself is dropped like a cancelled stroke.
-            if commit, !live.stroke.points.isEmpty, !tapObjectIfTapped(live), !convertToShape(live), !scratchOut(with: live) {
+            // A piece joined from another page is only kept if it reached this one; it's never a tap or a shape.
+            if commit, !live.stroke.points.isEmpty, joined ? !isOffPage(live) : !tapObjectIfTapped(live) && !convertToShape(live),
+               !scratchOut(with: live) {
                 if let (segment, dirty) = live.finish() { // the end taper, now the end is known
                     liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
                     zoomPanel?.liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
@@ -1295,7 +1335,8 @@ final class CanvasView: UIView {
         hud.state = .idle
         hud.predictedCount = 0
         publishHUD(force: true)
-        if erased {
+        // An erase carried across pages ends once, when its last piece does (`endWritingAcrossPages`).
+        if erased, !isInkingOnAnyPage {
             controller?.eraserStrokeDidEnd()
         }
     }

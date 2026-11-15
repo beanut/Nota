@@ -109,7 +109,7 @@ InkCanvasEditor(notebook: notebook)
   The page bar's bookmark button bookmarks the page, and the page sidebar's Outline tab lists the bookmarks, the
   note's own outline entries (add, rename, reorder, delete) and the outline of any PDF brought into it. A table of
   contents is a page of links.
-- **Scrolling** – More › Scroll Direction shows pages one at a time with sideways swipes (Horizontal) or all of them in one column scrolled vertically (Vertical), saved for every editor. In vertical scrolling only the pages in view get a canvas, so a 300-page note scrolls as smoothly as a short one; pinch to zoom, and writing near the bottom of the last page adds the next one.
+- **Scrolling** – More › Scroll Direction shows all pages in one column scrolled vertically (Vertical, the default) or one at a time with sideways swipes (Horizontal), saved for every editor. Vertical scrolling reads as one long sheet: a stroke or an erase carries on from one page onto the next without lifting the Pencil, stored as one stroke per page and undone in one step. Only the pages in view get a canvas, so a 300-page note scrolls as smoothly as a short one; pinch to zoom, and writing near or past the bottom of the last page adds the next one.
 - **Page sidebar** – the page bar's pages button opens thumbnails of every page: tap one to go to it, drag to reorder, and duplicate, rotate (ink and all), delete, or copy or move pages to another note, one page from its context menu or several with Select.
 - **Editor** – the page sits on a grey desk, fitted to the view. Ink is clipped to the page, and strokes can't start off it (the eraser and lasso can). The page bar under the page moves between pages, adds pages (any size, including custom) and deletes them. Its size menu resizes this page or every page. The eraser erases pixel by pixel (Precision), the parts of strokes it passes over (Standard) or whole strokes, optionally only highlighter or only pencil ink, and can switch back to the previous tool afterwards.
 - **Zoom window** – More › Zoom Window opens a magnified writing panel above the page bar for a box on the page, for small, neat handwriting. Every tool works in it. Writing into the panel's shaded right-hand zone moves the box along the line, and at the end of the line on to the next one, following the page template's ruling. Drag the box by its tab, resize it (and so the magnification) by its corner knob, or use the panel's back, on and new-line buttons.
@@ -138,8 +138,8 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   killed shows its previous cover until it's next opened and closed.
 - The library index (SwiftData) is rebuilt from packages at launch if notes are missing from it, with title,
   dates, page count and template; folders, favourites and tints aren't in packages, so they're lost then.
-- In vertical scrolling each page is still its own canvas: a stroke stops at the bottom of its page rather
-  than flowing onto the next (NOT-89), and the zoom window isn't offered.
+- In vertical scrolling ink and the eraser carry across page boundaries, but the lasso still works on one
+  page at a time: a selection can't span two pages or be dragged onto another. The zoom window isn't offered.
 - Rotating a page clears its undo history.
 - Pixel-eraser cuts belong to the page, not the strokes they cut: moving, copying or bringing to front a stroke
   that was partly pixel-erased shows it whole again in its new place (or order). The standard and stroke

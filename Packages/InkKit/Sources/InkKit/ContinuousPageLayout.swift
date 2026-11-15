@@ -22,9 +22,9 @@ public enum PageLayoutMode: String, CaseIterable, Identifiable, Sendable {
 
     static let defaultsKey = "InkKit.pageLayout"
 
-    /// The saved choice, or paged when there's none.
+    /// The saved choice, or continuous (one long sheet, written across page boundaries) when there's none.
     static func load(from defaults: UserDefaults) -> PageLayoutMode {
-        defaults.string(forKey: defaultsKey).flatMap(PageLayoutMode.init(rawValue:)) ?? .paged
+        defaults.string(forKey: defaultsKey).flatMap(PageLayoutMode.init(rawValue:)) ?? .continuous
     }
 
     func save(to defaults: UserDefaults) {
@@ -53,8 +53,9 @@ struct ContinuousPageLayout: Equatable {
         var gap: CGFloat
     }
 
-    /// Room for the navigation bar above the first page and the page bar below the last.
-    static let defaultInsets = Insets(top: 24, side: 24, bottom: 76, gap: 16)
+    /// Room for the navigation bar above the first page and the page bar below the last. The gap between
+    /// pages is small, so the pages read as one long sheet that writing carries across (`PageSeam`).
+    static let defaultInsets = Insets(top: 24, side: 24, bottom: 76, gap: 6)
 
     init(pageSizes: [CGSize], width: CGFloat, insets: Insets = defaultInsets) {
         let widest = pageSizes.map(\.width).max() ?? 0
