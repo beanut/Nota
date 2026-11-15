@@ -222,4 +222,47 @@ extension CanvasView {
             break
         }
     }
+
+    /// The selection box, dashed, with a knob at each corner for resizing and one above it for rotating.
+    /// A single selected shape also shows its own handles; a line or arrow shows only those.
+    func drawSelection(_ box: SelectionBox, accent: UIColor, in ctx: CGContext) {
+        let shape = selectedShape
+        if let shape, shape.shape.isLinear {
+            drawShapeHandles(shape, accent: accent, in: ctx)
+            return
+        }
+        let corners = box.corners.map { viewTransform.toView($0) }
+        let outline = CGMutablePath()
+        outline.addLines(between: corners)
+        outline.closeSubpath()
+        ctx.addPath(outline)
+        ctx.setFillColor(accent.withAlphaComponent(0.08).cgColor)
+        ctx.fillPath()
+        ctx.addPath(outline)
+        ctx.setStrokeColor(accent.cgColor)
+        ctx.setLineWidth(1.5)
+        ctx.setLineDash(phase: 0, lengths: [6, 4])
+        ctx.strokePath()
+        ctx.setLineDash(phase: 0, lengths: [])
+
+        let top = viewTransform.toView(CGPoint(x: box.rect.midX, y: box.rect.minY).applying(box.transform))
+        let knob = viewTransform.toView(SelectionGeometry.rotateHandle(
+            of: box, distance: Self.rotateHandleDistance / viewTransform.scale
+        ))
+        ctx.move(to: top)
+        ctx.addLine(to: knob)
+        ctx.setLineWidth(1)
+        ctx.strokePath()
+        let r = Self.handleRadius
+        ctx.setFillColor(paperColor.resolvedColor(with: InkTheme.onPaper).cgColor)
+        ctx.setLineWidth(1.5)
+        for point in corners + [knob] {
+            let circle = CGRect(x: point.x - r, y: point.y - r, width: 2 * r, height: 2 * r)
+            ctx.fillEllipse(in: circle)
+            ctx.strokeEllipse(in: circle)
+        }
+        if let shape, !shape.handles.isEmpty {
+            drawShapeHandles(shape, accent: accent, in: ctx) // over the box's outline
+        }
+    }
 }

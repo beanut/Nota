@@ -70,6 +70,25 @@ public extension NotaInk {
         .highlightYellow, .highlightGreen, .highlightBlue, .highlightPink, .highlightOrange
     ]
 
+    // MARK: Tape (`tape/*`, Nota addition)
+
+    // Tape covers what's under it, so these are drawn opaque: soft, papery colours that read as tape over
+    // ink and paper alike, with ink still legible on them.
+    static let tapeSand = NotaInk(name: "tape/sand", hex: 0xE8D7A9)
+    static let tapeSage = NotaInk(name: "tape/sage", hex: 0xB9D3B2)
+    static let tapeSky = NotaInk(name: "tape/sky", hex: 0xA9C8EA)
+    static let tapeBlush = NotaInk(name: "tape/blush", hex: 0xF0BCC8)
+    static let tapeSlate = NotaInk(name: "tape/slate", hex: 0x9EA3B2)
+
+    /// The colour presets in the Pen Case for the tape tool.
+    static let tapePresets: [NotaInk] = [.tapeSand, .tapeSage, .tapeSky, .tapeBlush, .tapeSlate]
+
+    // MARK: Laser (`laser/*`, Nota addition)
+
+    /// The laser pointer's glow, on the canvas and an external display. Magenta, so it's never mistaken for
+    /// the red that only means recording (`signalRecord`), and fixed like the inks, since it's drawn on paper.
+    static let laser = NotaInk(name: "laser/magenta", hex: 0xF0308A)
+
     // MARK: Labels (`label/*`, Nota addition for folders)
 
     static let labelRose = NotaInk(name: "label/rose", hex: 0xC2255C)

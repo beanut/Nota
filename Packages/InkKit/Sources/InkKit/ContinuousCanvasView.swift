@@ -341,6 +341,20 @@ final class ContinuousCanvasView: UIView {
         notebook.addPageIfWritingReachedEnd(of: document, inkBounds: bounds)
     }
 
+    /// Shows or hides the ruler over every page, to match the controller. A Pencil touch on the ruler writes
+    /// on the page under it.
+    func updateRuler() {
+        guard let controller else { return }
+        RulerView.sync(in: self, controller: controller) { [weak self] p in self?.canvas(at: p) }
+    }
+
+    /// The page's canvas at `point` (this view's space), if a page with a canvas is there.
+    func canvas(at point: CGPoint) -> CanvasView? {
+        canvases.values.first { canvas in
+            canvas.pageFrameInView.contains(canvas.convert(point, from: self))
+        }
+    }
+
     func pencilSettingsDidChange() {
         let fingerDraws = (controller?.pencilSettings.fingerDrawing ?? .system)
             .fingerDraws(pencilOnlySystemSetting: UIPencilInteraction.prefersPencilOnlyDrawing)
@@ -439,6 +453,7 @@ struct ContinuousCanvasRepresentable: UIViewRepresentable {
         controller.continuousHost = view
         controller.zoomDidChange(1)
         controller.selectionDidChange(false)
+        view.updateRuler()
         return view
     }
 

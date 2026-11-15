@@ -10,7 +10,8 @@ import UIKit
 ///     via coalesced, non-blocking full re-renders and incremental commits.
 ///  4. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
-///  5. `lassoOverlayView` – the lasso, the selection box and its handles (the overlay).
+///  5. `tapeLayer` – the page's tape, which covers the ink (`TapeObject`), then the laser (`LaserView`).
+///  6. `lassoOverlayView` – the lasso, the selection box and its handles (the overlay), then the ruler.
 final class CanvasView: UIView {
     /// The page, the desk around it and the lasso's accent, from the editor's `InkTheme` (see `apply(_:)`).
     private(set) var paperColor = InkTheme.standard.paper
@@ -115,7 +116,7 @@ final class CanvasView: UIView {
 
     // Input state
     private(set) var activeTouch: UITouch?
-    private(set) var live: LiveStroke?
+    var live: LiveStroke?
     var eraseSession: EraseSession?
 
     /// Lasso state
@@ -143,6 +144,10 @@ final class CanvasView: UIView {
     var imageCropView: ImageCropView?
     /// A text tool touch in progress.
     var textGesture: TextGesture?
+    /// A tape or laser tool touch in progress (see `CanvasView+Tools`).
+    var toolGesture: ToolGesture?
+    /// The ruler edge the stroke being drawn snaps to, and what it has measured (see `CanvasView+Ruler`).
+    var rulerSnap: RulerMeasurement?
     /// A finger tap with the text tool when fingers don't draw, or on the page while a box is edited.
     lazy var textTap = UITapGestureRecognizer(target: self, action: #selector(handleTextFingerTap(_:)))
 
@@ -151,6 +156,8 @@ final class CanvasView: UIView {
     var selection = PageSelection.empty
     var selectionBox: SelectionBox? // canvas space; nil when nothing is selected
     let objectLayer = ObjectLayerView()
+    /// Tape: objects drawn over the ink (`PageObject.drawsOverInk`).
+    let tapeLayer = ObjectLayerView()
     let lassoOverlayView = LassoOverlayView()
     /// How many times each clip has been pasted on this page in its own place, so the next paste of it
     /// lands a step further along (see `PastePlacement`).
@@ -253,6 +260,7 @@ final class CanvasView: UIView {
         }
         liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
         inkClipView.addSubview(liveView)
+        addSubview(tapeLayer)
 
         lassoOverlayView.canvas = self
         addSubview(lassoOverlayView)
@@ -343,6 +351,7 @@ final class CanvasView: UIView {
         inkClipView.frame = bounds
         templateView.frame = bounds
         objectLayer.frame = bounds
+        tapeLayer.frame = bounds
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
         layoutZoomPanel()
@@ -721,11 +730,13 @@ final class CanvasView: UIView {
 
     /// Shows the document's objects as they are now.
     func refreshObjects() {
-        let preview: [any PageObject] = shapeSnap.map { [$0.shape] } ?? []
+        let preview: [any PageObject] = (shapeSnap.map { [$0.shape] } ?? []) + toolGesturePreview
         // The box being edited is shown by its text view instead.
         let editing = textEditor?.objectID ?? imageCropView?.objectID
         let objects = editing.map { id in document.objects.filter { $0.id != id } } ?? document.objects
-        objectLayer.show(objects + preview, pageBounds: document.pageBounds)
+        let layers = (objects + preview).splitByInkLayer
+        objectLayer.show(layers.under, pageBounds: document.pageBounds)
+        tapeLayer.show(layers.over, pageBounds: document.pageBounds)
     }
 
     /// Drops the stroke being drawn without committing it (it became a shape or a selection).
@@ -778,49 +789,6 @@ final class CanvasView: UIView {
             ctx.setLineDash(phase: 0, lengths: [6, 4])
             ctx.strokePath()
             ctx.setLineDash(phase: 0, lengths: [])
-        }
-    }
-
-    /// The selection box, dashed, with a knob at each corner for resizing and one above it for rotating.
-    /// A single selected shape also shows its own handles; a line or arrow shows only those.
-    private func drawSelection(_ box: SelectionBox, accent: UIColor, in ctx: CGContext) {
-        let shape = selectedShape
-        if let shape, shape.shape.isLinear {
-            drawShapeHandles(shape, accent: accent, in: ctx)
-            return
-        }
-        let corners = box.corners.map { viewTransform.toView($0) }
-        let outline = CGMutablePath()
-        outline.addLines(between: corners)
-        outline.closeSubpath()
-        ctx.addPath(outline)
-        ctx.setFillColor(accent.withAlphaComponent(0.08).cgColor)
-        ctx.fillPath()
-        ctx.addPath(outline)
-        ctx.setStrokeColor(accent.cgColor)
-        ctx.setLineWidth(1.5)
-        ctx.setLineDash(phase: 0, lengths: [6, 4])
-        ctx.strokePath()
-        ctx.setLineDash(phase: 0, lengths: [])
-
-        let top = viewTransform.toView(CGPoint(x: box.rect.midX, y: box.rect.minY).applying(box.transform))
-        let knob = viewTransform.toView(SelectionGeometry.rotateHandle(
-            of: box, distance: Self.rotateHandleDistance / viewTransform.scale
-        ))
-        ctx.move(to: top)
-        ctx.addLine(to: knob)
-        ctx.setLineWidth(1)
-        ctx.strokePath()
-        let r = Self.handleRadius
-        ctx.setFillColor(paperColor.resolvedColor(with: InkTheme.onPaper).cgColor)
-        ctx.setLineWidth(1.5)
-        for point in corners + [knob] {
-            let circle = CGRect(x: point.x - r, y: point.y - r, width: 2 * r, height: 2 * r)
-            ctx.fillEllipse(in: circle)
-            ctx.strokeEllipse(in: circle)
-        }
-        if let shape, !shape.handles.isEmpty {
-            drawShapeHandles(shape, accent: accent, in: ctx) // over the box's outline
         }
     }
 
@@ -945,6 +913,7 @@ final class CanvasView: UIView {
         pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
         templateView.follow(viewTransform)
         objectLayer.follow(viewTransform)
+        tapeLayer.follow(viewTransform)
         placeTextEditor()
         placeImageCrop()
         inkMask.frame = inkClipView.bounds
@@ -1165,8 +1134,8 @@ final class CanvasView: UIView {
         }
         fingerPrevious = nil
         liveView.settle(at: viewTransform)
-        if controller.tool == .text {
-            beginTextGesture(at: start)
+        if controller.tool.isGestureTool {
+            beginToolGesture(at: start) // text, tape or the laser: no ink
         } else if controller.tool == .lasso {
             lassoPending = true
         } else if controller.tool == .eraser && controller.eraserMode != .precision {
@@ -1176,6 +1145,7 @@ final class CanvasView: UIView {
             let template = controller.strokeTemplate(viewScale: inputTransform.scale)
             let stroke = Stroke(id: UUID(), color: template.color, brush: template.brush, points: [])
             live = LiveStroke(stroke: stroke)
+            beginRulerSnap(at: start)
             controller.inputRecorder?.begin(stroke, viewScale: inputTransform.scale, pageSize: document.pageSize)
         }
         if hoverActive {
@@ -1199,6 +1169,7 @@ final class CanvasView: UIView {
             hud.predictedCount = predicted.count
             controller?.inputRecorder?.endEvent(strokeID: live.stroke.id, predicted: predicted)
             invalidateLive(canvasRect: live.advance(predicted: predicted))
+            updateRulerReadout(live)
             if live.stroke.brush.erases, let last = live.stroke.points.last {
                 showEraserCursor(at: last.location)
             }
@@ -1229,8 +1200,7 @@ final class CanvasView: UIView {
             updateShapeSnap(to: point.location)
             return
         }
-        if textGesture != nil {
-            updateTextGesture(to: point.location)
+        if updateToolGesture(to: point.location) {
             return
         }
         guard let live else { return }
@@ -1264,7 +1234,8 @@ final class CanvasView: UIView {
     /// `preciseLocation` is in this view's coordinate space; strokes are stored in canvas space.
     private func makePoint(_ touch: UITouch, predicted: Bool) -> StrokePoint {
         let viewLocation = touch.preciseLocation(in: self)
-        let location = inputTransform.toCanvas(viewLocation)
+        let canvasLocation = inputTransform.toCanvas(viewLocation)
+        let location = rulerSnap?.guide.project(canvasLocation) ?? canvasLocation // along the ruler's edge
         if touch.type != .pencil {
             return fingerPoint(touch, viewLocation: viewLocation, canvasLocation: location, predicted: predicted)
         }
@@ -1282,9 +1253,8 @@ final class CanvasView: UIView {
         if shapeSnap != nil {
             finishShapeSnap(commit: commit)
         }
-        if textGesture != nil {
-            finishTextGesture(commit: commit)
-        }
+        finishToolGestures(commit: commit)
+        endRulerSnap()
         var erased = eraseSession != nil && commit
         finishErasing()
         if let live {
@@ -1294,7 +1264,7 @@ final class CanvasView: UIView {
                 erased = commit
             }
             // A scratch-out erases the ink under it, and the scratch itself is dropped like a cancelled stroke.
-            if commit, !live.stroke.points.isEmpty, !convertToShape(live), !scratchOut(with: live) {
+            if commit, !live.stroke.points.isEmpty, !toggleTapeIfTapped(live), !convertToShape(live), !scratchOut(with: live) {
                 if let (segment, dirty) = live.finish() { // the end taper, now the end is known
                     liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
                     zoomPanel?.liveView.geometryChanged(of: live, fromSegment: segment, canvasRect: dirty)
@@ -1400,6 +1370,7 @@ extension CanvasView {
         textTap.allowedTouchTypes = direct
         textTap.delegate = self
         addGestureRecognizer(textTap)
+        installTapeTap()
         addInteraction(editMenu)
         installImageDrop()
         selectionDragInteraction.isEnabled = false // see `updateSelectionBox()`
@@ -1645,9 +1616,12 @@ extension CanvasView: UIGestureRecognizerDelegate {
         if g is UIHoverGestureRecognizer {
             return true
         }
-        if activeTouch != nil || zoomTouch != nil {
+        if activeTouch != nil || zoomTouch != nil || isOnRuler(g) {
             return false
-        } // palm rejection: no panning while the Pencil is down
+        } // palm rejection: no panning while the Pencil is down; a gesture on the ruler is the ruler's
+        if g is TapeTapGestureRecognizer {
+            return tapeTapShouldBegin(g)
+        }
         if g === pan || g === pinch, let panel = zoomPanel, panel.frame.contains(g.location(in: self)) {
             return false // the writing panel stays put
         }

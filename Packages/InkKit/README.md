@@ -90,7 +90,14 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CommittedRenderer.swift` | The committed bitmap and its full re-render (geometry for uncached strokes built in parallel, culling, drawing in parallel bands), shared by the canvas and the benchmarks |
 | `CommittedRaster.swift` | A page's committed layer kept compressed with the page, so reopening it restores the pixels instead of re-rendering |
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
-| `PageRenderer.swift` | Renders a page snapshot (template + objects + ink) to an image off the main actor (thumbnails), or pages to a PDF |
+| `PageRenderer.swift` | Renders a page snapshot (template + objects + ink + tape) to an image off the main actor (thumbnails), or pages to a PDF |
+| `TapeObject.swift` / `CanvasView+Tape.swift` | `TapeObject` (a strip drawn over the ink, revealed or hidden, plain / striped / grid, lenient JSON), revealing and hiding tape on a page; the tape tool and tap-to-toggle on the canvas |
+| `CanvasView+Tools.swift` | Routes the touches of the tools that draw no ink (text, tape, laser) to each tool |
+| `Ruler.swift` | `Ruler` (the on-screen ruler or protractor: body, edges, angle), `RulerGuide` (an edge carried into page space, and projecting points onto it), `RulerMeasurement` (length in cm, angle swept) |
+| `RulerView.swift` / `CanvasView+Ruler.swift` | Showing, moving and turning the ruler, handing Pencil touches on it to the canvas, the readout; snapping strokes to it in the input path |
+| `LaserTrail.swift` / `LaserView.swift` / `CanvasView+Laser.swift` | The laser pointer: its fading trail or dot (a value), the overlay view that draws it, and the laser tool on the canvas |
+| `InkPresentation.swift` | Presentation mode: `InkPresentation` (the page presented and its laser), `PresentationMirror` / `PageMirrorView` (the external display's chrome-free, fitted page) and `PageMirrorLayout` |
+| `PresentingTools.swift` | The tape and laser tool options, the Pen Case's ruler button and the presenting badge |
 | `Stroke.swift` | `Stroke`, `StrokePoint`, tool enums, `RGBA` |
 | `InkFile.swift` | `InkPageFile`, the `.ink` page format: encoder, decoder and `InkFileError` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit: each tool's brush, colour and width, quick sizes and colours, saved pens, the brush editor and the eyedropper |
@@ -282,11 +289,12 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 
 ### Page objects
 
-A page holds objects as well as ink (Architecture §5): shapes, text boxes, images and tape as they land.
+A page holds objects as well as ink (Architecture §5): shapes, text boxes, images and tape.
 Every object is a `PageObject`: an `id`, a `frame` in its own space, a `transform` (`CGAffineTransform`)
 that puts the frame on the page, and a `zIndex`. Each type only draws itself and encodes its own fields; the
-lasso, the handles, undo and storage work on that placement. There are four types: `ShapeObject` (see
-Shapes below), `TextObject` (see Text boxes below), `ImageObject` (see Pictures below) and `PlaceholderObject` (More › Add Test Object), a
+lasso, the handles, undo and storage work on that placement. There are five types: `ShapeObject` (see
+Shapes below), `TextObject` (see Text boxes below), `ImageObject` (see Pictures below), `TapeObject` (see Tape
+below) and `PlaceholderObject` (More › Add Test Object), a
 rectangle with a cross that exercises the layer. A type that needs to move differently overrides
 `applying(_:)` (a text box keeps its letters' size).
 
@@ -298,7 +306,9 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
 
 - **Layers**, bottom to top: background (paper and template), objects in `zIndex` order (`ObjectLayerView`,
   vectors at the current transform; hidden on a page without objects), ink (committed bitmap and live layer),
-  overlay (lasso and selection box). Objects are never in the committed ink bitmap, so adding or moving one
+  tape (`tapeLayer`, another `ObjectLayerView`: objects whose kind `drawsOverInk`), the laser (`LaserView`),
+  overlay (lasso and selection box), the ruler. Thumbnails, screenshots and PDFs draw tape after the ink too
+  (`PageRenderer.drawOverlays`). Objects are never in the committed ink bitmap, so adding or moving one
   doesn't re-render ink, and the pixel eraser never erases one. The live layer's multiply backdrop draws the
   objects too, so a highlighter previews over an object as it will commit.
 - **Revisions.** `objectsRevision` counts object changes, separately from `revision` (the ink's), so an
@@ -316,8 +326,8 @@ let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json
   twice as thick. A rigid move or rotation leaves the brush's size untouched.
 - **Selection** (`SelectionGeometry`, shared by the lasso, tap-to-select and circle-to-select): a loop or
   rectangle selects strokes whose centerline touches it and objects whose outline touches it or that hold it;
-  a tap (under 8 view points of movement) selects the topmost thing under it, ink first (it's drawn over
-  objects), newest first, then objects from the top down. The box is axis-aligned around the selection, or a
+  a tap (under 8 view points of movement) selects the topmost thing under it: tape first (it covers the ink),
+  then ink (it's drawn over other objects), newest first, then objects from the top down. The box is axis-aligned around the selection, or a
   single object's own frame, and follows each transform, so it rotates with what it holds. Dragging inside
   moves, a corner knob resizes in the box's own axes about the opposite corner (never flipping, at least
   8 view points a side), the knob above rotates about the centre. Pixel-eraser strokes and objects of unknown
@@ -484,6 +494,61 @@ oriented `pixelSize`; its own fields are also `crop` (unit image space, absent f
   sticker's `.clip` and `.png`), so ink stays vector and objects stay editable when placed. The Insert menu's
   Stickers… shows them; a tap places a copy in the middle of the view, selected; touch and hold to rename or
   delete.
+
+#### Tape
+
+`TapeObject` (file kind `"tape"`) is a strip: its `frame` is `length × width` centred on its own origin, and its
+`transform` turns and places it, so drawn at an angle it's a rotated rectangle. Its own fields are `color`,
+`pattern` (`plain`, `striped`, `grid`; absent for plain) and `revealed` (absent while hidden). Reading is lenient
+(a bad colour is the default sand, an unknown pattern plain).
+
+- **Over the ink.** `PageObject.drawsOverInk` is true only for tape, so the canvas splits the page's objects
+  (`splitByInkLayer`) between `objectLayer` (under the ink) and `tapeLayer` (over it). Hidden tape is opaque, so
+  it hides ink, text and pictures alike; revealed, it's a 16% tint with a dashed edge.
+- **The tool.** A drag draws a strip from the touch-down point to the touch, snapping to 0°, 45° and 90° like a
+  line, `width` page points wide (the tool's width, 8–60), in the Pen Case's tape colour and the options'
+  pattern. A tape tool drag shorter than 8 view points is a tap.
+- **Toggling.** A tap on tape with any tool but the lasso (which selects it) and the eraser reveals or hides it
+  (`CanvasDocument.toggleTape(id:)`): a pen or highlighter tap (a stroke under 8 view points and 0.5 s) is turned
+  into the toggle in `endStroke` instead of leaving a dot; the tape, text and laser tools toggle on their own taps;
+  a finger tap does it when fingers don't draw (`TapeTapGestureRecognizer`). `setAllTape(revealed:)` reveals or
+  hides the whole page. Each is one `replaceObjects` command, so it's undoable and saved with the note.
+
+### Ruler
+
+The Pen Case's ruler button shows `RulerView` over the canvas (over the continuous view in vertical scrolling,
+over the page's canvas in paged mode). The ruler (`Ruler`) lives in that view's space, not the page's: it stays
+put as the page pans and zooms, and isn't saved (the controller keeps its place while the editor is open).
+
+- **Touches.** Only the ruler's body takes touches (`point(inside:with:)`). Fingers on it move it (one) or turn it
+  (two, snapping to multiples of 15° within 1.5°), and the canvas's pan, pinch and taps won't begin there. A
+  Pencil touch on it is handed to the canvas under it, so the Pencil writes along the ruler as on paper.
+- **Snapping.** When a live stroke begins (pen, pencil or highlighter; not the eraser, not in the zoom window),
+  `Ruler.guide(at:)` picks the edge it starts by: within 28 view points outside either long edge, or anywhere on
+  the body (the nearer edge). The protractor guides along its arc or its baseline. The edge is mapped into page
+  space once (`RulerGuide.mapped`), and `makePoint` projects every sample onto it, predicted ones included: one
+  dot product and a multiply-add per point, so the live-ink path does the same work with the ruler as without,
+  and nothing else in it changes. Hold-to-snap shapes is off for these strokes.
+- **Measuring.** Once per touch event, `RulerMeasurement` advances with the stroke's newest point: the length
+  along the edge in page centimetres (page points are 1/72 in, so 1 cm = 28.35 pt), or the angle swept round
+  the protractor, shown in a capsule above the Pencil. The ruler's ticks are page millimetres and centimetres at
+  the current zoom, and it shows its angle (0–179° for the ruler, 0–359° for the protractor).
+
+### Laser pointer and presenting
+
+- **Laser.** The laser tool draws nothing on the page. `LaserTrail` keeps its points in page space with their
+  times: in Trail mode each point fades over 1 s (the point under the touch stays while it's down); in Dot mode
+  only the latest point is kept, and it fades 0.3 s after the lift. `LaserView`, an overlay over the tape layer,
+  draws it (a glow, a line and a white core, in a dozen opacity steps so a long trail is a dozen paths) and runs a
+  display link only while something shows. A laser tap (under 8 view points) toggles tape like any tool.
+- **Presentation mode.** `InkPresentation.shared` holds the page being presented: each editor presents its
+  current page when it appears and when the page changes, and stops when it goes away. The canvas hands it the
+  laser trail on every touch event. `PresentationMirror` (SwiftUI, over `PageMirrorView`) shows that page fitted
+  to the display with a 24 pt margin (`PageMirrorLayout`), rendered off the main thread with `PageRenderer` each
+  time the page changes (one render at a time, at most 4096 px across), with its own `LaserView` mapped through
+  the fitted transform. The host shows it on an external display: Nota's app delegate gives the
+  `windowExternalDisplayNonInteractive` scene role a scene delegate whose window hosts `PresentationMirror` and
+  sets `isMirroring`, which shows the editor's "Presenting this page" badge.
 
 ### Rendering pipeline
 
@@ -655,5 +720,10 @@ or locally `scripts/bench-compare.py results.json --write-baseline <path>`.
 ```bash
 xcodebuild test -scheme InkKit -skip-testing:InkKitBenchmarks -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)'
 ```
+
+Tape, the ruler, the laser and the presentation mirror have tests of their own (`TapeObjectTests`, `RulerTests`,
+`PresentingTests`): tape's file format, hit-testing, toggling and undo and its rendering over ink; ruler edge
+selection, projection, length and angle; the laser's fading; the presentation model, the mirror's layout and
+render. The external-display scene itself is only exercised by hand.
 
 A physical-iPad verification checklist (pressure, tilt, sample rate, eraser, lasso) lives in the InkCanvas README.
