@@ -185,7 +185,7 @@ struct BrushDescriptorTests {
     /// The live stroke (finalized segments, tail, end taper applied on `finish()`) must build exactly the
     /// geometry a full rebuild does, or ink would shift when the page re-renders.
     @Test(arguments: ["tapered", "dry brush", "calligraphy", "wet", "Fountain Pen", "Brush Pen", "Dashed",
-                      "Dotted", "Soft Pencil", "Marker", "Chisel Highlighter"])
+                      "Dotted", "Soft Pencil", "Crayon", "Marker", "Chisel Highlighter"])
     func liveGeometryMatchesTheFullRebuild(_ name: String) {
         let builtIn = BrushDescriptor.bundled.first { $0.name == name }
         let brush: BrushDescriptor = switch name {

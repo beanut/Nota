@@ -66,6 +66,17 @@ public extension BrushDescriptor {
                                                                breadth: 1.2, opacityLoss: 0.65, contactShift: 0.4),
                                             texture: .grain(scale: 1.5, contrast: 0.8, seed: 7), opacity: 0.95)
 
+    /// Crayon: a waxy, chunky stick. A coarse, high-contrast grain lets the paper show through, it lays down
+    /// more wax under pressure, and a tilted stick broadens into a wide, light stroke. The grain is a
+    /// pattern fixed to the page, so it doesn't shimmer while drawing and renders the same on reopen, in
+    /// thumbnails and in exports. Drawn with the same continuous path as the pencils, so it costs no more.
+    static let crayon = BrushDescriptor(id: builtInID(13), name: "Crayon", size: 2.5 ... 9,
+                                        pressure: ResponseCurve(amount: 1, exponent: 0.7),
+                                        pressureOpacity: ResponseCurve(amount: 0.3, exponent: 0.8),
+                                        tilt: TiltResponse(startAltitude: 60, fullAltitude: 20, length: 4,
+                                                           breadth: 1.1, opacityLoss: 0.4, contactShift: 0.3),
+                                        texture: .grain(scale: 0.9, contrast: 0.95, seed: 1013), opacity: 0.96)
+
     // MARK: Highlighters
 
     /// Round highlighter: a wide translucent nib that multiplies, so ink underneath stays readable.
@@ -92,7 +103,7 @@ public extension BrushDescriptor {
     static let pens: [BrushDescriptor] = [.pen, .fineliner, .fountainPen, .brushPen, .marker, .dashedPen,
                                           .dottedPen]
     /// The pencils, in picker order. The first is the default.
-    static let pencils: [BrushDescriptor] = [.pencil, .softPencil]
+    static let pencils: [BrushDescriptor] = [.pencil, .softPencil, .crayon]
     /// The highlighters, in picker order. The first is the default.
     static let highlighters: [BrushDescriptor] = [.highlighter, .chiselHighlighter]
 

@@ -49,6 +49,7 @@ enum SnapshotScene: String, CaseIterable, CustomTestStringConvertible {
     case dashedPen = "brush-dashed"
     case dottedPen = "brush-dotted"
     case softPencil = "brush-soft-pencil"
+    case crayon = "brush-crayon"
     case chiselHighlighter = "brush-chisel-highlighter"
 
     var testDescription: String {
@@ -95,6 +96,7 @@ enum SnapshotScene: String, CaseIterable, CustomTestStringConvertible {
         case .dashedPen: Self.builtIn(.dashedPen)
         case .dottedPen: Self.builtIn(.dottedPen)
         case .softPencil: Self.builtIn(.softPencil)
+        case .crayon: Self.builtIn(.crayon)
         case .chiselHighlighter:
             [brushStroke(.pen, width: 4, tilt: false, wave: 0), builtInStroke(.chiselHighlighter, wave: 3),
              builtInStroke(.chiselHighlighter, wave: 4)]

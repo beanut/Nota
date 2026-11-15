@@ -152,7 +152,7 @@ highlighter and pixel eraser kept their ids (and their looks).
 | Tool | Brushes |
 | --- | --- |
 | Pen (`pens`) | Ballpoint (`.pen`), Fineliner, Fountain Pen (angled stub nib, soft taper, ink pooling), Brush Pen (wide pressure range, taper, thins when fast), Marker (chisel), Dashed, Dotted |
-| Pencil (`pencils`) | HB Pencil (`.pencil`), Soft Pencil (coarser grain, pressure darkens, broad tilt shading) |
+| Pencil (`pencils`) | HB Pencil (`.pencil`), Soft Pencil (coarser grain, pressure darkens, broad tilt shading), Crayon (waxy, coarse high-contrast grain so the paper shows through, pressure width and opacity, wide tilt edge) |
 | Highlighter (`highlighters`) | Highlighter (round), Chisel Highlighter |
 
 A brush's `size.upperBound` is its default width, and each brush remembers the last width used with it.
