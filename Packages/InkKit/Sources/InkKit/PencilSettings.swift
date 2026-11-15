@@ -109,8 +109,6 @@ struct PencilSettings: Equatable, Codable {
     var fingerDrawing: FingerDrawing = .system
     var palmRejection: PalmRejection = .medium
     var handedness: Handedness = .right
-    /// Scribbling back and forth over ink erases it.
-    var scratchOutToErase = true
     /// Drawing a loop around ink and holding the Pencil still selects it.
     var circleToSelect = true
     /// Holding the Pencil still at the end of a pen or pencil stroke snaps it to a line, arrow or shape.
@@ -127,7 +125,6 @@ struct PencilSettings: Equatable, Codable {
         fingerDrawing = (try? c.decode(FingerDrawing.self, forKey: .fingerDrawing)) ?? d.fingerDrawing
         palmRejection = (try? c.decode(PalmRejection.self, forKey: .palmRejection)) ?? d.palmRejection
         handedness = (try? c.decode(Handedness.self, forKey: .handedness)) ?? d.handedness
-        scratchOutToErase = (try? c.decode(Bool.self, forKey: .scratchOutToErase)) ?? d.scratchOutToErase
         circleToSelect = (try? c.decode(Bool.self, forKey: .circleToSelect)) ?? d.circleToSelect
         holdToSnapShapes = (try? c.decode(Bool.self, forKey: .holdToSnapShapes)) ?? d.holdToSnapShapes
     }

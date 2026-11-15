@@ -43,7 +43,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView.swift` | `UIView` that handles raw touches, gestures, palm rejection, finger ink, `UIPencilInteraction`, hover and the scribble gestures. Owns the page, the cached committed bitmap and the lasso overlay. Redraws from the document when another canvas on the same page changes it |
 | `PencilSettings.swift` | `PencilSettings` (double-tap and squeeze actions, finger drawing, palm rejection, handedness, scribble toggles) and their persistence, quick-palette placement, and `PalmRejector` |
 | `PencilSettingsView.swift` | The More menu's Apple Pencil settings |
-| `Scribble.swift` | Scratch-out and circle-to-select detection and their target strokes |
+| `Scribble.swift` | Circle-to-select detection and the strokes a loop selects |
 | `CanvasRepresentable.swift` | The `UIViewRepresentable` bridge from `InkCanvasEditor` to `CanvasView` |
 | `CanvasView+ZoomWindow.swift` | The zoom window on the canvas: showing the panel and box, mapping panel touches onto the page, moving the box, rendering the panel; the hover and eraser cursors |
 | `CanvasView+EraserSplits.swift` | Finding the ink strokes a pixel-eraser stroke cuts through; stroke and standard erasing, and the eraser cursor |
@@ -81,7 +81,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView+Images.swift` | Inserting pictures (Photos, camera, Files, paste, drop), their selection-menu items (Crop, Opacity, Save as Sticker), cropping, placing stickers |
 | `InsertMenu.swift` | The Pen Case's Insert menu, the camera, the sticker picker and the crop bar |
 | `StickerStore.swift` | `Sticker` and `StickerStore`: the app-wide sticker collection (`.shared` in Application Support) |
-| `CanvasView+Scribble.swift` | Scratch-out and circle-to-select |
+| `CanvasView+Scribble.swift` | Circle-to-select |
 | `CanvasView+Shapes.swift` | The shape tool, draw-and-hold to snap (and sizing the snapped shape before lifting), dragging a selected shape's handles, restyling selected shapes |
 | `PageObjectsFile.swift` | `PageObjectsFile`, a page's objects as `pages/<page id>.json`: format version, reading, writing |
 | `Selection.swift` | `PageSelection`, `SelectionBox` and `SelectionGeometry`: lasso and tap selection of strokes and objects, the box's handles and the transforms they make; `Stroke.applying(_:)` |
@@ -695,13 +695,10 @@ every editor and window shares them.
 - **Hover:** `UIHoverGestureRecognizer` previews the nib's size and tilt, plus a tick showing the
   barrel's roll on Pencil Pro.
 - **Scribble gestures** (`Scribble.swift`, pure geometry):
-  - *Scratch out to erase:* a pen, pencil or highlighter stroke that runs back and forth at least four
-    times along its main axis, over strokes that lie mostly inside it, erases them instead of being kept
-    (one undo step). Over blank paper it stays ink.
   - *Circle and hold to select:* a closed loop held still for about 0.45 s selects the strokes at least
     60% inside it, switches to the lasso and lets the same Pencil touch drag them.
   - *Draw and hold to snap shapes:* see Page objects › Shapes.
-  - All three give canvas haptic feedback (`UICanvasFeedbackGenerator`) on Pencil Pro.
+  - Both give canvas haptic feedback (`UICanvasFeedbackGenerator`) on Pencil Pro.
 
 Barrel roll doesn't change the nib yet: there are no chisel or fountain brushes until the brush engine
 (NOT-16). None of this has been tried on a real Pencil (see NOT-12).

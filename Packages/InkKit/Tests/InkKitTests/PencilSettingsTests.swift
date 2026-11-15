@@ -47,7 +47,6 @@ struct PencilSettingsTests {
         s.fingerDrawing = .pencilOnly
         s.palmRejection = .high
         s.handedness = .left
-        s.scratchOutToErase = false
         s.circleToSelect = false
         s.save(to: store)
         #expect(PencilSettings.load(from: store) == s)

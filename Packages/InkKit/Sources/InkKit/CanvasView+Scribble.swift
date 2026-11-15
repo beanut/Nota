@@ -13,29 +13,6 @@ extension CanvasView {
         }
     }
 
-    /// Called as a finished ink stroke is about to be committed. If it scratched out ink, erases that
-    /// ink instead and returns true (the stroke is dropped).
-    func scratchOut(with stroke: LiveStroke) -> Bool {
-        guard controller?.pencilSettings.scratchOutToErase == true, !stroke.stroke.brush.erases else {
-            return false
-        }
-        let points = stroke.stroke.points.map(\.location)
-        guard Scribble.isScratchOut(points, minSize: 24 / inputTransform.scale) else { return false }
-        let ids = Scribble.scratchOutTargets(points, candidates: scribbleCandidates(excluding: stroke.stroke.id),
-                                             pad: stroke.stroke.brush.maxWidth)
-        guard !ids.isEmpty else { return false } // shading or a zigzag over blank paper: keep it as ink
-        for id in ids {
-            forgetGeometry(id)
-        }
-        editDocument { document.recordErase(document.remove(ids: ids)) }
-        dropOrphanedPendingStrokes() // also prunes the selection and clears the live layer
-        requestFullRender()
-        if let last = points.last {
-            feedback.pathCompleted(at: inputTransform.toView(last))
-        }
-        return true
-    }
-
     /// Starts watching the live stroke for circle-and-hold.
     func startHoldWatch(at location: CGPoint, time: TimeInterval) {
         stopHoldWatch()
