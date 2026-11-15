@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// Something on a page that isn't ink: a shape, a text box, an image or tape (Architecture §5).
+/// Something on a page that isn't ink: a shape, a text box, an image, tape or a link (Architecture §5).
 ///
 /// Every object has the same placement: a `frame` in its own space, a `transform` that puts that frame
 /// on the page, and a `zIndex` among the page's objects. The lasso, tap-to-select, the selection handles
@@ -366,7 +366,8 @@ enum PageObjectKinds {
         ShapeObject.kind: ShapeObject.self,
         TextObject.kind: TextObject.self,
         ImageObject.kind: ImageObject.self,
-        TapeObject.kind: TapeObject.self
+        TapeObject.kind: TapeObject.self,
+        LinkObject.kind: LinkObject.self
     ]
 
     /// Whether objects of this type can be seen and selected (objects of unknown kinds can't).

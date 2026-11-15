@@ -29,6 +29,8 @@ struct LibraryView: View {
     @SceneStorage("library.section") private var storedSection = LibrarySection.all.sceneValue
     @SceneStorage("library.workspace") private var workspace = NoteWorkspace()
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// Where links between notes have led in this window, for Back. Not restored with the scene.
+    @State private var linkTrail = LinkTrail()
 
     private var selection: Binding<LibrarySection?> {
         Binding {
@@ -58,7 +60,7 @@ struct LibraryView: View {
             if notes.count == NoteWorkspace.capacity {
                 // At the root, not in the split view's detail column: there the two sides' toolbars would be
                 // merged into the column's one navigation bar.
-                NoteSplitView(notes: notes, workspace: $workspace)
+                NoteSplitView(notes: notes, workspace: $workspace, trail: $linkTrail)
             } else {
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     SidebarView(selection: selection)
@@ -69,7 +71,11 @@ struct LibraryView: View {
                     NavigationStack(path: path) {
                         NotesBrowser(section: selection.wrappedValue ?? .all, path: path)
                             .navigationDestination(for: Note.self) { note in
-                                NoteEditorView(note: note, workspace: $workspace)
+                                // A fresh editor per note: a link replaces the note in place.
+                                NoteEditorView(note: note, workspace: $workspace, trail: $linkTrail) { other in
+                                    workspace.replace(note.id, with: other)
+                                }
+                                .id(note.id)
                             }
                     }
                 }
@@ -86,6 +92,7 @@ struct LibraryView: View {
             if ids != workspace.noteIDs {
                 workspace = NoteWorkspace(noteIDs: ids)
             }
+            linkTrail.keepSteps(reachableFrom: ids)
         }
         .task {
             // Notes whose packages outlived the library index (its store was lost or reset) come back

@@ -86,7 +86,7 @@ extension CanvasView {
         case let .laser(laser):
             endLaser()
             if commit, !laser.moved {
-                toggleTape(at: laser.start)
+                _ = tapObject(at: laser.start, tool: .laser)
             }
         }
     }

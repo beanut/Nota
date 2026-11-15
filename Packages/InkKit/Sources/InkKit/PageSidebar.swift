@@ -19,13 +19,23 @@ public typealias PageSender = @MainActor ([CanvasDocument], PageDestination) asy
 
 /// The page sidebar: a thumbnail of every page, in order. Tap a page to go to it, or drag it to a new
 /// place. Select shows checkmarks for working on several pages at once: duplicate, rotate, delete, and
-/// copy or move to another note. Each page's context menu has the same actions for that page.
+/// copy or move to another note. Each page's context menu has the same actions for that page, and bookmarks it.
+/// Its Outline tab shows the note's bookmarks and outline instead (`OutlinePanel`).
 struct PageSidebar: View {
+    enum Mode: String, CaseIterable, Identifiable {
+        case pages = "Pages", outline = "Outline"
+
+        var id: String {
+            rawValue
+        }
+    }
+
     @ObservedObject var notebook: InkNotebook
     let destinations: [PageDestination]
     let sendPages: PageSender?
     let onClose: () -> Void
 
+    @State private var mode: Mode = .pages
     @State private var isSelecting = false
     @State private var selection = Set<CanvasDocument.ID>()
     @State private var pendingDelete: IndexSet?
@@ -34,21 +44,18 @@ struct PageSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollViewReader { proxy in
-                List {
-                    ForEach(Array(notebook.pages.enumerated()), id: \.element.id) { index, page in
-                        row(page, index: index)
-                            .id(page.id)
-                    }
-                    .onMove { notebook.movePages(fromOffsets: $0, toOffset: $1) }
+            if !isSelecting {
+                Picker("Show", selection: $mode) {
+                    ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .environment(\.editMode, .constant(isSelecting ? .active : .inactive))
-                .onAppear { proxy.scrollTo(notebook.currentPage.id, anchor: .center) }
-                .onChange(of: notebook.currentPage.id) { _, id in
-                    withAnimation { proxy.scrollTo(id) }
-                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, InkSpacing.s)
+                .padding(.bottom, InkSpacing.xs)
+            }
+            if mode == .outline {
+                OutlinePanel(notebook: notebook)
+            } else {
+                pageList
             }
             if isSelecting {
                 selectionBar
@@ -81,22 +88,43 @@ struct PageSidebar: View {
 
     // MARK: Parts
 
+    private var pageList: some View {
+        ScrollViewReader { proxy in
+            List {
+                ForEach(Array(notebook.pages.enumerated()), id: \.element.id) { index, page in
+                    row(page, index: index)
+                        .id(page.id)
+                }
+                .onMove { notebook.movePages(fromOffsets: $0, toOffset: $1) }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.editMode, .constant(isSelecting ? .active : .inactive))
+            .onAppear { proxy.scrollTo(notebook.currentPage.id, anchor: .center) }
+            .onChange(of: notebook.currentPage.id) { _, id in
+                withAnimation { proxy.scrollTo(id) }
+            }
+        }
+    }
+
     private var header: some View {
         HStack(spacing: InkSpacing.xxs) {
-            Text(isSelecting ? "\(selection.count) Selected" : "Pages")
+            Text(isSelecting ? "\(selection.count) Selected" : mode.rawValue)
                 .font(theme.headlineFont)
                 .foregroundStyle(theme.color(\.textPrimary))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
             Spacer(minLength: 0)
-            Button(isSelecting ? "Done" : "Select") {
-                withAnimation {
-                    isSelecting.toggle()
-                    selection.removeAll()
+            if mode == .pages {
+                Button(isSelecting ? "Done" : "Select") {
+                    withAnimation {
+                        isSelecting.toggle()
+                        selection.removeAll()
+                    }
                 }
+                .font(theme.bodyEmphasizedFont)
+                .foregroundStyle(theme.color(\.accent))
             }
-            .font(theme.bodyEmphasizedFont)
-            .foregroundStyle(theme.color(\.accent))
             Button(action: onClose) { InkIconView(.close) }
                 .buttonStyle(.inkIcon)
                 .accessibilityLabel("Close Pages")
@@ -110,7 +138,7 @@ struct PageSidebar: View {
         let isCurrent = index == notebook.currentPageIndex
         let isSelected = selection.contains(page.id)
         return PageThumbnailRow(page: page, number: index + 1, isCurrent: isCurrent,
-                                isSelected: isSelecting && isSelected)
+                                isSelected: isSelecting && isSelected, isBookmarked: notebook.isBookmarked(page.id))
             .contentShape(Rectangle())
             .onTapGesture {
                 if isSelecting {
@@ -129,7 +157,7 @@ struct PageSidebar: View {
             .listRowInsets(EdgeInsets(top: InkSpacing.xs, leading: InkSpacing.m,
                                       bottom: InkSpacing.xs, trailing: InkSpacing.m))
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Page \(index + 1)")
+            .accessibilityLabel(notebook.isBookmarked(page.id) ? "Page \(index + 1), bookmarked" : "Page \(index + 1)")
             .accessibilityAddTraits(isCurrent ? .isSelected : [])
     }
 
@@ -165,6 +193,14 @@ struct PageSidebar: View {
     /// The actions for the pages at `offsets`, for a page's context menu.
     @ViewBuilder
     private func actions(for offsets: IndexSet) -> some View {
+        if offsets.count == 1, let index = offsets.first, notebook.pages.indices.contains(index) {
+            let id = notebook.pages[index].id
+            Button { notebook.toggleBookmark(id) } label: {
+                Label(notebook.isBookmarked(id) ? "Remove Bookmark" : "Bookmark",
+                      systemImage: notebook.isBookmarked(id) ? "bookmark.slash" : "bookmark")
+            }
+            Divider()
+        }
         Button { notebook.duplicatePages(at: offsets) } label: {
             Label("Duplicate", systemImage: "plus.square.on.square")
         }
@@ -248,6 +284,7 @@ private struct PageThumbnailRow: View {
     let number: Int
     let isCurrent: Bool
     let isSelected: Bool
+    let isBookmarked: Bool
 
     @StateObject private var thumbnail = PageThumbnail()
     @Environment(\.inkTheme) private var theme
@@ -268,6 +305,13 @@ private struct PageThumbnailRow: View {
                 .overlay(shape.strokeBorder(isCurrent ? theme.color(\.accent) : theme.color(\.border),
                                             lineWidth: isCurrent ? 2 : 0.5))
                 .shadow(color: theme.color(\.shadow).opacity(0.10), radius: 2, y: 1)
+                if isBookmarked {
+                    InkIconView(.bookmark, size: 14)
+                        .foregroundStyle(theme.color(\.accent))
+                        .padding(InkSpacing.xxs)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .accessibilityHidden(true)
+                }
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
                         .symbolRenderingMode(.palette)

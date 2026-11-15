@@ -1,7 +1,7 @@
 import UIKit
 
-/// A finger tap that reveals or hides tape, when fingers don't draw (when they do, a tap is a tiny stroke,
-/// and `toggleTapeIfTapped(_:)` catches it instead).
+/// A finger tap that reveals or hides tape or follows a link, when fingers don't draw (when they do, a tap is a tiny stroke,
+/// and `tapObjectIfTapped(_:)` catches it instead).
 final class TapeTapGestureRecognizer: UITapGestureRecognizer {}
 
 extension Tool {
@@ -42,14 +42,15 @@ extension CanvasView {
     }
 
     /// Called as a finished stroke is about to be committed: a tap (a tiny, quick stroke) on tape with a tool
-    /// that toggles tape reveals or hides it instead of leaving a dot, and true is returned.
-    func toggleTapeIfTapped(_ live: LiveStroke) -> Bool {
-        guard let controller, controller.tool.togglesTape, !live.stroke.brush.erases,
+    /// that toggles tape reveals or hides it instead of leaving a dot, and one on a link follows it
+    /// (`tapObject(at:tool:)`); then true is returned.
+    func tapObjectIfTapped(_ live: LiveStroke) -> Bool {
+        guard let controller, controller.tool.togglesTape || controller.tool.followsLinks, !live.stroke.brush.erases,
               let first = live.stroke.points.first, let last = live.stroke.points.last,
               last.timestamp - first.timestamp <= Self.tapeTapDuration else { return false }
         let extent = LassoGeometry.bounds(of: live.stroke.points.map(\.location))
         guard max(extent.width, extent.height) * inputTransform.scale <= Self.tapSlop else { return false }
-        return toggleTape(at: first.location)
+        return tapObject(at: first.location, tool: controller.tool)
     }
 
     /// The strip a tape drag would put on the page, or nil while it's still short enough to be a tap.
@@ -90,17 +91,18 @@ extension CanvasView {
         addGestureRecognizer(tap)
     }
 
-    /// A finger tap toggles tape when fingers don't draw, with any tool that toggles tape. The text tool's own
-    /// finger tap does it for the text tool (`handleTextTap`).
+    /// A finger tap toggles tape (or follows a link) when fingers don't draw, with any tool that does. The text
+    /// tool's own finger tap toggles tape for the text tool (`handleTextTap`).
     func tapeTapShouldBegin(_ g: UIGestureRecognizer) -> Bool {
-        guard !fingerDraws, let tool = controller?.tool, tool.togglesTape, tool != .text, textEditor == nil else {
+        guard !fingerDraws, let tool = controller?.tool, tool.togglesTape || tool.followsLinks, tool != .text,
+              textEditor == nil else {
             return false
         }
-        return tape(at: viewTransform.toCanvas(g.location(in: self))) != nil
+        return hasTapTarget(at: viewTransform.toCanvas(g.location(in: self)), tool: tool)
     }
 
     @objc func handleTapeTap(_ g: TapeTapGestureRecognizer) {
         guard g.state == .ended else { return }
-        toggleTape(at: viewTransform.toCanvas(g.location(in: self)))
+        _ = tapObject(at: viewTransform.toCanvas(g.location(in: self)), tool: controller?.tool)
     }
 }

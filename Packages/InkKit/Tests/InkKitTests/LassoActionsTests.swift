@@ -320,8 +320,8 @@ struct LassoActionsTests {
         ]
         let (stroke, object) = selectInkAndObject()
         let titles = canvas.editMenuElements().flatMap { ($0 as? UIMenu)?.children ?? [$0] }.map(\.title)
-        #expect(titles == ["Cut", "Copy", "Duplicate", "Delete", "Color", "Thickness", "Arrange", "Save as Sticker", "Take Screenshot",
-                           "Convert to Text"])
+        #expect(titles == ["Cut", "Copy", "Duplicate", "Delete", "Color", "Thickness", "Arrange", "Save as Sticker", "Add Link…",
+                           "Take Screenshot", "Convert to Text"])
 
         let selection = try #require(canvas.lassoSelection)
         #expect(selection.pageID == first.id)

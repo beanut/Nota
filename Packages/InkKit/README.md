@@ -92,6 +92,9 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
 | `PageRenderer.swift` | Renders a page snapshot (template + objects + ink + tape) to an image off the main actor (thumbnails), or pages to a PDF |
 | `TapeObject.swift` / `CanvasView+Tape.swift` | `TapeObject` (a strip drawn over the ink, revealed or hidden, plain / striped / grid, lenient JSON), revealing and hiding tape on a page; the tape tool and tap-to-toggle on the canvas |
+| `LinkObject.swift` / `CanvasView+Links.swift` | `LinkTarget` (a web address, a page of this note, another note or one of its pages) and `LinkObject` (a link over a selection, kept as read when its target is from a newer app); following a link with a tap and the selection menu's Add / Edit / Open / Remove Link |
+| `LinkSheet.swift` | `NoteLinks` and `LinkBack` (what the host says about other notes, and Back to the note a link came from), the link sheet and the floating Back button |
+| `NoteOutline.swift` / `OutlinePanel.swift` | `NoteOutline` (bookmarks and outline entries, the user's and those from a PDF's outline), the notebook's bookmark and outline edits, `LinkHistory` for Back; the page sidebar's Outline tab |
 | `CanvasView+Tools.swift` | Routes the touches of the tools that draw no ink (text, tape, laser) to each tool |
 | `Ruler.swift` | `Ruler` (the on-screen ruler or protractor: body, edges, angle), `RulerGuide` (an edge carried into page space, and projecting points onto it), `RulerMeasurement` (length in cm, angle swept) |
 | `RulerView.swift` / `CanvasView+Ruler.swift` | Showing, moving and turning the ruler, handing Pencil touches on it to the canvas, the readout; snapping strokes to it in the input path |
@@ -289,12 +292,12 @@ Bodies over 256 bytes are LZFSE-compressed when that's smaller; the decoded size
 
 ### Page objects
 
-A page holds objects as well as ink (Architecture §5): shapes, text boxes, images and tape.
+A page holds objects as well as ink (Architecture §5): shapes, text boxes, images, tape and links.
 Every object is a `PageObject`: an `id`, a `frame` in its own space, a `transform` (`CGAffineTransform`)
 that puts the frame on the page, and a `zIndex`. Each type only draws itself and encodes its own fields; the
-lasso, the handles, undo and storage work on that placement. There are five types: `ShapeObject` (see
+lasso, the handles, undo and storage work on that placement. There are six types: `ShapeObject` (see
 Shapes below), `TextObject` (see Text boxes below), `ImageObject` (see Pictures below), `TapeObject` (see Tape
-below) and `PlaceholderObject` (More › Add Test Object), a
+below), `LinkObject` (see Links below) and `PlaceholderObject` (More › Add Test Object), a
 rectangle with a cross that exercises the layer. A type that needs to move differently overrides
 `applying(_:)` (a text box keeps its letters' size).
 
@@ -514,6 +517,38 @@ oriented `pixelSize`; its own fields are also `crop` (unit image space, absent f
   a finger tap does it when fingers don't draw (`TapeTapGestureRecognizer`). `setAllTape(revealed:)` reveals or
   hides the whole page. Each is one `replaceObjects` command, so it's undoable and saved with the note.
 
+#### Links
+
+`LinkObject` (file kind `"link"`) is a rectangle that goes somewhere when it's tapped. Its fields are `target`
+(`LinkTarget`: `{ "url": … }`, `{ "page": <page id> }`, or `{ "note": <note id>, "page": <page id>? }`), an optional
+`title` (what menus and VoiceOver call it, e.g. "Page 3") and `color` (`InkTheme.link`). A target this version can't
+read is kept as read and written back; such a link does nothing.
+
+- **Adding.** The selection menu's Add Link… (any selection that isn't a link) asks the editor for a target
+  (`CanvasController.linkRequest`), and `CanvasDocument.addLink(to:covering:)` puts a link over the selection's
+  bounds, padded 4 pt, on top of the page's objects. A link is an object of its own, not part of what it covers, so
+  ink, shapes, text boxes and pictures are all linked the same way, and the lasso picks a link up with what's under
+  it. With one link selected the menu has Open Link, Edit Link… (`setLinkTarget`) and Remove Link (which leaves
+  what it covered). Each is one undoable edit.
+- **Drawing.** Under the ink like other objects: an 8% tint of its colour with a dotted underline.
+- **Following.** A pen, pencil, highlighter, shape tool or laser tap on a link follows it (`Tool.followsLinks`);
+  tape over a link is toggled first (`tapObject(at:tool:)`). The lasso selects links, the eraser ignores them, and
+  the text and tape tools keep their own taps. The editor follows `.url` with `openURL`, turns to a `.page` (pushing
+  the page it was on onto `LinkHistory`) and hands `.note` to the host's `NoteLinks.open`. The Back button returns
+  along `LinkHistory`, skipping deleted pages, and when that's empty, to `NoteLinks.back` (the note a link came
+  from).
+
+#### Bookmarks and outline
+
+`InkNotebook.outline` (`NoteOutline`) holds bookmarked page ids and outline entries (title, page id, `level`, and
+`source`: the user's own or `.pdf`). The page bar's bookmark button and a page's context menu in the sidebar
+bookmark the page; bookmarked thumbnails show a bookmark. The sidebar's Outline tab lists the bookmarks in page
+order, the user's entries (Add This Page, Rename…, Delete, drag to reorder) and the entries from a PDF, indented
+by level. `NoteOutline.entries(fromOutlineOf:pageIDs:)` turns a `PDFDocument`'s outline into entries for the
+pages showing its pages, and `InkNotebook.importPDFOutline` replaces the PDF entries with them. Entries and
+bookmarks refer to pages by id: a deleted page's drop out of the panel, and `pruned(keeping:)` drops them when the
+host saves. The host stores the outline (Nota keeps it in the note's manifest).
+
 ### Ruler
 
 The Pen Case's ruler button shows `RulerView` over the canvas (over the continuous view in vertical scrolling,
@@ -540,7 +575,7 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
   times: in Trail mode each point fades over 1 s (the point under the touch stays while it's down); in Dot mode
   only the latest point is kept, and it fades 0.3 s after the lift. `LaserView`, an overlay over the tape layer,
   draws it (a glow, a line and a white core, in a dozen opacity steps so a long trail is a dozen paths) and runs a
-  display link only while something shows. A laser tap (under 8 view points) toggles tape like any tool.
+  display link only while something shows. A laser tap (under 8 view points) toggles tape or follows a link like any tool.
 - **Presentation mode.** `InkPresentation.shared` holds the page being presented: each editor presents its
   current page when it appears and when the page changes, and stops when it goes away. The canvas hands it the
   laser trail on every touch event. `PresentationMirror` (SwiftUI, over `PageMirrorView`) shows that page fitted
@@ -724,6 +759,9 @@ xcodebuild test -scheme InkKit -skip-testing:InkKitBenchmarks -destination 'plat
 Tape, the ruler, the laser and the presentation mirror have tests of their own (`TapeObjectTests`, `RulerTests`,
 `PresentingTests`): tape's file format, hit-testing, toggling and undo and its rendering over ink; ruler edge
 selection, projection, length and angle; the laser's fading; the presentation model, the mirror's layout and
-render. The external-display scene itself is only exercised by hand.
+render. The external-display scene itself is only exercised by hand. `LinkObjectTests` covers links' file format,
+web-address tidying, adding and retargeting with undo, following with a tap (and tape over a link), and the
+selection menu; `NoteOutlineTests` covers bookmarks, outline entries, pruning and remapping, lenient reading, PDF
+outline import and `LinkHistory`.
 
 A physical-iPad verification checklist (pressure, tilt, sample rate, eraser, lasso) lives in the InkCanvas README.

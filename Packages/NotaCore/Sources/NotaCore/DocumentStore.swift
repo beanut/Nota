@@ -54,6 +54,8 @@ public final class DocumentStore {
     @ObservationIgnored private var recency: [UUID] = []
     /// The last manifest read or written for each note.
     @ObservationIgnored private var manifests: [UUID: NoteManifest] = [:]
+    /// The page each note should show when it's next opened, set by following a link to it before it's loaded.
+    @ObservationIgnored private var pendingPages: [UUID: UUID] = [:]
     /// Custom template backgrounds read or saved this session, by background id.
     @ObservationIgnored private var artworks: [UUID: TemplateArtwork] = [:]
 
@@ -73,6 +75,7 @@ public final class DocumentStore {
         /// Set when a save failed, so the next one writes every page.
         var needsFullSave = false
         var pagesObservation: AnyCancellable?
+        var outlineObservation: AnyCancellable?
 
         init(note: Note, notebook: InkNotebook) {
             self.note = note
@@ -130,6 +133,28 @@ public final class DocumentStore {
         entry.editors = max(0, entry.editors - 1)
         save(noteID: note.id)
         evictIfNeeded()
+    }
+
+    /// Shows the page `pageID` of the note `noteID`: now, if the note is loaded, or when it's next opened.
+    /// A page the note doesn't have is ignored.
+    public func showPage(_ pageID: UUID, ofNote noteID: UUID) {
+        if let notebook = open[noteID]?.notebook {
+            pendingPages[noteID] = nil
+            if let index = notebook.index(of: pageID) {
+                notebook.goToPage(index)
+            }
+        } else {
+            pendingPages[noteID] = pageID
+        }
+    }
+
+    /// The ids of the note's pages in order, for linking to one of them: from its notebook if it's loaded,
+    /// otherwise from its manifest.
+    public func pageIDs(of note: Note) -> [UUID] {
+        if let notebook = open[note.id]?.notebook {
+            return notebook.pages.map(\.id)
+        }
+        return manifest(for: note).pages.map(\.id)
     }
 
     /// True while the note's pages are in memory.
@@ -332,6 +357,7 @@ public final class DocumentStore {
             defaultTemplate = PageTemplate.blank.on(defaultTemplate.paper)
         }
         let notebook = InkNotebook(pages: pages, defaultPageSize: manifest.defaultPageSize, defaultTemplate: defaultTemplate)
+        notebook.outline = manifest.outline ?? NoteOutline()
         loading[id] = nil
         // Deleted while it loaded, or opened by another caller first (can't happen, but cheap to check).
         guard !tombstones.contains(id) else { return notebook }
@@ -343,6 +369,9 @@ public final class DocumentStore {
         }
         let entry = OpenNote(note: note, notebook: notebook)
         open[id] = entry
+        if let page = pendingPages.removeValue(forKey: id), let index = notebook.index(of: page) {
+            notebook.goToPage(index)
+        }
         mirrorText(of: notebook, onto: note)
         observe(entry)
         touch(id)
@@ -378,6 +407,10 @@ public final class DocumentStore {
             self?.observe(pages, of: id)
             self?.changed(id)
         }
+        // Bookmarks and outline entries.
+        entry.outlineObservation = entry.notebook.$outline.dropFirst().removeDuplicates().sink { [weak self] _ in
+            self?.changed(id)
+        }
     }
 
     private func observe(_ pages: [CanvasDocument], of noteID: UUID) {
@@ -388,6 +421,7 @@ public final class DocumentStore {
 
     private func stopObserving(_ entry: OpenNote) {
         entry.pagesObservation = nil
+        entry.outlineObservation = nil
         for page in entry.notebook.pages {
             page.stopObservingChanges(self)
         }
@@ -436,6 +470,7 @@ public final class DocumentStore {
         new.title = note.title
         new.defaultPageSize = notebook.defaultPageSize
         new.pages = notebook.pages.map { NoteManifest.Page(id: $0.id, size: $0.pageSize, template: $0.template) }
+        new.outline = notebook.outline.pruned(keeping: new.pages.map(\.id)).nonEmpty
 
         var pageFiles: [InkPageFile] = []
         for page in notebook.pages {

@@ -225,13 +225,13 @@ struct CanvasTapeTests {
         let live = LiveStroke(stroke: Stroke(id: UUID(), color: RGBA(r: 0, g: 0, b: 0), brush: .pen, points: []))
         _ = live.append(StrokePoint(location: CGPoint(x: 200, y: 300), force: 0.5, altitude: .pi / 2, azimuth: 0,
                                     timestamp: 0), minSpacing: 0)
-        #expect(canvas.toggleTapeIfTapped(live))
+        #expect(canvas.tapObjectIfTapped(live))
         #expect(document.tapes.first?.isRevealed == true)
 
         // A stroke across the tape is ink, not a tap.
         _ = live.append(StrokePoint(location: CGPoint(x: 260, y: 320), force: 0.5, altitude: .pi / 2, azimuth: 0,
                                     timestamp: 0.1), minSpacing: 0)
-        #expect(!canvas.toggleTapeIfTapped(live))
+        #expect(!canvas.tapObjectIfTapped(live))
         // The lasso selects tape instead of toggling it.
         controller.select(.lasso)
         #expect(!Tool.lasso.togglesTape)
