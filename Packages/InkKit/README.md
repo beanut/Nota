@@ -64,6 +64,8 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `EyedropperOverlay.swift` / `CanvasView+Eyedropper.swift` | The eyedropper's overlay, loupe and banner, and sampling one device pixel of the canvas as drawn |
 | `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
+| `WaxRenderer.swift` | The raster brush (the crayon) on the GPU: nib stamps max-blended into a pressure field, then wax laid on a paper tooth fixed to the page, drawn into any context `StrokeRenderer.draw` is given |
+| `WaxShaders.swift` | `WaxRenderer`'s Metal shaders, as source compiled at run time (in the background when a canvas is made), so the build doesn't need the Metal toolchain |
 | `StrokeSplitter.swift` | Splits ink strokes that a pixel eraser cuts clean through into separate strokes, and works out what a standard erase leaves of a stroke |
 | `Lasso.swift` | Freeform and rectangle lasso regions and hit-testing |
 | `PageObject.swift` | `PageObject` (frame, transform, z-order, drawing), `PageObjectPlacement` (the shared JSON keys), `PlaceholderObject` (the test object), objects of unknown kinds |
@@ -135,7 +137,7 @@ let brush = try BrushDescriptor(json: json)          // lenient and clamped
 | `velocity` | amount 0…1, exponent 0.1…5 | Thinning with speed (full at 1500 pt/s) |
 | `taper` | start, end 0…500 pt; minimum scale 0…1 | Narrow ends. The end taper is applied when the Pencil lifts |
 | `smoothing` | 0…0.95 | Stabiliser: each sample pulled toward the stroke so far |
-| `texture` | `none`, `grain(scale 0.25…8, contrast 0…1, seed)`, `bristle(count 1…64, spread 0.1…2)` | Procedural, never a bitmap |
+| `texture` | `none`, `grain(scale 0.25…8, contrast 0…1, seed)`, `bristle(count 1…64, spread 0.1…2)`, `wax(scale 0.25…8, contrast 0…1, seed)` | Procedural, never a bitmap. `wax` is a raster brush drawn with Metal (see Raster brushes) |
 | `spacing` | 0, or 0.05…4 nib widths | 0 draws on the hull path; more draws stamps |
 | `dash` | on 0.05…50, off 0…50 full-pressure widths | Dashes by arc length from the stroke's start; off 0 is solid. Draws on the stamp path |
 | `jitter` | size, angle, opacity 0…1; scatter 0…2 nib widths; seed | Per-stamp variation (stamp path) |
@@ -152,7 +154,7 @@ highlighter and pixel eraser kept their ids (and their looks).
 | Tool | Brushes |
 | --- | --- |
 | Pen (`pens`) | Ballpoint (`.pen`), Fineliner, Fountain Pen (angled stub nib, soft taper, ink pooling), Brush Pen (wide pressure range, taper, thins when fast), Marker (chisel), Dashed, Dotted |
-| Pencil (`pencils`) | HB Pencil (`.pencil`), Soft Pencil (coarser grain, pressure darkens, broad tilt shading) |
+| Pencil (`pencils`) | HB Pencil (`.pencil`), Soft Pencil (coarser grain, pressure darkens, broad tilt shading), Crayon (`.crayon`: a raster brush; waxy, ragged, paper showing through where the press is light, wide tilt edge) |
 | Highlighter (`highlighters`) | Highlighter (round), Chisel Highlighter |
 
 A brush's `size.upperBound` is its default width, and each brush remembers the last width used with it.
@@ -176,6 +178,37 @@ with Pencil (NOT-12).
   bristle dots by a bristle texture. A dash drops the stamps in its gaps, by the arc length the live stroke
   already keeps for the taper. Segments never depend on each other, so live and committed strokes
   match and nothing grows with stroke length.
+- **Raster brushes.** A `wax` texture (the crayon) isn't filled as paths: `StrokeRenderer.draw` hands it to
+  `WaxRenderer`, which draws it with Metal into whatever context it was given, so the live layer, the
+  committed bitmap (band by band), page images, thumbnails and exports all get the same wax.
+  - Its geometry is the stamp path's, and each stamp keeps its nib (`Hull.tip`, carried into
+    `StrokeRun.stamps`), so erasing, splitting, the lasso and hit testing treat it like any stroke.
+  - For the part of the stroke inside the context's clip, in the context's own pixels, the stamps are drawn
+    as instanced ellipses into a half-float pressure field with **max** blending: each pixel keeps the
+    strongest press over it, whatever order or batches the stamps come in. A stamp presses evenly over most
+    of its patch and lightly at the rim.
+  - A compute pass then lays wax: a paper tooth (three octaves of value noise, 1.6 pt cells at scale 1) is
+    computed from the **page position** of each pixel, and wax reaches as far into it as the press does.
+    So a light stroke or the rim catches only the peaks, and a firm one fills all but the deepest pits.
+    Where a tooth cell is under a couple of pixels (zoomed out, thumbnails) it fades to the share of paper
+    covered instead of aliasing.
+  - Because each pixel depends only on the stamps over it and its page position, drawing a page whole or in
+    pieces gives the same pixels (a test checks it), so the grain can't shimmer as a stroke grows or move
+    when it's committed or reopened.
+  - **Live.** Wax at a chunk joint depends on both chunks, so a raster stroke can't bake pixels chunk by
+    chunk. It bakes **pressure** instead: each tile keeps the settled chunks' field on the GPU
+    (`WaxRenderer.WaxField`), and a redraw adds only the hot stamps over it, so it never grows with the
+    stroke's length, and max blending makes the result exactly the committed field (a test compares them).
+  - The live layer **doesn't wait for the GPU**: a touch event only encodes and commits the tile's job
+    (`LiveInkView.requestWax`). The pixels come back on the main queue into the tile's baked bitmap, which
+    the tile draws like any baked ink. Each tile has one job out at most; dirt asked for meanwhile waits and
+    goes next. So the crayon's wax shows when the GPU is done (0.5 ms p50, 1.7 ms p95 on the simulator),
+    up to about a frame after the other ink would. A wait per tile cost 0.3–1.5 ms on the simulator, several
+    times an event, which is why it's asynchronous. The committed layer and page images still draw
+    synchronously.
+  - **Fallback.** Without a Metal device, or for a region over 8192² pixels, the stroke's paths are filled
+    with the grain pattern of the same scale, contrast and seed, like a pencil. A build that doesn't know
+    `wax` decodes it as `none` (as it does any unknown texture) and draws the same stamps solid.
 - **Built-in tools look the same.** `Tests/InkKitTests/Snapshots/` holds golden images rendered by the
   engine before descriptors; the bundled descriptors match them pixel for pixel. Re-record with
   `TEST_RUNNER_INK_SNAPSHOT_RECORD=1` only for an intended change. Each brush of the built-in set has a
@@ -596,6 +629,7 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
    - Only the **hot** part (the newest chunk or two and the provisional tail) is re-filled each frame, and only in the tiles under the new ink, clipped to the invalidated rect.
    - Baking uses `.copy`, the same "later run replaces earlier" rule as the committed path, so live and committed pixels match.
    - A late estimate that changes a baked chunk re-bakes just the tiles it touches. Tiles are freed once every stroke has been committed.
+   - A raster brush (the crayon) bakes its pressure on the GPU instead and gets its pixels back asynchronously (see Brushes › Raster brushes).
 3. **During pinch/pan** the cached bitmap is transformed. If a full re-render takes under 5 ms it is re-rendered live instead, and it is always re-rendered crisply when the gesture ends.
 
 ### Stroke geometry
@@ -711,6 +745,10 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `ink_file.encode_5k_ms` / `decode_5k_ms` | Encoding that page, and decoding it back (which joins page open in NOT-6) | decode < 50 ms |
 | `stroke_geometry.stamp.*` | `stroke_geometry.*` with every stroke drawn by a stamp brush (bristles, jitter) | – (baseline only) |
 | `live_event.stamp.p50/p95/p99_ms` | `live_event.*` with the same stamp brush | – (baseline only) |
+| `live_event.crayon.p50/p95/p99_ms` | `live_event.*` with every stroke drawn with the crayon: encoding each dirty tile's GPU job, plus copying back the wax that's finished (the main queue is drained after each event, without waiting) | p95 < 2 ms |
+| `live_event.crayon.wax_latency_p50/p95_ms` | From committing a tile's crayon job to its pixels being back on the main queue | – |
+| `live_event.crayon.long_stroke.*` | `live_event.long_stroke.*` with the crayon: its baked pressure must keep the work flat as the stroke grows | last-quarter p95 < 2 ms |
+| `full_redraw.crayon_500_ms` | Re-rendering a page of 500 crayon strokes into the committed bitmap, one GPU pass per stroke and band | – |
 | `memory.6x.*` | Physical footprint with a 5k page open at 6× zoom while the corpus is written on top: cached geometry, committed bitmap, live tiles. Measured from a settled baseline (free memory returned first), so earlier benchmarks don't change it | – |
 
 ### Recorded input

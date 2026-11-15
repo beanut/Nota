@@ -196,55 +196,23 @@ extension BrushParameter {
     // MARK: Texture
 
     private static let texture: [BrushParameter] = {
+        /// A wax texture has the same three parameters as a grain.
         func isGrain(_ b: BrushDescriptor) -> Bool {
-            b.texture.kind == .grain
+            b.texture.grain != nil
         }
         func isBristle(_ b: BrushDescriptor) -> Bool {
             b.texture.kind == .bristle
         }
         return [
             BrushParameter(id: "grain.scale", label: "Grain size", section: .texture, range: 0.25 ... 8, unit: .widths,
-                           isShown: isGrain,
-                           get: {
-                               if case let .grain(scale, _, _) = $0.texture {
-                                   Double(scale)
-                               } else {
-                                   1
-                               }
-                           },
-                           apply: { b, v in
-                               if case let .grain(_, contrast, seed) = b.texture {
-                                   b.texture = .grain(scale: CGFloat(v), contrast: contrast, seed: seed)
-                               }
-                           }),
+                           isShown: isGrain, get: { Double($0.texture.grain?.scale ?? 1) },
+                           apply: { b, v in b.texture = b.texture.withGrain { $0.scale = CGFloat(v) } }),
             BrushParameter(id: "grain.contrast", label: "Grain contrast", section: .texture, range: 0 ... 1,
-                           unit: .percent, isShown: isGrain,
-                           get: {
-                               if case let .grain(_, contrast, _) = $0.texture {
-                                   Double(contrast)
-                               } else {
-                                   1
-                               }
-                           },
-                           apply: { b, v in
-                               if case let .grain(scale, _, seed) = b.texture {
-                                   b.texture = .grain(scale: scale, contrast: CGFloat(v), seed: seed)
-                               }
-                           }),
+                           unit: .percent, isShown: isGrain, get: { Double($0.texture.grain?.contrast ?? 1) },
+                           apply: { b, v in b.texture = b.texture.withGrain { $0.contrast = CGFloat(v) } }),
             BrushParameter(id: "grain.seed", label: "Grain pattern", section: .texture, range: 0 ... 999,
-                           unit: .integer, isShown: isGrain,
-                           get: {
-                               if case let .grain(_, _, seed) = $0.texture {
-                                   Double(seed)
-                               } else {
-                                   0
-                               }
-                           },
-                           apply: { b, v in
-                               if case let .grain(scale, contrast, _) = b.texture {
-                                   b.texture = .grain(scale: scale, contrast: contrast, seed: UInt32(v.rounded()))
-                               }
-                           }),
+                           unit: .integer, isShown: isGrain, get: { Double($0.texture.grain?.seed ?? 0) },
+                           apply: { b, v in b.texture = b.texture.withGrain { $0.seed = UInt32(v.rounded()) } }),
             BrushParameter(id: "bristle.count", label: "Bristles", section: .texture, range: 1 ... 64, unit: .integer,
                            isShown: isBristle,
                            get: {
@@ -324,7 +292,7 @@ extension BrushDescriptor.TipShape {
 
 extension BrushDescriptor.Texture {
     enum Kind: Hashable {
-        case none, grain, bristle
+        case none, grain, bristle, wax
     }
 
     var kind: Kind {
@@ -332,6 +300,28 @@ extension BrushDescriptor.Texture {
         case .none: .none
         case .grain: .grain
         case .bristle: .bristle
+        case .wax: .wax
         }
+    }
+
+    /// A grain's or a wax's scale, contrast and seed; nil for the other textures.
+    var grain: PencilTexture.Grain? {
+        switch self {
+        case let .grain(scale, contrast, seed), let .wax(scale, contrast, seed):
+            PencilTexture.Grain(scale: scale, contrast: contrast, seed: seed)
+        case .none, .bristle:
+            nil
+        }
+    }
+
+    /// The texture with its grain parameters changed by `change`, keeping its kind. Other textures are
+    /// returned as they are.
+    func withGrain(_ change: (inout PencilTexture.Grain) -> Void) -> Self {
+        guard var g = grain else { return self }
+        change(&g)
+        if case .wax = self {
+            return .wax(scale: g.scale, contrast: g.contrast, seed: g.seed)
+        }
+        return .grain(scale: g.scale, contrast: g.contrast, seed: g.seed)
     }
 }

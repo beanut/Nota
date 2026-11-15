@@ -149,11 +149,13 @@ struct BrushEditorView: View {
                 case .none: .none
                 case .grain: .grain(scale: 1, contrast: 1, seed: 42)
                 case .bristle: .bristle(count: 8, spread: 1)
+                case .wax: .wax(scale: 1, contrast: 0.8, seed: 0)
                 }
             })) {
                 Text("None").tag(BrushDescriptor.Texture.Kind.none)
                 Text("Grain").tag(BrushDescriptor.Texture.Kind.grain)
                 Text("Bristle").tag(BrushDescriptor.Texture.Kind.bristle)
+                Text("Wax").tag(BrushDescriptor.Texture.Kind.wax)
             }
             .pickerStyle(.segmented)
         case .look:

@@ -17,6 +17,10 @@ import UniformTypeIdentifiers
 struct BrushSnapshotTests {
     @Test(arguments: SnapshotScene.allCases)
     func matchesGolden(_ scene: SnapshotScene) throws {
+        // The crayon is drawn by Metal; without a GPU it falls back to a pattern its golden doesn't show.
+        if scene == .crayon, WaxRenderer.shared == nil {
+            return
+        }
         let image = try #require(scene.render())
         let url = snapshotDirectory.appendingPathComponent("\(scene.rawValue).png")
         if ProcessInfo.processInfo.environment["INK_SNAPSHOT_RECORD"] == "1" {
@@ -49,6 +53,7 @@ enum SnapshotScene: String, CaseIterable, CustomTestStringConvertible {
     case dashedPen = "brush-dashed"
     case dottedPen = "brush-dotted"
     case softPencil = "brush-soft-pencil"
+    case crayon = "brush-crayon"
     case chiselHighlighter = "brush-chisel-highlighter"
 
     var testDescription: String {
@@ -95,6 +100,7 @@ enum SnapshotScene: String, CaseIterable, CustomTestStringConvertible {
         case .dashedPen: Self.builtIn(.dashedPen)
         case .dottedPen: Self.builtIn(.dottedPen)
         case .softPencil: Self.builtIn(.softPencil)
+        case .crayon: Self.builtIn(.crayon)
         case .chiselHighlighter:
             [brushStroke(.pen, width: 4, tilt: false, wave: 0), builtInStroke(.chiselHighlighter, wave: 3),
              builtInStroke(.chiselHighlighter, wave: 4)]

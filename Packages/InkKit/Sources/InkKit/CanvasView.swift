@@ -240,6 +240,7 @@ final class CanvasView: UIView {
         self.document = document
         isEmbedded = embedded
         super.init(frame: frame)
+        WaxRenderer.prewarm()
         backgroundColor = embedded ? .clear : deskColor
         isMultipleTouchEnabled = true
 

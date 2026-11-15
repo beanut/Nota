@@ -78,7 +78,7 @@ Colour, type, spacing, radius and elevation tokens, the icon set and shared cont
 
 ## InkKit
 
-The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / shapes / text / tape / eraser / lasso / laser pointer, an on-screen ruler and protractor, with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, round and chisel highlighters), a pen tray of saved pens, quick sizes and colours per tool, a colour picker (spectrum, hex, eyedropper, palettes, recent colours) and a brush editor, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
+The drawing engine: raw Pencil input, nib model, Catmull-Rom smoothing, pen / pencil / highlighter / shapes / text / tape / eraser / lasso / laser pointer, an on-screen ruler and protractor, with a built-in brush set (ballpoint, fineliner, fountain pen, brush pen, marker, dashed and dotted pens, HB and soft pencils, a crayon drawn with Metal, round and chisel highlighters), a pen tray of saved pens, quick sizes and colours per tool, a colour picker (spectrum, hex, eyedropper, palettes, recent colours) and a brush editor, undo/redo, pan and zoom, pages, and a debug HUD. How it works: [Packages/InkKit/README.md](Packages/InkKit/README.md).
 
 ```swift
 import InkKit
