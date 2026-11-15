@@ -36,7 +36,8 @@ final class CanvasController: ObservableObject {
         .highlighter: ToolSettings(width: 22),
         .eraser: ToolSettings(width: 30),
         .lasso: ToolSettings(width: 4),
-        .shape: ToolSettings(width: 3)
+        .shape: ToolSettings(width: 3),
+        .text: ToolSettings(width: 17)
     ]
 
     /// The last width used with each brush, so switching brushes in a tool brings back each one's width.
@@ -212,6 +213,7 @@ final class CanvasController: ObservableObject {
         case .eraser: 8 ... 100
         case .lasso: 1 ... 1
         case .shape: 1 ... 20
+        case .text: 1 ... 1
         }
     }
 
@@ -224,6 +226,7 @@ final class CanvasController: ObservableObject {
         case .eraser: [16, 30, 60]
         case .lasso: []
         case .shape: [2, 3, 6]
+        case .text: []
         }
     }
 
@@ -239,6 +242,7 @@ final class CanvasController: ObservableObject {
         if tool == .lasso {
             canvas?.clearSelection()
         }
+        canvas?.endEditingText()
         previousTool = tool
         tool = newTool
     }
@@ -411,7 +415,7 @@ final class CanvasController: ObservableObject {
     /// The bundled brush each tool draws with by default, before the width and pressure settings are applied.
     static func baseBrush(for tool: Tool) -> BrushDescriptor {
         switch tool {
-        case .pen, .lasso, .shape: .pen
+        case .pen, .lasso, .shape, .text: .pen
         case .pencil: .pencil
         case .highlighter: .highlighter
         case .eraser: .pixelEraser
@@ -424,7 +428,7 @@ final class CanvasController: ObservableObject {
         case .pen: BrushDescriptor.pens
         case .pencil: BrushDescriptor.pencils
         case .highlighter: BrushDescriptor.highlighters
-        case .shape, .eraser, .lasso: []
+        case .shape, .text, .eraser, .lasso: []
         }
     }
 
@@ -528,6 +532,9 @@ final class CanvasController: ObservableObject {
     /// and the eyedropper; not the quick colours, which are always there anyway).
     func setColor(_ color: PenColor, for tool: Tool, remember: Bool = false) {
         guard tool.usesInk else { return }
+        if tool == .text, textFormat != nil {
+            formatText(.color(color)) // recolours the selected text, and what's typed next
+        }
         var s = settings[tool] ?? ToolSettings(width: 4)
         s.color = color
         settings[tool] = s
@@ -621,6 +628,35 @@ final class CanvasController: ObservableObject {
         if self.brush(for: tool).id == brush.id {
             setBrush(Self.baseBrush(for: tool), for: tool, width: nil)
         }
+    }
+
+    // MARK: Text
+
+    /// The typeface and size of new text boxes (the text tool's options); their colour is the Pen Case's.
+    @Published var newTextFont: TextFont = .sans
+    @Published var newTextSize: CGFloat = 17
+    /// The format at the caret of the text box being edited, while one is; the format bar shows it.
+    @Published private(set) var textFormat: TextFormatState?
+
+    /// How a new text box's text looks.
+    var newTextStyle: TextStyle {
+        TextStyle(font: newTextFont, size: newTextSize, color: color(for: .text))
+    }
+
+    func textFormatDidChange(_ state: TextFormatState?) {
+        if textFormat != state {
+            textFormat = state
+        }
+    }
+
+    /// Changes the text box being edited (the selected text, or what's typed next).
+    func formatText(_ change: TextFormatChange) {
+        canvas?.formatText(change)
+    }
+
+    /// Finishes editing the text box, putting it on the page.
+    func endTextEditing() {
+        canvas?.endEditingText()
     }
 
     // MARK: Shapes

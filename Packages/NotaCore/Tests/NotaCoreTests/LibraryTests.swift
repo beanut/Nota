@@ -167,6 +167,16 @@ struct SearchTests {
         #expect(library.titles(in: .all, search: "\n") == library.titles(in: .all))
     }
 
+    @Test func matchesTextTypedIntoTextBoxes() throws {
+        let library = try Fixture()
+        library.notes["Loose Sketch"]?.textContent = "Groceries\nMilk\nEggs"
+        #expect(library.titles(in: .all, search: "eggs") == ["Loose Sketch"])
+        // The title still matches on its own, and deleted notes stay out.
+        library.notes["Old Draft"]?.textContent = "eggs benedict"
+        #expect(library.titles(in: .all, search: "eggs") == ["Loose Sketch"])
+        #expect(library.titles(in: .all, search: "sketch") == ["Loose Sketch"])
+    }
+
     @Test func trimsButKeepsInnerSpaces() throws {
         let library = try Fixture()
         #expect(library.titles(in: .all, search: "  reading journal ") == ["Reading Journal"])

@@ -103,6 +103,17 @@ public struct InkCanvasEditor: View {
                 .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
+            if let format = controller.textFormat {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    TextFormatBar(controller: controller, state: format)
+                        .padding(InkSpacing.s)
+                }
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             if controller.hudVisible {
                 PencilHUD(telemetry: telemetry)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)

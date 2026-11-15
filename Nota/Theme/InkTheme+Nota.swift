@@ -42,6 +42,7 @@ private extension NotaIcon {
         case .eraser: .eraser
         case .lasso: .lasso
         case .shapes: .shapes
+        case .text: .text
         case .undo: .undo
         case .redo: .redo
         case .more: .ellipsis
