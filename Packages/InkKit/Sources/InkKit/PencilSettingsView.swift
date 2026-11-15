@@ -93,7 +93,6 @@ struct PencilSettingsView: View {
             }
 
             section("Scribble") {
-                Toggle("Scratch out to erase", isOn: $controller.pencilSettings.scratchOutToErase)
                 Toggle("Circle and hold to select", isOn: $controller.pencilSettings.circleToSelect)
                 Toggle("Draw and hold to snap shapes", isOn: $controller.pencilSettings.holdToSnapShapes)
             }
