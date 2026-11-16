@@ -184,7 +184,10 @@ public struct ImageObject: PageObject, Equatable {
             ctx.fill(frame)
             return
         }
-        ctx.interpolationQuality = .high
+        // The canvas redraws its pictures as the page pans and zooms, across a layer of many megapixels,
+        // and the bitmap it's given is within 2× of the size shown: bilinear is a fraction of the cost
+        // there and looks the same. Stills (thumbnails, PDFs, copies) take the time to resample well.
+        ctx.interpolationQuality = options.defersDecoding ? .low : .high
         // Canvas space is y-down; Core Graphics draws images y-up.
         ctx.translateBy(x: image.minX, y: image.maxY)
         ctx.scaleBy(x: 1, y: -1)

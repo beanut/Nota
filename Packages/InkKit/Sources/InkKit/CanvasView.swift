@@ -38,6 +38,10 @@ final class CanvasView: UIView {
     private(set) var bitmapTransform =
         ViewTransform() // transform the bitmap is / will be rendered at once queued jobs run; pending strokes draw with this
     private(set) var displayedTransform = ViewTransform() // transform of the image currently in committedLayer.contents
+    /// The size, in points, of the image in `committedLayer.contents`, and of the one the render in flight
+    /// draws: they can differ from `bounds` just after the view changed size.
+    private(set) var displayedSize = CGSize.zero
+    private(set) var bitmapSize = CGSize.zero
     private(set) var fullRenderInFlight = false
     private var fullRenderRequested = false
     private var modifiedSinceSnapshot = Set<UUID>()
@@ -73,9 +77,11 @@ final class CanvasView: UIView {
 
     private let pageLayer = CALayer()
     private let templateView = TemplateView()
-    /// Holds the ink layers; masked to the page so strokes running off the edge are clipped.
+    /// Holds the ink layers, clipped to the page so strokes running off the edge are cut off. It covers
+    /// the part of the page in view and clips to its bounds, whose origin is that part's place in this
+    /// view, so the layers inside are laid out in this view's coordinates. A rectangular clip costs Core
+    /// Animation nothing; a mask layer would have it draw the ink offscreen on every frame.
     private let inkClipView = UIView()
-    private let inkMask = CAShapeLayer()
     private var fittedBoundsSize = CGSize.zero
     private let committedLayer = CALayer()
     let liveView = LiveInkView()
@@ -254,7 +260,7 @@ final class CanvasView: UIView {
 
         inkClipView.isUserInteractionEnabled = false
         inkClipView.backgroundColor = .clear
-        inkClipView.layer.mask = inkMask
+        inkClipView.clipsToBounds = true
         addSubview(inkClipView)
 
         committedLayer.anchorPoint = .zero
@@ -268,6 +274,7 @@ final class CanvasView: UIView {
         addSubview(tapeLayer)
 
         lassoOverlayView.canvas = self
+        lassoOverlayView.isHidden = true // until it has something to show (`updateLassoOverlay`)
         addSubview(lassoOverlayView)
 
         setUpGestures()
@@ -335,7 +342,7 @@ final class CanvasView: UIView {
         backgroundColor = isEmbedded ? .clear : deskColor
         pageLayer.shadowColor = shadowColor.resolvedColor(with: traitCollection).cgColor
         applyPaper()
-        lassoOverlayView.setNeedsDisplay()
+        updateLassoOverlay()
         zoomPanel?.apply(theme, traits: traitCollection)
         zoomBoxView?.apply(theme, traits: traitCollection)
     }
@@ -353,10 +360,9 @@ final class CanvasView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        inkClipView.frame = bounds
-        templateView.frame = bounds
-        objectLayer.frame = bounds
-        tapeLayer.frame = bounds
+        templateView.fill(bounds)
+        objectLayer.fill(bounds)
+        tapeLayer.fill(bounds)
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
         layoutZoomPanel()
@@ -377,7 +383,8 @@ final class CanvasView: UIView {
         bitmapScale = scale
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        committedLayer.bounds = bounds
+        // The layer keeps the size of the image it shows (`publish`): the image of the old size stays up,
+        // unstretched, until the first render at the new size replaces it.
         committedLayer.position = .zero
         committedLayer.contentsScale = scale
         CATransaction.commit()
@@ -397,8 +404,10 @@ final class CanvasView: UIView {
     private func makeBitmap() {
         let pixelSize = bitmapPixelSize
         let scale = bitmapScale
-        renderQueue.sync {
-            self.bitmap = CommittedRenderer.makeBitmap(pixelSize: pixelSize, scale: scale)
+        // Behind any render still drawing into the old bitmap, rather than waiting for it here: a canvas
+        // resized as a pinch ends would hold up the main thread for the length of a full render.
+        renderQueue.async { [weak self] in
+            self?.bitmap = CommittedRenderer.makeBitmap(pixelSize: pixelSize, scale: scale)
         }
     }
 
@@ -440,6 +449,7 @@ final class CanvasView: UIView {
         modifiedSinceSnapshot.removeAll()
 
         let currentBounds = bounds
+        bitmapSize = currentBounds.size
         let targetTransform = bitmapTransform
 
         let unsubmittedIDs = Set(pending.filter { !$0.submitted }.map(\.live.stroke.id))
@@ -511,6 +521,10 @@ final class CanvasView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         committedLayer.contents = image
+        // An image from before a resize is a different size from the view; it's shown at its own.
+        let scale = max(committedLayer.contentsScale, 1)
+        displayedSize = CGSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)
+        committedLayer.bounds = CGRect(origin: .zero, size: displayedSize)
         displayedTransform = transform
         updateCommittedLayerTransform()
         CATransaction.commit()
@@ -765,42 +779,6 @@ final class CanvasView: UIView {
         return entries
     }
 
-    /// The selection box as it's shown now: moved with the drag while one is under way.
-    private var displayedSelectionBox: SelectionBox? {
-        if case let .transforming(drag)? = lassoSession {
-            return drag.box.applying(drag.transform)
-        }
-        return selection.isEmpty ? nil : selectionBox
-    }
-
-    func drawLassoOverlay(in ctx: CGContext) {
-        let accent = accentColor
-        if let box = displayedSelectionBox {
-            drawSelection(box, accent: accent, in: ctx)
-        }
-        drawTextDraft(in: ctx, accent: accent)
-        if case let .drawing(pts)? = lassoSession,
-           let polygon = LassoGeometry.region(mode: controller?.lassoMode ?? .freeform, points: pts)
-           ?? (pts.count >= 2 ? pts : nil) {
-            let path = CGMutablePath()
-            path.addLines(between: polygon, transform: viewTransform.affine)
-            path.closeSubpath()
-            ctx.addPath(path)
-            ctx.setFillColor(accent.withAlphaComponent(0.10).cgColor)
-            ctx.fillPath()
-            ctx.addPath(path)
-            ctx.setStrokeColor(accent.cgColor)
-            ctx.setLineWidth(1.5)
-            ctx.setLineDash(phase: 0, lengths: [6, 4])
-            ctx.strokePath()
-            ctx.setLineDash(phase: 0, lengths: [])
-        }
-    }
-
-    func updateLassoOverlay() {
-        lassoOverlayView.setNeedsDisplay()
-    }
-
     private func invalidateLive(canvasRect: CGRect) {
         liveView.invalidate(canvasRect: canvasRect)
         zoomPanel?.liveView.invalidate(canvasRect: canvasRect)
@@ -891,25 +869,41 @@ final class CanvasView: UIView {
         viewTransform.toView(document.pageBounds)
     }
 
-    /// Moves the paper and the ink clip to follow the page.
-    func updatePageChrome() {
+    /// Moves the paper and the ink clip to follow the page. `moving` while a pan or zoom is under way: the
+    /// template and the objects may then put off their redraw (`TransformFollowingView`).
+    func updatePageChrome(moving: Bool = false) {
         let frame = pageFrameInView
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pageLayer.frame = frame
         pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
-        templateView.follow(viewTransform)
-        objectLayer.follow(viewTransform)
-        tapeLayer.follow(viewTransform)
+        templateView.follow(viewTransform, moving: moving)
+        objectLayer.follow(viewTransform, moving: moving)
+        tapeLayer.follow(viewTransform, moving: moving)
         placeTextEditor()
         placeImageCrop()
-        inkMask.frame = inkClipView.bounds
-        inkMask.path = CGPath(rect: frame, transform: nil)
+        let clip = frame.intersection(bounds)
+        let clipRect = clip.isNull ? CGRect.zero : clip
+        if inkClipView.bounds != clipRect {
+            inkClipView.bounds = clipRect
+        }
+        let clipCenter = CGPoint(x: clipRect.midX, y: clipRect.midY)
+        if inkClipView.center != clipCenter {
+            inkClipView.center = clipCenter
+        }
         if let zoomBoxView, let zoomWindow {
             zoomBoxView.frame = bounds
             zoomBoxView.show(box: viewTransform.toView(zoomWindow.box))
         }
         CATransaction.commit()
+    }
+
+    /// The movement stopped: the template and the objects are drawn sharp where the page is now, if a
+    /// redraw was put off while it moved.
+    func settlePageChrome() {
+        templateView.follow(viewTransform)
+        objectLayer.follow(viewTransform)
+        tapeLayer.follow(viewTransform)
     }
 
     /// Refits the page after the editor moved its floating chrome.
@@ -1430,6 +1424,7 @@ extension CanvasView {
         guard !isCancellingGesture else { return }
         if activeGestureCount == 0 {
             liveView.settle(at: viewTransform)
+            settlePageChrome()
         }
         if activeGestureCount == 0, bitmapTransform != viewTransform || displayedTransform != viewTransform {
             requestFullRender()
@@ -1439,10 +1434,10 @@ extension CanvasView {
     private func transformDidChange() {
         didTransformInTouchSequence = true
         updateCommittedLayerTransform()
-        updatePageChrome()
+        updatePageChrome(moving: true)
         liveView.follow(viewTransform)
         updateLassoOverlay()
-        requestFullRender()
+        renderIfShownInkFallsShort()
         controller?.zoomDidChange(viewTransform.scale)
     }
 
@@ -1547,7 +1542,7 @@ extension CanvasView {
                             y: settleFrom.offset.y + (settleTo.offset.y - settleFrom.offset.y) * e)
         )
         updateCommittedLayerTransform()
-        updatePageChrome()
+        updatePageChrome(moving: true)
         liveView.follow(viewTransform)
         updateLassoOverlay()
         if t >= 1 {

@@ -227,10 +227,33 @@ public final class ImageAssets: @unchecked Sendable {
         } else if let size = fullSize(of: id) {
             options[kCGImageSourceThumbnailMaxPixelSize] = Int(max(size.width, size.height))
         }
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let image = Self.decoded(thumbnail)
         cache.setObject(image, forKey: Self.key(id, bucket), cost: image.bytesPerRow * image.height)
         state.withLock { $0.decoded[id, default: []].insert(bucket) }
         return image
+    }
+}
+
+extension ImageAssets {
+    /// `image` as plain pixels in memory, so drawing it is a copy.
+    ///
+    /// ImageIO's images can stay backed by their file's bytes whatever `kCGImageSourceShouldCacheImmediately`
+    /// asks (HEIC at full size does): each draw then decodes the picture again, on the thread drawing it.
+    /// For the canvas that's the main thread, on every frame of a pan or zoom. Returns `image` itself if no
+    /// bitmap can be made for it.
+    static func decoded(_ image: CGImage) -> CGImage {
+        let opaque = [.none, .noneSkipFirst, .noneSkipLast].contains(image.alphaInfo)
+        let alpha: CGImageAlphaInfo = opaque ? .noneSkipFirst : .premultipliedFirst
+        guard image.width > 0, image.height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: space,
+                                  bitmapInfo: alpha.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return image }
+        ctx.setBlendMode(.copy)
+        ctx.interpolationQuality = .none
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return ctx.makeImage() ?? image
     }
 }
 

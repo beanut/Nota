@@ -1,32 +1,27 @@
 import UIKit
 
 /// The canvas layer that draws the page's objects, between the template and the ink. Like the template,
-/// it's redrawn as vectors at the canvas's transform when the page pans or zooms, and while a selection
+/// it's redrawn as vectors at the canvas's transform when the page pans or zooms (paced while it's moving:
+/// see `TransformFollowingView`), and while a selection
 /// with objects in it is dragged. A page without objects hides it, so ink-only pages draw nothing extra.
 ///
 /// Pictures never make it wait: it draws the size `ImageAssets` has decoded and redraws when the size it
 /// needs arrives (`ImageAssets.didLoadImageNotification`).
-final class ObjectLayerView: UIView {
+final class ObjectLayerView: TransformFollowingView {
     private(set) var objects: [any PageObject] = []
     private var pageBounds = CGRect.zero
-    private var canvasTransform = ViewTransform()
     /// The pictures shown, to redraw when one of them finishes decoding.
     private var assetIDs: Set<ImageAssetID> = []
     private var imageObserver: NSObjectProtocol?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        isOpaque = false
-        backgroundColor = .clear
-        isUserInteractionEnabled = false
-        contentMode = .redraw
-        isHidden = true
         imageObserver = NotificationCenter.default.addObserver(forName: ImageAssets.didLoadImageNotification,
                                                                object: nil, queue: .main) { [weak self] note in
             guard let id = note.userInfo?["id"] as? ImageAssetID else { return }
             MainActor.assumeIsolated {
                 guard let self, self.assetIDs.contains(id), !self.isHidden else { return }
-                self.setNeedsDisplay()
+                self.redraw()
             }
         }
     }
@@ -37,11 +32,6 @@ final class ObjectLayerView: UIView {
         }
     }
 
-    @available(*, unavailable)
-    required init?(coder _: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
     /// Shows `objects` (lowest `zIndex` first) clipped to the page.
     func show(_ objects: [any PageObject], pageBounds: CGRect) {
         guard !(objects.isEmpty && self.objects.isEmpty && pageBounds == self.pageBounds) else { return }
@@ -49,16 +39,7 @@ final class ObjectLayerView: UIView {
         self.pageBounds = pageBounds
         assetIDs = objects.imageAssetIDs
         isHidden = objects.isEmpty
-        setNeedsDisplay()
-    }
-
-    /// Follows the canvas to `transform`.
-    func follow(_ transform: ViewTransform) {
-        guard transform != canvasTransform else { return }
-        canvasTransform = transform
-        if !isHidden {
-            setNeedsDisplay()
-        }
+        redraw()
     }
 
     /// Draws the objects in view space at `transform`, limited to `viewRect`. Also part of the live
@@ -73,8 +54,7 @@ final class ObjectLayerView: UIView {
         }
     }
 
-    override func draw(_ rect: CGRect) {
-        guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        drawObjects(at: canvasTransform, viewRect: rect, in: ctx)
+    override func drawContents(at transform: ViewTransform, in rect: CGRect, context ctx: CGContext) {
+        drawObjects(at: transform, viewRect: rect, in: ctx)
     }
 }

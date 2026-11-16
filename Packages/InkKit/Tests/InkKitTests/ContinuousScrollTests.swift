@@ -103,6 +103,21 @@ struct ContinuousPageLayoutTests {
             == CGRect(x: -150, y: -200, width: 1500, height: 2000))
     }
 
+    @Test func midPinchTheRenderWindowGrowsToCoverThePageInView() {
+        // A page fitted to the width, narrower than the view, zooming in: its window was the page.
+        let current = CGRect(x: 24, y: 80, width: 984, height: 1392)
+        let viewport = CGRect(x: 300, y: 400, width: 1032, height: 1376)
+        let page = CGRect(x: 36, y: 120, width: 1476, height: 2088) // at 1.5×
+        let window = ContinuousPageLayout.renderWindow(forPage: page, viewport: viewport, current: current,
+                                                       keepingSize: true)
+        #expect(window.size == CGSize(width: 1032, height: 1392)) // as wide as the view; the height was enough
+        #expect(window.contains(viewport.intersection(page).insetBy(dx: 0, dy: 8)))
+        // Still narrower than the view: only as wide as the page.
+        let barely = CGRect(x: 25, y: 84, width: 1010, height: 1429)
+        #expect(ContinuousPageLayout.renderWindow(forPage: barely, viewport: CGRect(x: 0, y: 0, width: 1032, height: 1376),
+                                                  current: current, keepingSize: true).width == 1010)
+    }
+
     @Test func laysOutAndFindsPagesOfALongNoteQuickly() {
         let sizes = Array(repeating: PageSize.letter.size, count: 300)
         let clock = ContinuousClock()

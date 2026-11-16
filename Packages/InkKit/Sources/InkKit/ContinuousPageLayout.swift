@@ -127,12 +127,16 @@ struct ContinuousPageLayout: Equatable {
     /// The window is the viewport plus `renderOverscan`, cut to the page, so a page that fits in that is
     /// covered whole and never renders again while scrolling. `current` is kept while it still covers the
     /// viewport plus `renderMargin`; otherwise the window centres on the viewport, inside the page.
-    /// `keepingSize` (mid-pinch) keeps `current`'s size so the canvas doesn't make a new bitmap every frame.
+    /// `keepingSize` (mid-pinch) keeps `current`'s size so the canvas doesn't make a new bitmap every frame,
+    /// growing it only as far as it takes to cover the part of the page in view.
     static func renderWindow(forPage page: CGRect, viewport: CGRect, current: CGRect?,
                              keepingSize: Bool = false) -> CGRect {
         let size: CGSize
         if keepingSize, let current {
-            size = current.size
+            // Never smaller than what's in view, though: a page fitted to the width is narrower than the
+            // view, and kept at that size it would leave strips without ink down the sides as it zooms in.
+            size = CGSize(width: max(current.width, min(page.width, viewport.width).rounded(.up)),
+                          height: max(current.height, min(page.height, viewport.height).rounded(.up)))
         } else {
             let o = renderOverscan
             size = CGSize(width: min(page.width, viewport.width * (1 + 2 * o.width)).rounded(.up),

@@ -206,7 +206,18 @@ final class ContinuousCanvasView: UIView {
     private var isAnimatingScroll = false
 
     private var isMoving: Bool {
-        isAnimatingScroll || scrollView.isDragging || scrollView.isDecelerating || scrollView.isZooming || scrollView.isZoomBouncing
+        isAnimatingScroll || scrollView.isDragging || scrollView.isDecelerating || isPinching
+    }
+
+    /// A pinch is under way. `isZooming` isn't set yet when the first frame of a pinch zooms, which would
+    /// otherwise be taken for the movement having stopped: the pages would make new bitmaps and render
+    /// sharp at the start of every pinch, only to do it again as it ends.
+    private var isPinching: Bool {
+        if scrollView.isZooming || scrollView.isZoomBouncing {
+            return true
+        }
+        let state = scrollView.pinchGestureRecognizer?.state
+        return state == .began || state == .changed
     }
 
     /// Where page `index` is drawn in a view whose top-left is at `origin` in the content (at the current zoom).
@@ -249,7 +260,7 @@ final class ContinuousCanvasView: UIView {
             canvases[id] = nil
         }
         let contentViewport = CGRect(origin: scrollView.contentOffset, size: bounds.size)
-        let pinching = scrollView.isZooming || scrollView.isZoomBouncing
+        let pinching = isPinching
         for i in live {
             let page = pages[i]
             let existing = canvases[page.id]

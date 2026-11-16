@@ -266,3 +266,55 @@ extension CanvasView {
         }
     }
 }
+
+// MARK: - Overlay
+
+extension CanvasView {
+    /// The selection box as it's shown now: moved with the drag while one is under way.
+    var displayedSelectionBox: SelectionBox? {
+        if case let .transforming(drag)? = lassoSession {
+            return drag.box.applying(drag.transform)
+        }
+        return selection.isEmpty ? nil : selectionBox
+    }
+
+    func drawLassoOverlay(in ctx: CGContext) {
+        let accent = accentColor
+        if let box = displayedSelectionBox {
+            drawSelection(box, accent: accent, in: ctx)
+        }
+        drawTextDraft(in: ctx, accent: accent)
+        if case let .drawing(pts)? = lassoSession,
+           let polygon = LassoGeometry.region(mode: controller?.lassoMode ?? .freeform, points: pts)
+           ?? (pts.count >= 2 ? pts : nil) {
+            let path = CGMutablePath()
+            path.addLines(between: polygon, transform: viewTransform.affine)
+            path.closeSubpath()
+            ctx.addPath(path)
+            ctx.setFillColor(accent.withAlphaComponent(0.10).cgColor)
+            ctx.fillPath()
+            ctx.addPath(path)
+            ctx.setStrokeColor(accent.cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.setLineDash(phase: 0, lengths: [6, 4])
+            ctx.strokePath()
+            ctx.setLineDash(phase: 0, lengths: [])
+        }
+    }
+
+    /// Redraws the overlay, or hides it while it has nothing to show. It's as large as the view, and this
+    /// is called on every frame of a pan or zoom: shown, each call would clear and redraw a backing store
+    /// that size (tens of megabytes zoomed in) to draw nothing.
+    func updateLassoOverlay() {
+        var hasContent = displayedSelectionBox != nil || textGesture != nil
+        if case .drawing? = lassoSession {
+            hasContent = true
+        }
+        if lassoOverlayView.isHidden == hasContent {
+            lassoOverlayView.isHidden = !hasContent
+        }
+        if hasContent {
+            lassoOverlayView.setNeedsDisplay()
+        }
+    }
+}

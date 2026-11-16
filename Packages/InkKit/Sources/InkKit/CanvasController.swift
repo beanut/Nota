@@ -450,13 +450,29 @@ final class CanvasController: ObservableObject {
         }
     }
 
+    /// The page's zoom changed. `zoom` is published once it has stopped changing: a pinch changes it every
+    /// frame, and publishing each one would have SwiftUI work out the whole editor's chrome again every
+    /// frame of the pinch, for a number that's only shown in the More menu.
     func zoomDidChange(_ scale: CGFloat) {
         rulerView?.pageScaleDidChange()
         let rounded = (scale * 100).rounded() / 100
-        if rounded != zoom {
-            zoom = rounded
+        zoomPublication?.cancel()
+        zoomPublication = nil
+        guard rounded != zoom else { return }
+        let publication = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            zoomPublication = nil
+            if rounded != zoom {
+                zoom = rounded
+            }
         }
+        zoomPublication = publication
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.zoomPublicationDelay, execute: publication)
     }
+
+    /// How long the zoom must hold still before `zoom` is published.
+    static let zoomPublicationDelay: TimeInterval = 0.15
+    private var zoomPublication: DispatchWorkItem?
 
     // MARK: Stroke template
 
