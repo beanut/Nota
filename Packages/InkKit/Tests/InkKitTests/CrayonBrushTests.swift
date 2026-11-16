@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 @testable import InkKit
+import Metal
 import Testing
 
 /// Whether this machine can run the crayon's shaders (every iPad and Apple-silicon simulator can).
@@ -11,6 +12,14 @@ private let hasMetal = WaxRenderer.shared != nil
 @Suite("Crayon brush")
 struct CrayonBrushTests {
     // MARK: The brush
+
+    /// The rendering tests skip without Metal, so a shader that stops compiling would only show as skips:
+    /// wherever there is a GPU, the renderer must build.
+    @Test func theShadersCompileWhereverThereIsAGPU() {
+        if MTLCreateSystemDefaultDevice() != nil {
+            #expect(WaxRenderer.shared != nil, "WaxShaders.source didn't compile")
+        }
+    }
 
     @Test func itIsInThePencilFamilyWithAFixedID() {
         #expect(BrushDescriptor.pencils.contains(.crayon))
@@ -80,11 +89,32 @@ struct CrayonBrushTests {
 
     // MARK: Geometry
 
+    /// Each stamp carries where the crayon's own texture sits under it: the stroke's offset, shifted with the
+    /// direction of travel.
+    @Test func itsStampsCarryTheStrokesGrainTurnedByTheHeading() throws {
+        let there = straight(force: 0.6, from: 20, to: 280)
+        let back = straight(force: 0.6, from: 280, to: 20)
+        func grains(_ stroke: Stroke) -> [CGPoint] {
+            StrokeRenderer.geometry(for: stroke).runs.flatMap(\.stamps).map(\.grain)
+        }
+        let shift = RasterStamp.headingShift
+        let own = there.waxGrain
+        let middle = try #require(grains(there).dropFirst(20).first)
+        #expect(abs(middle.x - (own.x + shift)) < 0.01 && abs(middle.y - own.y) < 0.01)
+        let returning = try #require(grains(back).dropFirst(20).first)
+        #expect(abs(returning.x - (own.x - shift)) < 0.01)
+        // Strokes made at different times have their own grain; the pieces of an erased one keep theirs.
+        var later = there
+        later.createdAt = there.createdAt.addingTimeInterval(0.5)
+        #expect(later.waxGrain != there.waxGrain)
+        #expect(there.waxGrain == there.waxGrain)
+    }
+
     @Test func itsRunsCarryTheNibStampsTheGPUDraws() {
         let crayon = StrokeRenderer.geometry(for: builtInStroke(.crayon, wave: 0))
         let stamps = crayon.runs.flatMap(\.stamps)
         #expect(stamps.count > 100)
-        #expect(stamps.allSatisfy { crayon.bounds.insetBy(dx: -1, dy: -1).contains($0.center) })
+        #expect(stamps.allSatisfy { crayon.bounds.insetBy(dx: -1, dy: -1).contains($0.tip.center) })
         let pen = StrokeRenderer.geometry(for: builtInStroke(.pen, wave: 0))
         #expect(pen.runs.flatMap(\.stamps).isEmpty)
         // A tap is one stamp.
@@ -133,15 +163,6 @@ struct CrayonBrushTests {
 
     @Test(.enabled(if: hasMetal, "needs a Metal device"))
     func paperShowsThroughAndPressureLaysMoreWax() throws {
-        var even = BrushDescriptor.crayon
-        even.pressure = .init(amount: 0) // the same width at any pressure, to compare the wax alone
-        func straight(force: CGFloat) -> Stroke {
-            let points = (0 ..< 60).map { i in
-                StrokePoint(location: CGPoint(x: 20 + 260 * CGFloat(i) / 59, y: 80), force: force,
-                            altitude: .pi / 2, azimuth: 0, timestamp: Double(i) / 240)
-            }
-            return Stroke(id: UUID(), color: RGBA(r: 0.1, g: 0.2, b: 0.6), brush: even, points: points)
-        }
         // The middle of the stroke: the nib is 9 pt wide, 18 px at 2×.
         let firm = try #require(coverage(render(page(of: [straight(force: 1)])), rows: 156 ..< 164))
         let light = try #require(coverage(render(page(of: [straight(force: 0.1)])), rows: 156 ..< 164))
@@ -152,11 +173,54 @@ struct CrayonBrushTests {
         #expect(light.bare > firm.bare)
     }
 
+    /// A real crayon fills the paper in as strokes are layered: each stroke's own grain misses different
+    /// bits of paper. The same grain twice only darkens the wax it already laid, so its holes stay.
+    @Test(.enabled(if: hasMetal, "needs a Metal device"))
+    func layeringStrokesFillsInThePaper() throws {
+        let first = straight(force: 0.35)
+        func copy(after seconds: TimeInterval) -> Stroke {
+            Stroke(id: UUID(), color: first.color, brush: first.brush, points: first.points,
+                   createdAt: first.createdAt.addingTimeInterval(seconds))
+        }
+        let second = copy(after: 3)
+        let rows = 156 ..< 164
+        let once = try #require(coverage(render(page(of: [first])), rows: rows))
+        let same = try #require(coverage(render(page(of: [first, copy(after: 0)])), rows: rows))
+        let layered = try #require(coverage(render(page(of: [first, second])), rows: rows))
+        #expect(layered.bare < same.bare * 0.75, "layered \(layered.bare), same grain \(same.bare)")
+        #expect(layered.bare < once.bare * 0.6, "layered \(layered.bare), once \(once.bare)")
+        #expect(layered.meanAlpha > once.meanAlpha)
+        // The paper's deepest pits stay bare in both: they share the paper's tooth.
+        #expect(layered.bare > 0)
+    }
+
+    /// Scribbling back over ink in one stroke fills it in too: the crayon's texture turns with the
+    /// direction of travel.
+    @Test(.enabled(if: hasMetal, "needs a Metal device"))
+    func goingBackOverInkFillsInThePaper() throws {
+        let rows = 156 ..< 164
+        let there = straight(force: 0.35, from: 20, to: 280)
+        var andBack = there
+        let back = straight(force: 0.35, from: 280, to: 20).points.dropFirst().map {
+            var p = $0
+            p.timestamp += 60.0 / 240
+            return p
+        }
+        andBack.points += back
+        let once = try #require(coverage(render(page(of: [there])), rows: rows))
+        let twice = try #require(coverage(render(page(of: [andBack])), rows: rows))
+        #expect(twice.bare < once.bare * 0.75, "there and back \(twice.bare), there \(once.bare)")
+    }
+
     /// The live layer bakes a crayon stroke's settled pressure on the GPU and adds the hot stamps each frame,
     /// asynchronously, redrawing only the dirty part of each tile. What it shows when the stroke ends must be what the
     /// committed layer draws, or the ink would change when the Pencil lifts.
-    @Test(.enabled(if: hasMetal, "needs a Metal device"))
-    func theLiveLayerShowsWhatIsCommitted() async throws {
+    /// `landEvery`: the GPU's wax comes back, and tiles redraw, every so many points while the stroke is
+    /// still being drawn, as on device, where a tile's wax often lands after the Pencil has moved on. Tiles
+    /// the stroke has left then redraw after new chunks that reach them have settled; those chunks must
+    /// still reach the tiles' fields, or later wax there has holes.
+    @Test(.enabled(if: hasMetal, "needs a Metal device"), arguments: [0, 1, 8, 30])
+    func theLiveLayerShowsWhatIsCommitted(landEvery: Int) async throws {
         let transform = ViewTransform(scale: 1.5, offset: CGPoint(x: 10, y: 6))
         let view = LiveInkView(frame: CGRect(x: 0, y: 0, width: 480, height: 260))
         view.traitOverrides.displayScale = 2
@@ -165,10 +229,15 @@ struct CrayonBrushTests {
         let source = builtInStroke(.crayon, wave: 2) // a loop, so it crosses its own baked chunks
         let live = LiveStroke(stroke: Stroke(id: source.id, color: source.color, brush: source.brush, points: []))
         view.entries = { [LiveInkView.Entry(stroke: live, previewFill: nil)] }
-        for point in source.points {
+        for (i, point) in source.points.enumerated() {
             live.append(point, minSpacing: 0)
             view.invalidate(canvasRect: live.advance(predicted: []))
             view.displayPendingTiles()
+            if landEvery > 0, i % landEvery == 0 {
+                // Let the GPU's completions land on the main queue, then draw the tiles they marked.
+                try await Task.sleep(nanoseconds: 3_000_000)
+                view.displayPendingTiles()
+            }
         }
         view.invalidate(canvasRect: live.geometry().bounds)
         // The wax comes back from the GPU on the main queue.
@@ -226,6 +295,19 @@ struct CrayonBrushTests {
     }
 
     // MARK: Helpers
+
+    /// A straight crayon stroke across the page at y 80, the same width at any pressure, to compare the wax
+    /// alone.
+    private func straight(force: CGFloat, from start: CGFloat = 20, to end: CGFloat = 280) -> Stroke {
+        var even = BrushDescriptor.crayon
+        even.pressure = .init(amount: 0)
+        let points = (0 ..< 60).map { i in
+            StrokePoint(location: CGPoint(x: start + (end - start) * CGFloat(i) / 59, y: 80), force: force,
+                        altitude: .pi / 2, azimuth: 0, timestamp: Double(i) / 240)
+        }
+        return Stroke(id: UUID(), color: RGBA(r: 0.1, g: 0.2, b: 0.6), brush: even, points: points,
+                      createdAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+    }
 
     private func page(of strokes: [Stroke]) -> PageSnapshot {
         let doc = CanvasDocument(pageSize: PageSize(width: 300, height: 160))

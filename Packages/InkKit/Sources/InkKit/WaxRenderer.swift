@@ -8,11 +8,12 @@ import simd
 /// `StrokeRenderer.draw`, which hands raster strokes here.
 ///
 /// For the part of the stroke inside the context's clip, in the context's own pixels:
-/// 1. the stroke's nib stamps are drawn as instanced ellipses into a pressure field, max-blended, so each
-///    pixel holds the strongest press over it;
-/// 2. a compute pass turns pressure into wax on a paper tooth computed from the page position, so the
-///    grain is fixed to the page: it doesn't shimmer as the stroke grows, and any split of the work (tiles,
-///    bands, the live layer's dirty rects) gives the same pixels;
+/// 1. the stroke's nib stamps are drawn as instanced ellipses into a wax field, max-blended. Each stamp
+///    lays wax on a tooth computed from the page position (the paper's, which every stroke shares) and
+///    the stamp's own offset into the crayon's texture (`RasterStamp.grain`), so the grain doesn't shimmer
+///    as the stroke grows, any split of the work (tiles, bands, the live layer's dirty rects) gives the
+///    same pixels, and a pass back over ink fills in some of the paper it left;
+/// 2. a compute pass colours the wax;
 /// 3. the result is drawn into the context as an image, with the brush's blend mode.
 ///
 /// Shaders: `WaxShaders.swift`. Without a Metal device, or for a region too big to rasterize, `draw`
@@ -91,7 +92,7 @@ final class WaxRenderer: @unchecked Sendable {
         return true
     }
 
-    /// The wax of `runs` over `field`'s baked pressure, in `region` (device pixels of the field, clipped to
+    /// The wax of `runs` over `field`'s baked wax, in `region` (device pixels of the field, clipped to
     /// it), without waiting: `completion` gets the pixels on the main queue, or nil if the GPU failed.
     /// The live layer uses it, so a touch event never waits for the GPU.
     func render(runs: [StrokeRun], over field: WaxField, region: CGRect, ink: Ink,
@@ -148,11 +149,10 @@ final class WaxRenderer: @unchecked Sendable {
         }
     }
 
-    /// Encodes the wax of `runs` (plus `field`'s pressure) over `region`, in device pixels from `toDevice`,
+    /// Encodes the wax of `runs` (plus `field`'s baked wax) over `region`, in device pixels from `toDevice`,
     /// split into tiles of at most `tileSide`. Nil when the GPU can't; no tiles when there's nothing to draw.
     private func encode(runs: [StrokeRun], over field: WaxField?, region: CGRect, toDevice: CGAffineTransform,
                         ink: Ink) -> Job? {
-        let color = ink.color
         guard let grain = ink.brush.texture.grain, let commands = queue.makeCommandBuffer() else { return nil }
         commands.label = "Wax stroke"
         guard !region.isNull, !region.isInfinite, region.width >= 1, region.height >= 1 else {
@@ -161,10 +161,7 @@ final class WaxRenderer: @unchecked Sendable {
         guard region.width * region.height <= CGFloat(Self.maxPixels) else { return nil }
         let stamps = Self.deviceStamps(runs, toDevice: toDevice)
         guard !stamps.isEmpty || field != nil else { return Job(commands: commands, tiles: []) }
-        let pixelsPerPoint = Float(abs(toDevice.a * toDevice.d - toDevice.b * toDevice.c).squareRoot())
-        let style = Style(color: SIMD4(Float(color.r), Float(color.g), Float(color.b), Float(color.a)),
-                          toothSize: Float(Self.toothPoints * grain.scale), contrast: Float(grain.contrast),
-                          seed: grain.seed, pixelsPerPoint: pixelsPerPoint, toCanvas: toDevice.inverted())
+        let style = Style(ink: ink, grain: grain, toDevice: toDevice)
         // Tiles of the region, in device pixels; y up, like the device space.
         var tiles: [(rect: CGRect, output: MTLBuffer)] = []
         let side = CGFloat(Self.tileSide)
@@ -188,8 +185,8 @@ final class WaxRenderer: @unchecked Sendable {
 
     // MARK: Baked fields
 
-    /// The pressure of a live stroke's settled chunks over one rect of a destination's pixels, kept on the
-    /// GPU between draws. Max blending is order-free, so the stamps of baked chunks plus the hot ones drawn
+    /// The wax of a live stroke's settled chunks over one rect of a destination's pixels, kept on the GPU
+    /// between draws. Max blending is order-free, so the stamps of baked chunks plus the hot ones drawn
     /// over them make exactly the field of the whole stroke, and the live layer's pixels match the
     /// committed ones.
     final class WaxField {
@@ -225,12 +222,17 @@ final class WaxRenderer: @unchecked Sendable {
         return WaxField(texture: texture, rect: rect, toDevice: toDevice)
     }
 
-    /// Adds `runs`' stamps to `field`. Doesn't wait: the next draw on the same queue runs after it.
-    func bake(_ runs: [StrokeRun], into field: WaxField) {
+    /// Adds `runs`' stamps to `field`, drawn with `ink`. Doesn't wait: the next draw on the same queue runs
+    /// after it.
+    func bake(_ runs: [StrokeRun], into field: WaxField, ink: Ink) {
+        guard let grain = ink.brush.texture.grain else { return }
         let stamps = Self.deviceStamps(runs, toDevice: field.toDevice).filter { $0.bounds.intersects(field.rect) }
         guard !stamps.isEmpty, let commands = queue.makeCommandBuffer() else { return }
         commands.label = "Wax bake"
-        guard renderStamps(stamps, in: field.rect, into: field.texture, clear: false, commands: commands) else { return }
+        let style = Style(ink: ink, grain: grain, toDevice: field.toDevice)
+        guard renderStamps(stamps, into: (field.texture, field.rect), clear: false, style: style,
+                           commands: commands)
+        else { return }
         commands.commit()
     }
 
@@ -244,6 +246,16 @@ final class WaxRenderer: @unchecked Sendable {
         let seed: UInt32
         let pixelsPerPoint: Float
         let toCanvas: CGAffineTransform
+
+        init(ink: Ink, grain: PencilTexture.Grain, toDevice: CGAffineTransform) {
+            let color = ink.color
+            self.color = SIMD4(Float(color.r), Float(color.g), Float(color.b), Float(color.a))
+            toothSize = Float(WaxRenderer.toothPoints * grain.scale)
+            contrast = Float(grain.contrast)
+            seed = grain.seed
+            pixelsPerPoint = Float(abs(toDevice.a * toDevice.d - toDevice.b * toDevice.c).squareRoot())
+            toCanvas = toDevice.inverted()
+        }
     }
 
     /// A stamp in device pixels, with its device bounds for culling.
@@ -251,6 +263,7 @@ final class WaxRenderer: @unchecked Sendable {
         var center: SIMD2<Float>
         var axisA: SIMD2<Float>
         var axisB: SIMD2<Float>
+        var grain: SIMD2<Float>
         var alpha: Float
         let bounds: CGRect
     }
@@ -260,20 +273,27 @@ final class WaxRenderer: @unchecked Sendable {
         var center: SIMD2<Float>
         var axisA: SIMD2<Float>
         var axisB: SIMD2<Float>
+        var grain: SIMD2<Float>
         var alpha: Float
         var pad: Float = 0
     }
 
-    /// Matches `WaxParams` in the shader.
-    private struct GPUParams {
-        var pageOrigin: SIMD2<Float>
-        var pageStepX: SIMD2<Float>
-        var pageStepY: SIMD2<Float>
-        var color: SIMD4<Float>
+    /// Matches `StampParams` in the shader.
+    private struct GPUStampParams {
+        var size: SIMD2<Float>
+        var origin: SIMD2<Int32>
+        var pageFromX: SIMD2<Float>
+        var pageFromY: SIMD2<Float>
+        var pageAt0: SIMD2<Float>
         var toothSize: Float
         var contrast: Float
         var pixelsPerPoint: Float
         var seed: UInt32
+    }
+
+    /// Matches `WaxParams` in the shader.
+    private struct GPUParams {
+        var color: SIMD4<Float>
         var width: UInt32
         var height: UInt32
         var rowPixels: UInt32
@@ -287,7 +307,8 @@ final class WaxRenderer: @unchecked Sendable {
         var result: [DeviceStamp] = []
         result.reserveCapacity(runs.reduce(0) { $0 + $1.stamps.count })
         for run in runs {
-            for tip in run.stamps {
+            for stamp in run.stamps {
+                let tip = stamp.tip
                 let c = cos(tip.angle), s = sin(tip.angle)
                 var a = CGPoint(x: c * tip.major, y: s * tip.major).applyingLinear(toDevice)
                 var b = CGPoint(x: -s * tip.minor, y: c * tip.minor).applyingLinear(toDevice)
@@ -306,6 +327,7 @@ final class WaxRenderer: @unchecked Sendable {
                 let ex = abs(a.x) + abs(b.x), ey = abs(a.y) + abs(b.y)
                 result.append(DeviceStamp(center: SIMD2(Float(center.x), Float(center.y)),
                                           axisA: SIMD2(Float(a.x), Float(a.y)), axisB: SIMD2(Float(b.x), Float(b.y)),
+                                          grain: SIMD2(Float(stamp.grain.x), Float(stamp.grain.y)),
                                           alpha: Float(min(alpha, 1)),
                                           bounds: CGRect(x: center.x - ex, y: center.y - ey, width: 2 * ex,
                                                          height: 2 * ey)))
@@ -331,24 +353,32 @@ final class WaxRenderer: @unchecked Sendable {
         return pass
     }
 
-    /// Draws `stamps` (device pixels) into `texture`, which covers `rect`: row 0 at the top.
-    private func renderStamps(_ stamps: [DeviceStamp], in rect: CGRect, into texture: MTLTexture, clear: Bool,
-                              commands: MTLCommandBuffer) -> Bool {
+    /// Draws `stamps` (device pixels) into the target's texture, which covers its `rect`: row 0 at the top.
+    private func renderStamps(_ stamps: [DeviceStamp], into target: (texture: MTLTexture, rect: CGRect),
+                              clear: Bool, style: Style, commands: MTLCommandBuffer) -> Bool {
+        let (texture, rect) = target
         guard let render = commands.makeRenderCommandEncoder(descriptor: Self.fieldPass(texture, clear: clear))
         else { return false }
         defer { render.endEncoding() }
         guard !stamps.isEmpty else { return true }
         let origin = SIMD2(Float(rect.minX), Float(rect.minY))
         let gpuStamps = stamps.map {
-            GPUStamp(center: $0.center - origin, axisA: $0.axisA, axisB: $0.axisB, alpha: $0.alpha)
+            GPUStamp(center: $0.center - origin, axisA: $0.axisA, axisB: $0.axisB, grain: $0.grain, alpha: $0.alpha)
         }
         guard let buffer = gpuStamps.withUnsafeBytes({
             device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
         }) else { return false }
+        let t = style.toCanvas
+        var params = GPUStampParams(size: SIMD2(Float(rect.width), Float(rect.height)),
+                                    origin: SIMD2(Int32(rect.minX), Int32(rect.maxY)),
+                                    pageFromX: SIMD2(Float(t.a), Float(t.b)), pageFromY: SIMD2(Float(t.c), Float(t.d)),
+                                    pageAt0: SIMD2(Float(t.tx), Float(t.ty)),
+                                    toothSize: style.toothSize, contrast: style.contrast,
+                                    pixelsPerPoint: style.pixelsPerPoint, seed: style.seed)
         render.setRenderPipelineState(stampPipeline)
         render.setVertexBuffer(buffer, offset: 0, index: 0)
-        var size = SIMD2(Float(rect.width), Float(rect.height))
-        render.setVertexBytes(&size, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        render.setVertexBytes(&params, length: MemoryLayout<GPUStampParams>.stride, index: 1)
+        render.setFragmentBytes(&params, length: MemoryLayout<GPUStampParams>.stride, index: 0)
         render.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: gpuStamps.count)
         return true
     }
@@ -374,19 +404,11 @@ final class WaxRenderer: @unchecked Sendable {
                       destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
             blit.endEncoding()
         }
-        guard renderStamps(stamps, in: rect, into: field, clear: base == nil, commands: commands) else { return nil }
+        guard renderStamps(stamps, into: (field, rect), clear: base == nil, style: style, commands: commands)
+        else { return nil }
 
-        // Pixel (i, j), row 0 at the top, has its centre at device (minX + i + 0.5, maxY - j - 0.5).
-        let toCanvas = style.toCanvas
-        let first = CGPoint(x: rect.minX + 0.5, y: rect.maxY - 0.5).applying(toCanvas)
-        let right = CGPoint(x: 1, y: 0).applyingLinear(toCanvas)
-        let down = CGPoint(x: 0, y: -1).applyingLinear(toCanvas)
-        var params = GPUParams(pageOrigin: SIMD2(Float(first.x), Float(first.y)),
-                               pageStepX: SIMD2(Float(right.x), Float(right.y)),
-                               pageStepY: SIMD2(Float(down.x), Float(down.y)),
-                               color: style.color, toothSize: style.toothSize, contrast: style.contrast,
-                               pixelsPerPoint: style.pixelsPerPoint, seed: style.seed, width: UInt32(width),
-                               height: UInt32(height), rowPixels: UInt32(rowPixels))
+        var params = GPUParams(color: style.color, width: UInt32(width), height: UInt32(height),
+                               rowPixels: UInt32(rowPixels))
         guard let compute = commands.makeComputeCommandEncoder() else { return nil }
         compute.setComputePipelineState(compositePipeline)
         compute.setTexture(field, index: 0)

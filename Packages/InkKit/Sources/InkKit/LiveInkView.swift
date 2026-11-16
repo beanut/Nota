@@ -55,7 +55,7 @@ final class LiveInkView: UIView {
     /// One stroke's baked ink inside one tile.
     private final class BakedTile {
         var context: CGContext?
-        /// For a raster brush (see `requestWax`): the settled chunks' pressure on the GPU, the canvas rect
+        /// For a raster brush (see `requestWax`): the settled chunks' wax on the GPU, the canvas rect
         /// still to redraw, whether a GPU job is out, and whether the GPU failed (then paths are filled).
         var field: WaxRenderer.WaxField?
         var waxPending = CGRect.null
@@ -189,7 +189,7 @@ final class LiveInkView: UIView {
         for (key, tile) in baked where tile.bakedThrough > chunk && frame(of: key).intersects(rect) {
             tile.bakedThrough = 0
             if tile.field != nil {
-                // A raster tile keeps showing its wax; its pressure is rebuilt and the dirty rect redrawn.
+                // A raster tile keeps showing its wax; its field is rebuilt and the dirty rect redrawn.
                 tile.field = nil
                 continue
             }
@@ -323,7 +323,7 @@ final class LiveInkView: UIView {
     /// Asks the GPU for the wax of every raster stroke under `canvasRect`, tile by tile, without waiting.
     ///
     /// A raster stroke's wax at a pixel depends on every stamp over it, so it can't be baked as pixels chunk
-    /// by chunk. Its pressure combines by max, though, so each tile keeps the settled chunks' pressure on the
+    /// by chunk. Its stamps' wax combines by max, though, so each tile keeps the settled chunks' wax on the
     /// GPU (a `WaxField`) and a job adds only the hot stamps over it. The pixels come back on the main queue
     /// into the tile's baked bitmap, which the tile then draws like any baked ink. A touch event only
     /// encodes work, so it never waits for the GPU; the wax shows when the GPU is done, at most about a
@@ -367,7 +367,7 @@ final class LiveInkView: UIView {
             for chunk in baked.bakedThrough ..< limit where stroke.chunkBounds(chunk).intersects(tileCanvas) {
                 runs.append(contentsOf: stroke.chunkRuns(chunk))
             }
-            wax.bake(runs, into: field)
+            wax.bake(runs, into: field, ink: WaxRenderer.Ink(brush: stroke.stroke.brush, color: stroke.stroke.color))
             baked.bakedThrough = limit
         }
         return baked
@@ -404,7 +404,8 @@ final class LiveInkView: UIView {
     }
 
     /// Rasterizes any newly settled chunks of `entry` that reach this tile. Each chunk is drawn once.
-    /// A raster brush bakes its pressure instead (`bakeField`), when the tile is drawn.
+    /// Not for a raster brush, whose settled chunks go to the GPU instead (`waxTile`): drawing them here would
+    /// mark them done, so the tile's field would never get them.
     private func bake(_ entry: Entry, key: TileKey, tileFrame: CGRect, clip: CGRect) -> BakedTile? {
         let stroke = entry.stroke
         let id = ObjectIdentifier(stroke)
@@ -451,9 +452,10 @@ final class LiveInkView: UIView {
         }
         var items: [Item] = []
         for entry in entries() {
-            let baked = bake(entry, key: tile.key, tileFrame: tileFrame, clip: tileClip)
             // A raster stroke shows the wax the GPU last sent back (see `requestWax`); without Metal, or if
-            // the GPU failed, its paths are filled with the grain pattern instead.
+            // the GPU failed, its paths are filled with the grain pattern instead. Its settled chunks are
+            // never baked as paths: they'd land in the bitmap the wax comes back into, as pattern, and be
+            // marked done, so the tile's GPU field would miss them and later wax would leave holes there.
             if entry.stroke.stroke.brush.isRaster, entry.previewFill == nil {
                 let baked = rasters[ObjectIdentifier(entry.stroke)]?[tile.key]
                 if WaxRenderer.shared != nil, baked?.waxFailed != true {
@@ -468,6 +470,7 @@ final class LiveInkView: UIView {
                 }
                 continue
             }
+            let baked = bake(entry, key: tile.key, tileFrame: tileFrame, clip: tileClip)
             let hot = entry.stroke.runs(intersecting: clip, fromChunk: entry.stroke.bakeableChunkCount)
             if baked?.image != nil || !hot.isEmpty {
                 items.append(Item(entry: entry, baked: baked?.image, hot: hot))

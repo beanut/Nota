@@ -66,9 +66,10 @@ public extension BrushDescriptor {
                                                                breadth: 1.2, opacityLoss: 0.65, contactShift: 0.4),
                                             texture: .grain(scale: 1.5, contrast: 0.8, seed: 7), opacity: 0.95)
 
-    /// Crayon: a waxy stick, and Nota's raster brush. It's drawn on the GPU (`WaxRenderer`): the nib's
-    /// stamps make a pressure field, and wax reaches into a paper tooth fixed to the page as far as the
-    /// press does, so a light stroke catches only the peaks, the rim is ragged and paper shows through.
+    /// Crayon: a waxy stick, and Nota's raster brush. It's drawn on the GPU (`WaxRenderer`): each of the
+    /// nib's stamps lays wax into a paper tooth fixed to the page as far as the press does, so a light
+    /// stroke catches only the peaks, the rim is ragged and paper shows through. Each stroke, and each
+    /// direction it travels, has its own grain, so layering fills the paper in.
     /// Pressure widens it and lays more wax; a tilted stick broadens into a wide, light stroke.
     static let crayon = BrushDescriptor(id: builtInID(13), name: "Crayon", size: 2.5 ... 9,
                                         pressure: ResponseCurve(amount: 1, exponent: 0.7),
