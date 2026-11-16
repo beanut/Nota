@@ -18,10 +18,14 @@ extension CanvasView {
         }
     }
 
-    /// Moves an embedded page to `transform` as the host scrolls or zooms. `settled` once the movement
-    /// has stopped, so the ink is drawn sharp at the new scale.
-    func place(_ transform: ViewTransform, settled: Bool) {
+    /// Moves an embedded page to `transform` as the host scrolls or zooms; `visible` is the part of the
+    /// view on screen. `settled` once the movement has stopped, so everything is drawn sharp at the new
+    /// scale. While it moves, what's drawn is scaled to follow (`requestRenderWhileMoving`).
+    func place(_ transform: ViewTransform, visible: CGRect? = nil, settled: Bool) {
         guard isEmbedded else { return }
+        placementVisible = visible
+        let wasMoving = placementMoving
+        placementMoving = !settled
         if transform != placement {
             placement = transform
             viewTransform = transform
@@ -30,8 +34,10 @@ extension CanvasView {
             liveView.follow(viewTransform)
             updateLassoOverlay()
             if !settled {
-                requestFullRender()
+                requestRenderWhileMoving()
             }
+        } else if wasMoving, settled {
+            updatePageChrome() // the template and objects, drawn sharp again
         }
         if settled {
             liveView.settle(at: viewTransform)
