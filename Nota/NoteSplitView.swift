@@ -3,7 +3,7 @@ import NotaUI
 import SwiftData
 import SwiftUI
 
-/// Two notes side by side in one window, each with its own Pen Case. Closing one leaves the other open.
+/// Two notes side by side in one window, each with its own tool picker. Closing one leaves the other open.
 struct NoteSplitView: View {
     let notes: [Note]
     @Binding var workspace: NoteWorkspace
@@ -17,23 +17,12 @@ struct NoteSplitView: View {
                         .frame(width: 1)
                         .ignoresSafeArea()
                 }
-                // Each side gets its own navigation bar for its Pen Case.
+                // Each side has its own editor chrome; its Close button closes just that side.
                 NavigationStack {
-                    NoteEditorView(note: note, workspace: $workspace, trail: $trail) { other in
-                        withAnimation { workspace.replace(note.id, with: other) }
-                    }
-                    .id(note.id)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button {
-                                withAnimation { workspace.close(note.id) }
-                            } label: {
-                                NotaIconView(.xmark)
-                            }
-                            .buttonStyle(.notaIcon(selected: false))
-                            .accessibilityLabel("Close \(note.title)")
-                        }
-                    }
+                    NoteEditorView(note: note, workspace: $workspace, trail: $trail, leading: .close,
+                                   leadingAction: { withAnimation { workspace.close(note.id) } },
+                                   openNote: { other in withAnimation { workspace.replace(note.id, with: other) } })
+                        .id(note.id)
                 }
                 .frame(maxWidth: .infinity)
             }

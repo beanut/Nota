@@ -27,12 +27,19 @@ extension InkTheme {
         bodyEmphasizedFont: NotaFont.subheadlineEmph,
         footnoteFont: NotaFont.footnote,
         footnoteEmphasizedFont: NotaFont.footnoteEmph,
-        icon: { Image(nota: NotaIcon(inkIcon: $0)) },
-        penInks: NotaInk.penPresets.map(InkColor.init),
+        // NotaUI has no checkmark line icon; the title menu's check uses the system one.
+        icon: { $0 == .check ? InkTheme.systemIcon($0) : Image(nota: NotaIcon(inkIcon: $0)) },
+        penInks: NotaInk.pickerPresets.map(InkColor.init),
         highlighterInks: NotaInk.highlighterPresets.map(InkColor.init),
         tapeInks: NotaInk.tapePresets.map(InkColor.init),
         laser: InkColor(NotaInk.laser),
-        link: InkColor(NotaInk.blue)
+        link: InkColor(NotaInk.blue),
+        glassTint: NotaUIColor.materialGlassTint,
+        blurTint: NotaUIColor.materialBlurTint,
+        blurBorder: NotaUIColor.materialBlurBorder,
+        selectionPill: NotaUIColor.materialSelectionPill,
+        addTint: NotaUIColor.signalAdd,
+        toolArt: { tool in NotaToolIllustration(tool).map { AnyView(NotaToolIllustrationView($0)) } }
     )
 }
 
@@ -49,7 +56,7 @@ private extension NotaIcon {
         case .addPage: .plus
         case .disclosure: .chevronDown
         case .delete: .trash
-        case .pages: .grid
+        case .pages: .pages
         case .newLine: .newLine
         case .close: .xmark
         case .penTray: .pens
@@ -58,6 +65,17 @@ private extension NotaIcon {
         case .bookmark: .bookmark
         case .outline: .list
         case .back: .chevronLeft
+        case .search, .ai, .share, .check: NotaIcon(navigation: inkIcon)
+        }
+    }
+
+    /// The editor's trailing actions.
+    init(navigation icon: InkIcon) {
+        self = switch icon {
+        case .search: .search
+        case .ai: .wand
+        case .share: .share
+        default: .plus // `.check` is drawn from SF Symbols instead (see `nota`)
         }
     }
 
@@ -75,6 +93,26 @@ private extension NotaIcon {
         case .laser: .laser
         case .ruler: .ruler
         default: .pen
+        }
+    }
+}
+
+private extension NotaToolIllustration {
+    /// The illustration for a tool in the picker; nil for tape, the laser and Insert, which use their glyphs.
+    init?(_ tool: PickerTool) {
+        switch tool {
+        case .pen: self = .pen
+        case .marker: self = .marker
+        case .fountainPen: self = .fountainPen
+        case .pencil: self = .pencil
+        case .crayon: self = .crayon
+        case .highlighter: self = .highlighter
+        case .eraser: self = .eraser
+        case .lasso: self = .lasso
+        case .ruler: self = .ruler
+        case .shapes: self = .shapes
+        case .textBox: self = .textBox
+        case .tape, .laser, .insert: return nil
         }
     }
 }

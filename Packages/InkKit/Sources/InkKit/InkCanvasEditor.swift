@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Full drawing surface: the raw-Pencil canvas showing one page on a desk, the Pen Case centered in the
-/// navigation bar (the note's title lives in its More menu), a page bar for moving between, adding and
-/// resizing pages, the debug HUD and the Pencil Pro quick palette.
+/// Full drawing surface: the raw-Pencil canvas showing one page on a desk, under floating chrome (Figma
+/// **Nota – Floating Tool Picker**): a navigation row with the back button, the note's title (its menu
+/// renames the note and switches to recent notes) and the trailing actions, the floating tool picker, and
+/// the pages panel on the trailing edge. Also the debug HUD and the Pencil Pro quick palette.
 ///
 /// Pass the same `InkNotebook` again to reopen it with every page's strokes and undo history intact.
 ///
@@ -10,10 +11,13 @@ import SwiftUI
 /// InkCanvasEditor(notebook: note.notebook, title: $note.title)
 /// ```
 ///
-/// The More menu's Scroll Direction shows pages one at a time with sideways swipes (horizontal) or all of
-/// them in one column scrolled vertically (`PageLayoutMode`). The page bar's pages button opens the page
-/// sidebar: thumbnails to jump between, reorder, duplicate, rotate and delete pages. Pass `pageDestinations`
-/// and `sendPages` to also copy or move pages to other notes.
+/// The tool picker floats at the bottom by default and can be dragged to a corner or edge, collapsed, and
+/// given or relieved of tools (`ToolPicker`). The More menu's Scroll Direction shows pages one at a time with
+/// sideways swipes (horizontal) or all of them in one column scrolled vertically (`PageLayoutMode`); its
+/// Page item sets the page's size and template. The Pages button opens the pages panel: thumbnails to jump
+/// between, search, reorder, duplicate, rotate, copy, cut and delete pages. Pass `pageDestinations` and
+/// `sendPages` to also copy or move pages to other notes, and `navigation` for the back button and recent
+/// notes.
 ///
 /// The More menu's Zoom Window writes small, neat handwriting in a magnified panel at the bottom of the
 /// screen. It follows each page's template ruling (`WritingLines.lines(for:on:)`); pass `writingLines` to
@@ -24,21 +28,21 @@ import SwiftUI
 /// sends to back, and takes a screenshot; a selection can also be dragged out to other apps as an image.
 /// Pass `selectionActions` to add the app's own items to that menu.
 ///
-/// The Pen Case's Insert menu puts pictures on the page from Photos, the camera, Files or the pasteboard
+/// The tool picker's Insert tool puts pictures on the page from Photos, the camera, Files or the pasteboard
 /// (pictures can also be dropped onto the page), and places stickers: selections saved with the selection
 /// menu's Save as Sticker (`StickerStore.shared`). A selected picture's menu crops it (to a rectangle or
 /// freehand, and back) and sets its opacity. Pictures' bytes live in `ImageAssets.shared`; a host that
 /// stores notes registers where it keeps them there.
 ///
 /// The tape tool covers part of the page with tape that a tap reveals or hides (a study aid; saved with the
-/// note). The ruler button shows a ruler or protractor that strokes snap to, measuring them as they're drawn.
+/// note). The ruler tool shows a ruler or protractor that strokes snap to, measuring them as they're drawn.
 /// The laser pointer draws a fading trail or a dot that's never written on the page. While an external display
 /// is connected, the host can show `PresentationMirror` on it: the current page alone, with the laser.
 ///
 /// The selection menu's Add Link… puts a link over the selection (`LinkObject`): to a web address, another page
 /// of this note, or (with `links`) another note or one of its pages. A tap with a pen, pencil, highlighter, the
 /// shape tool or the laser follows it, and a Back button returns to the page it was followed from (or, through
-/// `NoteLinks.back`, to the note it came from). The page bar bookmarks pages, and the page sidebar's Outline
+/// `NoteLinks.back`, to the note it came from). The pages panel bookmarks pages, and the More menu's Outline
 /// shows the bookmarks, the note's own outline entries and any imported PDF outline (`NoteOutline`).
 public struct InkCanvasEditor: View {
     @ObservedObject private var notebook: InkNotebook
@@ -50,24 +54,30 @@ public struct InkCanvasEditor: View {
     private let sendPages: PageSender?
     private let selectionActions: [SelectionAction]
     private let links: NoteLinks?
+    private let navigation: EditorNavigation?
 
     @StateObject private var controller = CanvasController()
+    @StateObject private var toolPicker = ToolPickerState()
     @StateObject private var telemetry = PencilTelemetry()
     /// The side the next page slides in from when the canvas is swiped.
     @State private var pageTransitionEdge: Edge = .trailing
     /// True while a swiped page is sliding in. Further swipes wait: starting a second slide mid-way can
     /// leave the page stuck part-way across the screen.
     @State private var isTurningPage = false
-    @State private var showsSidebar = false
+    @State private var showsPages = false
+    @State private var showsTitleMenu = false
     @Environment(\.inkTheme) private var theme
     @Environment(\.openURL) private var openURL
 
-    /// A multi-page editor. Pass `links` for links to other notes and Back to the note a link came from.
+    /// A multi-page editor. Pass `links` for links to other notes and Back to the note a link came from, and
+    /// `navigation` for the back button, recent notes and the host's More menu items.
     public init(notebook: InkNotebook, title: Binding<String>? = nil, showsDebugHUD: Bool = false,
                 writingLines: ((CanvasDocument) -> WritingLines?)? = nil,
                 pageDestinations: [PageDestination] = [], sendPages: PageSender? = nil,
-                selectionActions: [SelectionAction] = [], links: NoteLinks? = nil) {
+                selectionActions: [SelectionAction] = [], links: NoteLinks? = nil,
+                navigation: EditorNavigation? = nil) {
         self.notebook = notebook
+        self.navigation = navigation
         self.links = links
         self.title = title
         self.showsDebugHUD = showsDebugHUD
@@ -81,8 +91,9 @@ public struct InkCanvasEditor: View {
     /// A single-page editor: the page can be resized but no pages can be added.
     public init(document: CanvasDocument, title: Binding<String>? = nil, showsDebugHUD: Bool = false,
                 writingLines: ((CanvasDocument) -> WritingLines?)? = nil,
-                selectionActions: [SelectionAction] = []) {
+                selectionActions: [SelectionAction] = [], navigation: EditorNavigation? = nil) {
         self.title = title
+        self.navigation = navigation
         self.selectionActions = selectionActions
         notebook = InkNotebook(pages: [document], defaultPageSize: document.pageSize)
         links = nil
@@ -106,52 +117,10 @@ public struct InkCanvasEditor: View {
                     .ignoresSafeArea()
             }
 
-            VStack(spacing: 0) {
-                Spacer(minLength: 0)
-                PageBar(notebook: notebook, allowsMultiplePages: showsPageControls,
-                        showsSidebar: showsPageControls ? $showsSidebar : nil)
-                    .padding(.bottom, InkSpacing.s)
-            }
-
-            if showsSidebar, showsPageControls {
-                PageSidebar(notebook: notebook, destinations: pageDestinations, sendPages: sendPages) {
-                    withAnimation(.snappy) { showsSidebar = false }
-                }
-                .padding(.leading, InkSpacing.m)
-                .padding(.top, InkSpacing.s)
-                .padding(.bottom, InkSpacing.s + InkMetrics.barHeight + InkSpacing.s) // clear of the page bar
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .transition(.move(edge: .leading).combined(with: .opacity))
-            }
-
-            if let backTitle {
-                LinkBackButton(title: backTitle, action: goBack)
-                    .padding(.top, InkSpacing.s)
-                    .padding(.trailing, InkSpacing.m)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-
-            if let format = controller.textFormat {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    TextFormatBar(controller: controller, state: format)
-                        .padding(InkSpacing.s)
-                }
-                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
-
-            if let crop = controller.imageCrop {
-                ImageCropBar(controller: controller, state: crop)
-                    .padding(InkSpacing.s)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
+            floatingChrome
 
             PresentingBadge(presentation: controller.presentation)
-                .padding(.top, InkSpacing.s)
+                .padding(.top, Self.chromeTop)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .allowsHitTesting(false)
 
@@ -190,7 +159,6 @@ public struct InkCanvasEditor: View {
             }
         }
         .background(theme.color(\.desk))
-        .toolbar { penCaseItem }
         .sheet(item: $controller.brushEditorTool) { tool in
             BrushEditorView(controller: controller, tool: tool)
                 .inkTheme(theme)
@@ -217,6 +185,86 @@ public struct InkCanvasEditor: View {
         .onDisappear {
             controller.presentation.stopPresenting(notebook.currentPage)
         }
+    }
+
+    // MARK: Floating chrome
+
+    /// The navigation row's top inset, inside the safe area.
+    private static let navigationTop: CGFloat = 8
+    /// Where chrome under the navigation row starts.
+    private static let chromeTop = navigationTop + EditorNavigationBar.height + InkSpacing.s
+
+    /// The navigation row, the tool picker, the pages panel, and bars that come and go under the row (text
+    /// formatting, image cropping).
+    private var floatingChrome: some View {
+        GeometryReader { proxy in
+            let pickerArea = CGSize(width: proxy.size.width, height: max(0, proxy.size.height - Self.chromeTop))
+            ZStack(alignment: .topLeading) {
+                ToolPicker(controller: controller, state: toolPicker, bounds: pickerArea)
+                    .offset(y: Self.chromeTop)
+
+                if showsPages, showsPageControls {
+                    PagesPanel(notebook: notebook, destinations: pageDestinations, sendPages: sendPages)
+                        .padding(.top, Self.chromeTop)
+                        .padding(.bottom, pagesPanelBottom)
+                        .padding(.trailing, pagesPanelTrailing)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+
+                if let format = controller.textFormat {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        TextFormatBar(controller: controller, state: format)
+                            .padding(InkSpacing.s)
+                    }
+                    .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, Self.chromeTop - InkSpacing.s)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                if let crop = controller.imageCrop {
+                    ImageCropBar(controller: controller, state: crop)
+                        .padding(InkSpacing.s)
+                        .padding(.top, Self.chromeTop - InkSpacing.s)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                if showsTitleMenu {
+                    // Tapping anywhere outside the title menu closes it.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .onTapGesture { withAnimation(.snappy(duration: 0.2)) { showsTitleMenu = false } }
+                }
+
+                EditorNavigationBar(controller: controller, notebook: notebook, title: title, navigation: navigation,
+                                    showsPageControls: showsPageControls, showsPages: $showsPages,
+                                    showsTitleMenu: $showsTitleMenu, linkBackTitle: backTitle, linkBack: goBack)
+                    .padding(.horizontal, 20)
+                    .padding(.top, Self.navigationTop)
+                    .zIndex(1)
+            }
+        }
+    }
+
+    /// The pages panel ends 16 pt above a tool picker docked along the bottom.
+    private var pagesPanelBottom: CGFloat {
+        switch toolPicker.dock {
+        case .bottom, .bottomLeading, .bottomTrailing:
+            ToolPickerLayout.margin + ToolPickerLayout.thickness + InkSpacing.l
+        default:
+            ToolPickerLayout.margin
+        }
+    }
+
+    /// 12 pt from the trailing edge, or clear of a tool picker docked there.
+    private var pagesPanelTrailing: CGFloat {
+        toolPicker.dock == .trailing && !toolPicker.isCollapsed
+            ? ToolPickerLayout.margin + ToolPickerLayout.thickness + InkSpacing.m
+            : InkSpacing.m
     }
 
     // MARK: Links
@@ -265,17 +313,6 @@ public struct InkCanvasEditor: View {
     /// Continuous vertical scrolling, for a notebook (a single-page editor always shows its one page).
     private var isContinuous: Bool {
         showsPageControls && controller.pageLayout == .continuous
-    }
-
-    /// The Pen Case centered on the navigation bar's row. Drawn flat, without the bar's shared glass background.
-    @ToolbarContentBuilder
-    private var penCaseItem: some ToolbarContent {
-        if #available(iOS 26, *) {
-            ToolbarItem(placement: .principal) { PenCase(controller: controller, title: title) }
-                .sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .principal) { PenCase(controller: controller, title: title) }
-        }
     }
 
     /// Swiping left shows the next page and swiping right the previous one, sliding the new page in

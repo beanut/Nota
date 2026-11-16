@@ -1,12 +1,10 @@
 import SwiftUI
 
-/// Floating bar under the page: previous / next, the page number, bookmarking the page, adding pages, the page
-/// size and template.
+/// The current page's controls, in the More menu's Page popover: previous / next, the page number,
+/// bookmarking the page, adding pages, the page size and template.
 struct PageBar: View {
     @ObservedObject var notebook: InkNotebook
     let allowsMultiplePages: Bool
-    /// Shows and hides the page sidebar; nil for no sidebar button.
-    var showsSidebar: Binding<Bool>?
 
     @State private var customSizeTarget: CustomSizeTarget?
     @State private var confirmDelete = false
@@ -14,16 +12,6 @@ struct PageBar: View {
 
     var body: some View {
         HStack(spacing: InkSpacing.xxxs) {
-            if let showsSidebar {
-                Button {
-                    withAnimation(.snappy) { showsSidebar.wrappedValue.toggle() }
-                } label: {
-                    InkIconView(.pages)
-                }
-                .buttonStyle(.inkIcon(selected: showsSidebar.wrappedValue))
-                .accessibilityLabel(showsSidebar.wrappedValue ? "Hide Pages" : "Show Pages")
-                InkBarDivider()
-            }
             if allowsMultiplePages {
                 Button { notebook.goToPreviousPage() } label: { InkIconView(.previousPage) }
                     .buttonStyle(.inkIcon)
@@ -46,7 +34,6 @@ struct PageBar: View {
         .padding(.leading, InkSpacing.xxs)
         .padding(.trailing, InkSpacing.xs)
         .padding(.vertical, InkSpacing.xxs)
-        .inkFloatingBar(fill: \.surfaceRaised)
         .sheet(item: $customSizeTarget) { target in
             CustomPageSizeSheet(initial: target.initial) { size in apply(size, to: target.kind) }
         }

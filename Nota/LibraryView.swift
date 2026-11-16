@@ -72,10 +72,10 @@ struct LibraryView: View {
                         NotesBrowser(section: selection.wrappedValue ?? .all, path: path)
                             .navigationDestination(for: Note.self) { note in
                                 // A fresh editor per note: a link replaces the note in place.
-                                NoteEditorView(note: note, workspace: $workspace, trail: $linkTrail) { other in
-                                    workspace.replace(note.id, with: other)
-                                }
-                                .id(note.id)
+                                NoteEditorView(note: note, workspace: $workspace, trail: $linkTrail, leading: .back,
+                                               leadingAction: { workspace.close(note.id) },
+                                               openNote: { other in workspace.replace(note.id, with: other) })
+                                    .id(note.id)
                             }
                     }
                 }

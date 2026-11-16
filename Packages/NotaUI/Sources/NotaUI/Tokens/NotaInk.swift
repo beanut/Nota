@@ -55,6 +55,24 @@ public extension NotaInk {
     /// The colour presets in the Pen Case for the pen and pencil.
     static let penPresets: [NotaInk] = [.black, .blue, .teal, .orange, .violet]
 
+    // MARK: Tool picker inks (`ink/system-*`, Floating Tool Picker)
+
+    // The colour & thickness popover's eight system colours, fixed at their light-mode sRGB values so ink
+    // looks the same in dark mode.
+    static let systemBlack = NotaInk(name: "ink/black", hex: 0x000000)
+    static let systemGray = NotaInk(name: "ink/gray", hex: 0x8E8E93)
+    static let systemRed = NotaInk(name: "ink/red", hex: 0xFF3B30)
+    static let systemOrange = NotaInk(name: "ink/orange", hex: 0xFF9500)
+    static let systemYellow = NotaInk(name: "ink/yellow", hex: 0xFFCC00)
+    static let systemGreen = NotaInk(name: "ink/green", hex: 0x34C759)
+    static let systemBlue = NotaInk(name: "ink/blue", hex: 0x007AFF)
+    static let systemPurple = NotaInk(name: "ink/purple", hex: 0xAF52DE)
+
+    /// The pen and pencil colours in the tool picker's colour & thickness popover, in its order.
+    static let pickerPresets: [NotaInk] = [
+        .systemBlack, .systemGray, .systemRed, .systemOrange, .systemYellow, .systemGreen, .systemBlue, .systemPurple
+    ]
+
     // MARK: Highlighters (`highlight/*`, Nota addition)
 
     // Drawn at 38% opacity with multiply blending, so they need to be light and saturated: the pen inks

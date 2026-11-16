@@ -100,7 +100,7 @@ public extension LibrarySection {
 // MARK: - Finding notes
 
 public extension Library {
-    /// The notes pages can be copied or moved to from `note`'s page sidebar: every other note not in
+    /// The notes pages can be copied or moved to from `note`'s pages panel: every other note not in
     /// Recently Deleted, most recently modified first, at most `limit` of them.
     static func notesToSendPagesTo(_ notes: [Note], from note: UUID, limit: Int = 20) -> [Note] {
         notesToOpenBeside(notes, excluding: [note], limit: limit)
@@ -115,6 +115,20 @@ public extension Library {
             .sorted { $0.modifiedAt > $1.modifiedAt }
             .prefix(limit)
             .map(\.self)
+    }
+
+    /// The notes the editor's title menu lists: the `limit` most recently edited notes not in Recently
+    /// Deleted, newest first. The open note is among them, so the menu can check it.
+    static func recentNotes(_ notes: [Note], limit: Int = 5) -> [Note] {
+        notesToOpenBeside(notes, excluding: [], limit: limit)
+    }
+
+    /// A recent note's subtitle in the title menu: its folder ("Unfiled" outside one) and when it was last
+    /// edited, as the library labels dates ("Linear Algebra · Today").
+    static func recentNoteSubtitle(_ note: Note, now: Date = .now, calendar: Calendar = .current,
+                                   locale: Locale = .current) -> String {
+        let folder = note.folder?.name ?? String(localized: "Unfiled")
+        return "\(folder) · \(note.modifiedAt.libraryLabel(relativeTo: now, calendar: calendar, locale: locale))"
     }
 }
 

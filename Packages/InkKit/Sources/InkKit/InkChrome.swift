@@ -42,8 +42,6 @@ enum InkMetrics {
     static let paperRadius: CGFloat = 4
     /// Panels floating over the canvas, such as the page sidebar.
     static let panelRadius: CGFloat = 16
-    /// The page sidebar: room for a portrait thumbnail about 150 pt wide.
-    static let pageSidebarWidth: CGFloat = 184
     /// A sticker's tile in the sticker picker, and the picker's tallest scrolling grid.
     static let stickerTile: CGFloat = 96
     static let stickerGridHeight: CGFloat = 360
@@ -73,7 +71,8 @@ struct InkIconView: View {
     var body: some View {
         theme.icon(icon)
             .resizable()
-            .renderingMode(.template)
+            // The AI glyph keeps its own colours (violet sparkles: AI acting for you).
+            .renderingMode(icon == .ai ? .original : .template)
             .scaledToFit()
             .frame(width: size, height: size)
             .accessibilityHidden(true)
@@ -274,5 +273,45 @@ extension View {
     /// Popover content: raised background and padding.
     func inkPopoverContent() -> some View {
         modifier(PopoverContent())
+    }
+}
+
+// MARK: - Floating material
+
+/// Figma **ToolPicker/Background**: the material of the tool picker, the navigation capsules and the pages
+/// panel. Liquid Glass on iOS 26 and later; before that a blur under `blurTint` with a hairline border and
+/// a soft shadow.
+private struct FloatingMaterial<S: InsettableShape>: ViewModifier {
+    let shape: S
+    @Environment(\.inkTheme) private var theme
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            content
+                .glassEffect(.regular.tint(theme.color(\.glassTint)), in: shape)
+        } else {
+            content
+                .background {
+                    ZStack {
+                        shape.fill(.ultraThinMaterial)
+                        shape.fill(theme.color(\.blurTint))
+                    }
+                    .compositingGroup()
+                    .shadow(color: theme.color(\.shadow).opacity(0.14), radius: 10, y: 6)
+                }
+                .overlay(shape.strokeBorder(theme.color(\.blurBorder), lineWidth: 0.5))
+        }
+    }
+}
+
+extension View {
+    /// Floating chrome's material, in `shape`.
+    func inkFloatingMaterial(in shape: some InsettableShape) -> some View {
+        modifier(FloatingMaterial(shape: shape))
+    }
+
+    /// Floating chrome's material in a capsule.
+    func inkFloatingMaterial() -> some View {
+        modifier(FloatingMaterial(shape: Capsule()))
     }
 }

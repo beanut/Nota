@@ -27,6 +27,11 @@ public enum NotaIcon: String, CaseIterable, Identifiable, Sendable {
     case pens, eyedropper
     /// Links on the page and bookmarked pages (NOT-31).
     case link, bookmark
+    /// The editor's Pages button (the pages panel).
+    case pages
+    /// The editor's AI button: a magic wand with violet sparkles, drawn in its own colours rather than
+    /// template-rendered.
+    case wand
 
     // MARK: Audio and AI
 

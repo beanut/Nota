@@ -16,19 +16,21 @@ InkCanvasEditor(notebook: notebook, title: $title)
 
 ## Theming
 
-The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper and desk, and the Pen Case's ink presets come from an `InkTheme` in the environment. `InkTheme.standard` uses system colours and SF Symbols on white paper; Nota passes `InkTheme.nota`, built from NotaUI tokens. The controls themselves (icon button, swatch, divider, slider row, floating bar) are in `InkChrome.swift` and match NotaUI's sizes.
+The editor's chrome (navigation row, tool picker, pages panel, tool options, quick palette), the paper and desk, the ink presets, the floating material's tints and the tool picker's artwork (`toolArt`) come from an `InkTheme` in the environment. `InkTheme.standard` uses system colours and SF Symbols on white paper; Nota passes `InkTheme.nota`, built from NotaUI tokens. The controls themselves (icon button, swatch, divider, slider row, floating bar, the floating material: Liquid Glass on iOS 26 and later, a tinted blur before) are in `InkChrome.swift` and match NotaUI's sizes.
 
 ## Source files
 
 | File | Responsibility |
 | --- | --- |
-| `InkCanvasEditor.swift` | The public editor: canvas, Pen Case, page bar, HUD and quick palette, with page swiping |
-| `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes; several pages at once (move, duplicate, remove, rotate, append) for the page sidebar; adding a page when writing reaches the end |
+| `InkCanvasEditor.swift` | The public editor: canvas, navigation row, tool picker, pages panel, HUD and quick palette, with page swiping |
+| `EditorNavigationBar.swift` | The navigation row: Back / Close, the title capsule and its menu (Rename, recent notes; `EditorNavigation`, `RecentNote`), the trailing actions and the More menu |
+| `ToolPicker.swift` / `ToolPickerModel.swift` | The floating tool picker: `PickerTool`, the bar's contents (`ToolPickerItems`), docking and its arithmetic (`ToolPickerLayout`), the collapsed circle, the Plus and colour & thickness popovers |
+| `InkNotebook.swift` | Ordered pages (`CanvasDocument`s) with add / insert / remove / move, navigation and page sizes; several pages at once (move, duplicate, remove, rotate, append) for the pages panel; adding a page when writing reaches the end |
 | `ContinuousPageLayout.swift` | `PageLayoutMode` (paged or continuous, saved in `UserDefaults`) and the continuous column: page frames, the pages in view, the current page |
 | `ContinuousCanvasView.swift` | Continuous vertical scrolling: a scroll view over the column, with a pooled embedded canvas for each page in or near view (prefetched ahead of the scroll), and strokes carried across page boundaries |
 | `PageSeam.swift` | Writing across a page boundary: how far past its page each page takes part in a stroke (its reach, from the brush's taper and nib), and which pieces are kept |
 | `CanvasView+Embedded.swift` | A canvas as one page among several: placed by the host, transparent around its page, taking touches only on it |
-| `PageSidebar.swift` | The page sidebar: thumbnails (rendered in the background, cached), jump, reorder, select, duplicate, rotate, delete, copy or move to another note (`PageDestination`, `PageSender`) |
+| `PagesPanel.swift` | The pages panel: two-column thumbnails (rendered in the background, cached), search, jump, reorder, select, rotate, duplicate, copy / cut / paste (`PageClipboard`), delete with Undo, copy or move to another note (`PageDestination`, `PageSender`) |
 | `LassoOverlayView.swift` | Draws the lasso path and the selection outline over the canvas |
 | `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects, each command optionally in a gesture's group (`editGroup`, for strokes across pages) (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave. Keeps the page's `StrokeIndex` in step with every change to its strokes and objects, and its `inkVersion` and `inkChanges` (where each change of the ink went, mid-gesture ones too) |
 | `InkChanges.swift` | `InkChangeLog`: the rect each recent change of a page's ink version touched (the reach of the strokes it added, removed or changed), so tiles are refilled only there (NOT-104) |
@@ -42,7 +44,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `VectorTileLayer.swift` | The canvas's template, object and tape layers (NOT-109): page-space vectors drawn into tiles through the same `TileCache` and `RenderScheduler` as the ink, at the same levels and settle rule; `VectorTileContent` (what's drawn, its version, and `VectorChangeLog`, which rect each version changed) |
 | `PageLayerContent.swift` | What those layers draw: `TemplatePaper` (a page's template and paper, one tile name per paper so pages on the same template share tiles), `ObjectTileHistory` (kept by the page: its objects' version and change rects) and `ObjectDiff` (an object's reach and what changed between two lists) |
 | `FloatingObjectsLayer.swift` | Objects lifted off their tiles while they move or are drawn (a selection dragged, a shape or tape being drawn): one image, moved with the drag, drawn again only when stretched too far |
-| `TemplateMenu.swift` | The page bar's template pill: built-ins, paper colour, PDF or image, use for all pages |
+| `TemplateMenu.swift` | The Page popover's template pill: built-ins, paper colour, PDF or image, use for all pages |
 | `ViewTransform.swift` | Canvas → view mapping, zoom limits and page-swipe detection |
 | `CanvasView.swift` | The canvas `UIView`: its layers, the gesture recognizers, `UIPencilInteraction`, hover, the HUD and the lasso overlay. Composes input, viewport and the render coordinator below; redraws from the document when another canvas on the same page changes it |
 | `CanvasView+Input.swift` / `CanvasInput.swift` | Input: touch phases, coalesced and predicted samples, estimated-property updates (`EstimateTracker`), palm rejection and finger ink, feeding `LiveStroke`; a finished stroke goes to the render coordinator |
@@ -75,7 +77,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `PenTray.swift` | `PenTray` and its parts (`SavedPen`, `ToolPresets`, `ColorPalette`, `PenKind`): saved pens, quick sizes and colours, custom brushes, palettes and recent colours, with lenient JSON |
 | `PenTrayStore.swift` | `PenTrayStore`, which keeps the tray and saves it on every change (`.shared` in Application Support) |
 | `PenTrayView.swift` | The pen tray popover |
-| `ColorPickerView.swift` | The colour picker popover (spectrum, hue, hex, eyedropper, recent colours, palettes) and the Pen Case's colour well |
+| `ColorPickerView.swift` | The colour picker popover (spectrum, hue, hex, eyedropper, recent colours, palettes) and the tool picker's colour well |
 | `EyedropperOverlay.swift` / `CanvasView+Eyedropper.swift` | The eyedropper's overlay, loupe and banner, and sampling one device pixel of the canvas as drawn |
 | `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, geometry for many strokes built on every core, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
@@ -94,7 +96,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `ImageObject.swift` | `ImageObject`: a picture with a non-destructive rectangular or freehand crop and opacity, its drawing and hit-testing, lenient JSON; the pictures a page uses |
 | `ImageCropView.swift` | Cropping a picture on the canvas (rectangle grips or a freehand outline) and its geometry (`ImageCropGeometry`) |
 | `CanvasView+Images.swift` | Inserting pictures (Photos, camera, Files, paste, drop), their selection-menu items (Crop, Opacity, Save as Sticker), cropping, placing stickers |
-| `InsertMenu.swift` | The Pen Case's Insert menu, the camera, the sticker picker and the crop bar |
+| `InsertMenu.swift` | The Insert tool, the camera, the sticker picker and the crop bar |
 | `StickerStore.swift` | `Sticker` and `StickerStore`: the app-wide sticker collection (`.shared` in Application Support) |
 | `CanvasView+Scribble.swift` | Circle-to-select |
 | `CanvasView+Shapes.swift` | The shape tool, draw-and-hold to snap (and sizing the snapped shape before lifting), dragging a selected shape's handles, restyling selected shapes |
@@ -109,18 +111,18 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `TapeObject.swift` / `CanvasView+Tape.swift` | `TapeObject` (a strip drawn over the ink, revealed or hidden, plain / striped / grid, lenient JSON), revealing and hiding tape on a page; the tape tool and tap-to-toggle on the canvas |
 | `LinkObject.swift` / `CanvasView+Links.swift` | `LinkTarget` (a web address, a page of this note, another note or one of its pages) and `LinkObject` (a link over a selection, kept as read when its target is from a newer app); following a link with a tap and the selection menu's Add / Edit / Open / Remove Link |
 | `LinkSheet.swift` | `NoteLinks` and `LinkBack` (what the host says about other notes, and Back to the note a link came from), the link sheet and the floating Back button |
-| `NoteOutline.swift` / `OutlinePanel.swift` | `NoteOutline` (bookmarks and outline entries, the user's and those from a PDF's outline), the notebook's bookmark and outline edits, `LinkHistory` for Back; the page sidebar's Outline tab |
+| `NoteOutline.swift` / `OutlinePanel.swift` | `NoteOutline` (bookmarks and outline entries, the user's and those from a PDF's outline), the notebook's bookmark and outline edits, `LinkHistory` for Back; the outline (More › Outline…) |
 | `CanvasView+Tools.swift` | Routes the touches of the tools that draw no ink (text, tape, laser) to each tool |
 | `Ruler.swift` | `Ruler` (the on-screen ruler or protractor: body, edges, angle), `RulerGuide` (an edge carried into page space, and projecting points onto it), `RulerMeasurement` (length in cm, angle swept) |
 | `RulerView.swift` / `CanvasView+Ruler.swift` | Showing, moving and turning the ruler, handing Pencil touches on it to the canvas, the readout; snapping strokes to it in the input path |
 | `LaserTrail.swift` / `LaserView.swift` / `CanvasView+Laser.swift` | The laser pointer: its fading trail or dot (a value), the overlay view that draws it, and the laser tool on the canvas |
 | `InkPresentation.swift` | Presentation mode: `InkPresentation` (the page presented and its laser), `PresentationMirror` / `PageMirrorView` (the external display's chrome-free, fitted page) and `PageMirrorLayout` |
-| `PresentingTools.swift` | The tape and laser tool options, the Pen Case's ruler button and the presenting badge |
+| `PresentingTools.swift` | The tape and laser tool options and the presenting badge |
 | `Stroke.swift` | `Stroke`, `StrokePoint`, tool enums, `RGBA` |
 | `InkFile.swift` | `InkPageFile`, the `.ink` page format: encoder, decoder and `InkFileError` |
 | `CanvasController.swift` | `ObservableObject` tool state shared by SwiftUI and UIKit: each tool's brush, colour and width, quick sizes and colours, saved pens, the brush editor and the eyedropper |
-| `ToolbarView.swift` | Pen Case, tool options, pressure & tilt settings, the Pencil quick palette |
-| `PageBar.swift` | Page bar (page size and template pills) and the custom page size sheet |
+| `ToolbarView.swift` | Tool options, pressure & tilt settings, the Pencil quick palette |
+| `PageBar.swift` | The Page popover (page navigation, bookmark, add, page size and template pills) and the custom page size sheet |
 | `InkTheme.swift` / `InkChrome.swift` | The theme and the controls built from it |
 | `PencilHUD.swift` | Debug HUD, throttled telemetry, sample-rate counter |
 
@@ -428,7 +430,7 @@ pictures), Save as Sticker, Take Screenshot; then the app's `SelectionAction`s. 
   view if that place is off screen. Duplicate copies a step down and right without touching the pasteboard.
 - **Style.** Recolouring keeps each stroke's opacity (a highlighter stays see-through) and recolours objects
   through `PageObject.recolored(_:)` (kinds without a colour keep theirs). Thickness scales each brush's widths
-  and tapers (`BrushDescriptor.scaled(by:)`), as resizing does. With the lasso and a selection, the Pen Case's
+  and tapers (`BrushDescriptor.scaled(by:)`), as resizing does. With the lasso and a selection, the tool picker's
   quick colours recolour it too.
 - **Order.** Ink is always over objects, so Bring to Front moves strokes to the end of the ink and objects to
   the top of the objects (renumbering `zIndex`), each keeping its own order.
@@ -473,7 +475,7 @@ default). Its fields are `shape`, `points` (`[[x, y], …]`), `strokeColor`, `li
 and `fillOpacity`; reading is lenient (an unknown `shape`, or points that don't fit it, read as a rectangle
 in the same frame; a bad colour or width takes the default).
 
-- **Making them.** The shape tool (Pen Case) turns every stroke into a shape when the Pencil lifts, in its own
+- **Making them.** The shape tool (tool picker) turns every stroke into a shape when the Pencil lifts, in its own
   colour, width, line style and fill; a stroke that isn't a recognisable shape becomes a smooth curve through
   it. With the pen or pencil, **draw and hold** the Pencil still at the end of a stroke (about 0.45 s, the
   same hold as circle-to-select, which wins over ink it encircles): if the stroke is a shape it snaps to one
@@ -514,7 +516,7 @@ default, so text is never lost.
 - **Making and editing.** With the text tool, tap the page for a box `TextObject.defaultWidth` (320 pt) wide
   with the caret at the tap, or drag to set its width; tap a box to edit it with the caret where you tapped,
   or tap one of its checkboxes to tick it without opening it. New text takes the tool's typeface and size
-  (Tool Options) and the Pen Case colour. While a box is edited (`TextBoxEditor`) a `UITextView` set up exactly
+  (Tool Options) and the current colour. While a box is edited (`TextBoxEditor`) a `UITextView` set up exactly
   like `TextLayout` sits over it at its scale and rotation, rendering sharply at the current zoom, and the
   box is hidden from the object layer, so nothing moves when editing starts or ends. Keyboard and Scribble
   both write into it; Bold / Italic / Underline (⌘B / ⌘I / ⌘U) work too, and pasted text takes the box's
@@ -549,7 +551,7 @@ oriented `pixelSize`; its own fields are also `crop` (unit image space, absent f
   and cached (`NSCache`, 192 MB). The canvas never waits for a decode (`ImageDrawing.defersDecoding`): it
   draws the nearest size already decoded, or a faint stand-in, and redraws when the right size arrives.
   Thumbnails, copies and screenshots wait for it; PDFs embed pictures at 3 px per point.
-- **Inserting.** The Pen Case's Insert menu (photo icon): Photos (`PhotosPicker`, up to 10, original bytes so
+- **Inserting.** The Insert tool (photo icon): Photos (`PhotosPicker`, up to 10, original bytes so
   HEIC stays HEIC), Take Photo (`UIImagePickerController`; disabled without a camera, as in the simulator),
   Files (`fileImporter`), Paste Image, and Stickers. Pictures also paste with ⌘V or the selection menu's Paste
   when the pasteboard holds no lasso clip, and drop onto the page (`UIDropInteraction`; drags from inside the
@@ -582,7 +584,7 @@ oriented `pixelSize`; its own fields are also `crop` (unit image space, absent f
   (`splitByInkLayer`) between `objectLayer` (under the ink) and `tapeLayer` (over it). Hidden tape is opaque, so
   it hides ink, text and pictures alike; revealed, it's a 16% tint with a dashed edge.
 - **The tool.** A drag draws a strip from the touch-down point to the touch, snapping to 0°, 45° and 90° like a
-  line, `width` page points wide (the tool's width, 8–60), in the Pen Case's tape colour and the options'
+  line, `width` page points wide (the tool's width, 8–60), in the tape colour and the options'
   pattern. A tape tool drag shorter than 8 view points is a tap.
 - **Toggling.** A tap on tape with any tool but the lasso (which selects it) and the eraser reveals or hides it
   (`CanvasDocument.toggleTape(id:)`): a pen or highlighter tap (a stroke under 8 view points and 0.5 s) is turned
@@ -614,8 +616,8 @@ read is kept as read and written back; such a link does nothing.
 #### Bookmarks and outline
 
 `InkNotebook.outline` (`NoteOutline`) holds bookmarked page ids and outline entries (title, page id, `level`, and
-`source`: the user's own or `.pdf`). The page bar's bookmark button and a page's context menu in the sidebar
-bookmark the page; bookmarked thumbnails show a bookmark. The sidebar's Outline tab lists the bookmarks in page
+`source`: the user's own or `.pdf`). A page's menu in the pages panel and the Page popover's bookmark button
+bookmark the page; bookmarked thumbnails show a bookmark. More › Outline… lists the bookmarks in page
 order, the user's entries (Add This Page, Rename…, Delete, drag to reorder) and the entries from a PDF, indented
 by level. `NoteOutline.entries(fromOutlineOf:pageIDs:)` turns a `PDFDocument`'s outline into entries for the
 pages showing its pages, and `InkNotebook.importPDFOutline` replaces the PDF entries with them. Entries and
@@ -624,7 +626,7 @@ host saves. The host stores the outline (Nota keeps it in the note's manifest).
 
 ### Ruler
 
-The Pen Case's ruler button shows `RulerView` over the canvas (over the continuous view in vertical scrolling,
+The tool picker's ruler shows `RulerView` over the canvas (over the continuous view in vertical scrolling,
 over the page's canvas in paged mode). The ruler (`Ruler`) lives in that view's space, not the page's: it stays
 put as the page pans and zooms, and isn't saved (the controller keeps its place while the editor is open).
 
@@ -935,7 +937,7 @@ More › Scroll Direction › Vertical (`PageLayoutMode.continuous`, the default
   when the zoom changes (at the new level, once the pinch ends), and, zoomed in, for the tiles a re-centred
   window uncovers. During a pinch the window keeps its size and the last level is scaled. The host places each
   page with `place(_:settled:)`, and an embedded canvas that's resized keeps that placement.
-- **Paged and continuous share the page bar and sidebar:** choosing a page scrolls to it, and reordering keeps the page being read where it was on screen. Writing in the bottom 15% of the last page adds a page like it.
+- **Paged and continuous share the pages panel:** choosing a page scrolls to it, and reordering keeps the page being read where it was on screen. Writing in the bottom 15% of the last page adds a page like it.
 - **Writing across pages** (`PageSeam`). Ink and the eraser (every mode) carry on from one page onto the next without lifting the Pencil. The touch keeps arriving at the page the stroke began on, which hands each event to `ContinuousCanvasView`; every page with a canvas takes part while the Pencil is within its *reach* above or below it, and runs a piece of the stroke of its own, in its own coordinates, through the same `LiveStroke` path as any stroke (`joinStroke`, `continueStroke`, `leaveStroke`). The reach is the brush's longest taper plus twice its nib radius plus 12 points (at most 160), so neighbouring pages' pieces overlap across the gap: the piece above runs on past its bottom edge and the piece below starts above its top. Each page clips its ink to the page, so what shows is the same ink from the same samples up to the edge, and the pieces' ends, tapers and the stabiliser settling in all fall off the page. Each piece is committed as an ordinary stroke of its page, so saving needs nothing new. A piece whose ink never reached its page is dropped; a joined piece is never a tap or a shape (the shape tool, the lasso and the gesture tools stay on their page, and holding still doesn't snap a stroke on two pages). The pages' pieces share one `CanvasDocument.editGroup`, and undo or redo on any of them takes back the others' (`InkNotebook.undoGroup(_:)`), unless a page was edited since. Refined force and tilt are forwarded to the pages that joined. While a stroke is under way, the pages taking part keep their canvases and stay put, the scroll view doesn't pan or zoom, and writing past the end of the last page adds the next page at once, so the stroke carries on onto it. The cost per event is a location check for each page with a canvas (at most six).
 - **Not yet:** the lasso works on one page at a time, so a selection can't span two pages or be dragged onto another; and the zoom window is offered only in paged mode.
 
