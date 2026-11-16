@@ -15,7 +15,7 @@ extension CanvasView {
             : (transform: displayedTransform, size: displayedSize)
         if Self.inkFallsShort(shownAt: shown.transform, size: shown.size, viewTransform: viewTransform,
                               page: document.pageBounds, in: bounds) {
-            requestFullRender()
+            requestFullRender(inkChanged: false)
         }
     }
 

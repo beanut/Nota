@@ -7,7 +7,8 @@ import UIKit
 ///  1. `pageLayer` and `templateView` – the paper and its template (the background).
 ///  2. `objectLayer` – the page's objects (see `PageObject`), drawn as vectors at the current transform.
 ///  3. `committedLayer` – cached bitmap of finished strokes rasterized asynchronously on `renderQueue`
-///     via coalesced, non-blocking full re-renders and incremental commits.
+///     via coalesced, non-blocking full re-renders and incremental commits, shown as tiles laid out on
+///     the page (`CommittedInkTiles`).
 ///  4. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
 ///  5. `tapeLayer` – the page's tape, which covers the ink (`TapeObject`), then the laser (`LaserView`).
@@ -84,6 +85,12 @@ final class CanvasView: UIView {
     private let inkClipView = UIView()
     private var fittedBoundsSize = CGSize.zero
     private let committedLayer = CALayer()
+    private lazy var inkTiles = CommittedInkTiles(host: committedLayer)
+    /// Where the page's origin (in whole pixels) is in the image shown, in points: the tiles' origin.
+    private var displayedAnchor = CGPoint.zero
+    /// The ink changed since the last render began (not just where it's shown), so the next render
+    /// replaces every tile rather than only those it newly reaches.
+    private var inkChangedSinceRender = true
     let liveView = LiveInkView()
     private let renderQueue = DispatchQueue(label: "InkCanvas.render", qos: .userInteractive)
     private var generation: UInt64 = 0
@@ -239,8 +246,8 @@ final class CanvasView: UIView {
     private(set) var inputTransform = ViewTransform()
     private(set) var inputInZoomPanel = false
 
-    private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
-    private lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+    private(set) lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+    private(set) lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
 
     init(frame: CGRect, document: CanvasDocument, embedded: Bool = false) {
         self.document = document
@@ -427,7 +434,12 @@ final class CanvasView: UIView {
         return g
     }
 
-    func requestFullRender() {
+    /// Renders the ink again. `inkChanged: false` when only where the page is shown changed (a pan, a
+    /// zoom, the canvas moving along a page): tiles already shown whole on the same pixel grid are kept.
+    func requestFullRender(inkChanged: Bool = true) {
+        if inkChanged {
+            inkChangedSinceRender = true
+        }
         // No bitmap for this size yet (a new view, or one just resized): making one (`layoutSubviews`)
         // renders, and rendering now would only fill the old one.
         guard bitmapPixelSize != .zero, bitmapPixelSize == Self.pixelSize(of: bounds.size, scale: bitmapScale) else {
@@ -451,6 +463,10 @@ final class CanvasView: UIView {
         let currentBounds = bounds
         bitmapSize = currentBounds.size
         let targetTransform = bitmapTransform
+        let inkChanged = inkChangedSinceRender
+        inkChangedSinceRender = false
+        let placement = CommittedInkTiles.Placement(transform: targetTransform, pixelScale: bitmapScale)
+        let kept = inkChanged ? [] : inkTiles.keptKeys(for: placement)
 
         let unsubmittedIDs = Set(pending.filter { !$0.submitted }.map(\.live.stroke.id))
         let renderedRevision = unsubmittedIDs.isEmpty && eraseSession == nil && lassoSession == nil
@@ -464,18 +480,21 @@ final class CanvasView: UIView {
             guard let self else { return }
             var computedGeometries: [(UUID, StrokeGeometry)] = []
             var image: CGImage?
+            var tiles: CommittedInkTiles.Update?
             if let ctx = bitmap {
                 computedGeometries = CommittedRenderer.render(itemsToRender, into: ctx, bounds: currentBounds,
                                                               transform: targetTransform)
                 image = ctx.makeImage()
+                tiles = CommittedInkTiles.Update(placement: placement,
+                                                 cuts: CommittedInkTiles.cut(ctx, placement: placement, skipping: kept),
+                                                 pixelRect: CommittedInkTiles.pixelRect(of: ctx, placement: placement),
+                                                 keepsOthers: !kept.isEmpty)
             }
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if generation == currentGeneration {
-                    if let image {
-                        publish(image: image, transform: targetTransform)
-                    }
+                if generation == currentGeneration, let image, let tiles,
+                   publish(image: image, transform: targetTransform, tiles: tiles) {
                     for (id, geom) in computedGeometries {
                         if geometryCache[id] == nil, !modifiedSinceSnapshot.contains(id) {
                             geometryCache[id] = geom
@@ -488,9 +507,10 @@ final class CanvasView: UIView {
                         invalidateLive(canvasRect: item.bounds)
                     }
                     liveView.invalidateAll()
-                    if let image {
-                        noteRendered(image, revision: renderedRevision, transform: targetTransform)
-                    }
+                    noteRendered(image, revision: renderedRevision, transform: targetTransform)
+                } else if inkChanged {
+                    // Not shown: the next render replaces every tile, as this one would have.
+                    inkChangedSinceRender = true
                 }
                 fullRenderInFlight = false
                 if fullRenderRequested {
@@ -502,34 +522,43 @@ final class CanvasView: UIView {
     }
 
     func updateCommittedLayerTransform() {
-        let t: CGAffineTransform
-        if displayedTransform == viewTransform {
-            t = .identity
-        } else {
+        var t = CGAffineTransform.identity
+        if displayedTransform != viewTransform {
             let k = viewTransform.scale / displayedTransform.scale
             t = CGAffineTransform(a: k, b: 0, c: 0, d: k,
                                   tx: viewTransform.offset.x - displayedTransform.offset.x * k,
                                   ty: viewTransform.offset.y - displayedTransform.offset.y * k)
         }
+        // The tiles are laid out from the page's origin; the image shown starts `displayedAnchor` before it.
+        t = CGAffineTransform(translationX: displayedAnchor.x, y: displayedAnchor.y).concatenating(t)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         committedLayer.setAffineTransform(t)
         CATransaction.commit()
     }
 
-    private func publish(image: CGImage, transform: ViewTransform) {
+    /// Shows `image`, a render at `transform`, through the tiles `tiles` cut from it. Returns false if they
+    /// can't be shown: only some were cut, and what's shown is on another pixel grid (a render the main
+    /// thread no longer expected landed in between). The ink is then rendered again.
+    @discardableResult
+    private func publish(image: CGImage, transform: ViewTransform, tiles: CommittedInkTiles.Update) -> Bool {
+        guard !tiles.keepsOthers || inkTiles.canPatch(with: tiles.placement) else {
+            requestFullRender()
+            return false
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        committedLayer.contents = image
+        inkTiles.show(tiles)
         // An image from before a resize is a different size from the view; it's shown at its own.
-        let scale = max(committedLayer.contentsScale, 1)
+        let scale = max(tiles.placement.grid.pixelScale, 1)
         displayedSize = CGSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)
-        committedLayer.bounds = CGRect(origin: .zero, size: displayedSize)
+        displayedAnchor = tiles.placement.anchorPoint
         displayedTransform = transform
         updateCommittedLayerTransform()
         CATransaction.commit()
         liveView.underlay = image
         scheduleZoomRender()
+        return true
     }
 
     // MARK: - Page raster
@@ -557,19 +586,24 @@ final class CanvasView: UIView {
         let transform = viewTransform
         bitmapTransform = transform
         bitmapRevision = raster.revision
+        let placement = CommittedInkTiles.Placement(transform: transform, pixelScale: bitmapScale)
         renderQueue.async { [weak self] in
             guard let self, let ctx = bitmap else { return }
             let image = raster.restore(into: ctx) ? ctx.makeImage() : nil
+            let tiles = image == nil ? nil : CommittedInkTiles.Update(
+                placement: placement, cuts: CommittedInkTiles.cut(ctx, placement: placement),
+                pixelRect: CommittedInkTiles.pixelRect(of: ctx, placement: placement), keepsOthers: false
+            )
             DispatchQueue.main.async { [weak self] in
                 guard let self, generation == currentGeneration else { return }
-                guard let image else {
+                guard let image, let tiles else {
                     // Undecodable: draw the page the slow way after all.
                     document.committedRaster = nil
                     bitmapRevision = nil
                     requestFullRender()
                     return
                 }
-                publish(image: image, transform: transform)
+                publish(image: image, transform: transform, tiles: tiles)
                 liveView.invalidateAll()
                 noteRendered(image, revision: raster.revision, transform: transform)
                 warmGeometry()
@@ -650,6 +684,8 @@ final class CanvasView: UIView {
         let brush = item.live.stroke.brush
         let color = item.live.stroke.color
         let targetTransform = bitmapTransform
+        let placement = CommittedInkTiles.Placement(transform: targetTransform, pixelScale: bitmapScale)
+        let pixelScale = bitmapScale
         let currentGeneration = generation
         let isNext = bitmapRevision != nil && bitmapRevision == item.revisionBefore && item.revisionAfter >= 0
         bitmapRevision = isNext ? item.revisionAfter : nil
@@ -666,13 +702,25 @@ final class CanvasView: UIView {
                                 brush: brush, color: color, in: ctx)
             ctx.restoreGState()
             let image = ctx.makeImage()
+            // Only the tiles under the stroke changed.
+            let dirty = targetTransform.toView(bounds.insetBy(dx: -2, dy: -2))
+            let tiles = CommittedInkTiles.Update(
+                placement: placement,
+                cuts: CommittedInkTiles.cut(ctx, placement: placement, within: CGRect(
+                    x: dirty.minX * pixelScale, y: dirty.minY * pixelScale,
+                    width: dirty.width * pixelScale, height: dirty.height * pixelScale
+                )),
+                pixelRect: CommittedInkTiles.pixelRect(of: ctx, placement: placement), keepsOthers: true
+            )
 
             DispatchQueue.main.async { [weak self] in
                 guard let self, generation == currentGeneration, let image else { return }
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
-                publish(image: image, transform: targetTransform)
-                if let idx = pending.firstIndex(where: { $0 === item }) {
+                // Not shown (another render landed in between): the stroke stays live until the render
+                // `publish` asked for covers it.
+                if publish(image: image, transform: targetTransform, tiles: tiles),
+                   let idx = pending.firstIndex(where: { $0 === item }) {
                     pending.remove(at: idx)
                 }
                 invalidateLive(canvasRect: bounds)
@@ -1427,7 +1475,7 @@ extension CanvasView {
             settlePageChrome()
         }
         if activeGestureCount == 0, bitmapTransform != viewTransform || displayedTransform != viewTransform {
-            requestFullRender()
+            requestFullRender(inkChanged: false)
         }
     }
 
@@ -1560,7 +1608,7 @@ extension CanvasView {
         updatePageChrome()
         liveView.settle(at: viewTransform)
         updateLassoOverlay()
-        requestFullRender()
+        requestFullRender(inkChanged: false)
         controller?.zoomDidChange(viewTransform.scale)
     }
 
@@ -1644,62 +1692,6 @@ extension CanvasView {
     }
 }
 
-// MARK: - Gesture delegate
-
-extension CanvasView: UIGestureRecognizerDelegate {
-    override func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
-        if g is UIHoverGestureRecognizer {
-            return true
-        }
-        if activeTouch != nil || zoomTouch != nil || isOnRuler(g) {
-            return false
-        } // palm rejection: no panning while the Pencil is down; a gesture on the ruler is the ruler's
-        if g is TapeTapGestureRecognizer {
-            return tapeTapShouldBegin(g)
-        }
-        if g === pan || g === pinch, let panel = zoomPanel, panel.frame.contains(g.location(in: self)) {
-            return false // the writing panel stays put
-        }
-        if g === pinch {
-            return g.numberOfTouches == 2
-        }
-        if g === lassoTap {
-            return controller?.tool == .lasso && !fingerDraws
-        }
-        if g === textTap {
-            return !fingerDraws && (controller?.tool == .text || textEditor != nil)
-        }
-        return true
-    }
-
-    /// Palm rejection: a resting hand never pans, zooms, swipes or taps.
-    func gestureRecognizer(_: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        !isPalm(touch) && !isInTextEditor(touch) && !isInImageCrop(touch)
-    }
-
-    /// Whether the touch landed in the text box being edited.
-    func isInTextEditor(_ touch: UITouch) -> Bool {
-        guard let textView = textEditor?.textView, let view = touch.view else { return false }
-        return view.isDescendant(of: textView)
-    }
-
-    func gestureRecognizer(_ g: UIGestureRecognizer,
-                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        if g is MultiFingerTapRecognizer, other is UISwipeGestureRecognizer {
-            return false
-        }
-        if g is UISwipeGestureRecognizer, other is MultiFingerTapRecognizer {
-            return false
-        }
-        return true
-    }
-
-    func gestureRecognizer(_: UIGestureRecognizer,
-                           shouldRequireFailureOf _: UIGestureRecognizer) -> Bool {
-        false
-    }
-}
-
 // MARK: - Apple Pencil interactions
 
 extension CanvasView: UIPencilInteractionDelegate {
@@ -1741,7 +1733,7 @@ extension CanvasView {
 
     /// Classifies a direct touch when it's first seen (by a gesture recognizer or `touchesBegan`) and
     /// again as its contact grows: once a palm, it stays one until it lifts.
-    private func isPalm(_ touch: UITouch) -> Bool {
+    func isPalm(_ touch: UITouch) -> Bool {
         guard touch.type == .direct else { return false }
         if palmTouches.contains(touch) {
             return true

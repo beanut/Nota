@@ -33,7 +33,7 @@ struct PanZoomPerformanceTests {
         layer.rest(afterDrawTaking: TransformFollowingView.cheapDraw / 2)
         layer.follow(zoomed, moving: true)
         #expect(layer.drawnTransform == zoomed)
-        #expect(layer.layer.affineTransform() == .identity)
+        #expect(layer.shownTransform == .identity)
     }
 
     @Test func aDearLayerMovesItsLastDrawingWhileThePageMoves() {
@@ -42,13 +42,13 @@ struct PanZoomPerformanceTests {
         layer.follow(zoomed, moving: true)
         #expect(layer.drawnTransform == ViewTransform()) // not drawn again…
         // …but what was drawn at the identity is now shown at `zoomed`: a point keeps its place on the page.
-        let shown = CGPoint(x: 10, y: 20).applying(layer.layer.affineTransform())
+        let shown = CGPoint(x: 10, y: 20).applying(layer.shownTransform)
         #expect(shown == zoomed.toView(CGPoint(x: 10, y: 20)))
 
         // The movement ends: drawn sharp where the page stopped.
         layer.follow(zoomed)
         #expect(layer.drawnTransform == zoomed)
-        #expect(layer.layer.affineTransform() == .identity)
+        #expect(layer.shownTransform == .identity)
     }
 
     @Test func aDearLayerCatchesUpWhenItsRestIsOverEvenIfThePageStopsChanging() async throws {
@@ -58,20 +58,44 @@ struct PanZoomPerformanceTests {
         #expect(layer.drawnTransform == ViewTransform())
         try await Task.sleep(for: .milliseconds(200))
         #expect(layer.drawnTransform == zoomed)
-        #expect(layer.layer.affineTransform() == .identity)
+        #expect(layer.shownTransform == .identity)
     }
 
-    @Test func aDearLayerResizedMidMoveIsDrawnAgainWhenTheMovementEnds() {
+    @Test func aLayerResizedMidMoveDrawsOnlyTheNewPart() {
         let layer = layer()
+        layer.displayTiles()
         layer.rest(afterDrawTaking: 10)
-        layer.follow(zoomed, moving: true)
-        layer.follow(zoomed) // drawn at `zoomed`
-        layer.layer.displayIfNeeded()
-        layer.rest(afterDrawTaking: 10)
-        layer.fill(CGRect(x: 0, y: 0, width: 400, height: 300)) // wider, mid-pinch: not drawn yet
-        #expect(layer.layer.needsDisplay() == false)
-        layer.follow(zoomed) // the same transform, but the new part needs drawing
-        #expect(layer.layer.needsDisplay())
+        layer.fill(CGRect(x: 0, y: 0, width: 600, height: 300)) // wider, mid-pinch
+        #expect(layer.tileCount == 3 * 2)
+        #expect(layer.tilesNeedingDisplay == 2 * 2) // the two new columns of tiles; the first is kept
+    }
+
+    @Test func movingByWholePixelsKeepsTheTilesAndDrawsOnlyWhatsNew() {
+        let layer = layer() // 200 × 300: one column of two tiles
+        layer.displayTiles()
+        // The canvas moved 100 pt along the page (a page's canvas re-centring as the view scrolls).
+        let moved = ViewTransform(scale: 1, offset: CGPoint(x: -100, y: 0))
+        layer.follow(moved, moving: true)
+        #expect(layer.drawnTransform == ViewTransform()) // not drawn again…
+        #expect(layer.shownTransform == CGAffineTransform(translationX: -100, y: 0))
+        #expect(layer.tileCount == 2 * 2)
+        #expect(layer.tilesNeedingDisplay == 2) // …only the tiles it newly reaches
+        // At rest on whole pixels it stays as it is: tiles drawn there are as sharp.
+        layer.displayTiles()
+        layer.follow(moved)
+        #expect(layer.drawnTransform == ViewTransform())
+        #expect(layer.tilesNeedingDisplay == 0)
+    }
+
+    @Test func comingToRestBetweenPixelsDrawsItAgain() {
+        let layer = layer()
+        layer.displayTiles()
+        let moved = ViewTransform(scale: 1, offset: CGPoint(x: -10.3, y: 0))
+        layer.follow(moved, moving: true)
+        #expect(layer.drawnTransform == ViewTransform())
+        layer.follow(moved)
+        #expect(layer.drawnTransform == moved)
+        #expect(layer.shownTransform == .identity)
     }
 
     @Test func aHiddenLayerJustKeepsUp() {
@@ -80,7 +104,7 @@ struct PanZoomPerformanceTests {
         layer.rest(afterDrawTaking: 10)
         layer.follow(zoomed, moving: true)
         #expect(layer.drawnTransform == zoomed)
-        #expect(layer.layer.affineTransform() == .identity)
+        #expect(layer.shownTransform == .identity)
     }
 
     @Test func zoomIsPublishedOnceItStopsChanging() async throws {
