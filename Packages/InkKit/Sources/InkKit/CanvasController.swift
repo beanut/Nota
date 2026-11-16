@@ -450,8 +450,11 @@ final class CanvasController: ObservableObject {
         }
     }
 
-    func zoomDidChange(_ scale: CGFloat) {
+    /// The page's zoom changed. `settled: false` mid-pinch: the ruler follows, but the zoom shown in the
+    /// menu waits for the pinch to end, so SwiftUI doesn't update the editor every frame.
+    func zoomDidChange(_ scale: CGFloat, settled: Bool = true) {
         rulerView?.pageScaleDidChange()
+        guard settled else { return }
         let rounded = (scale * 100).rounded() / 100
         if rounded != zoom {
             zoom = rounded

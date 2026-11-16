@@ -27,6 +27,10 @@ final class CanvasView: UIView {
     let isEmbedded: Bool
     /// Where the host has put the page, while embedded.
     var placement = ViewTransform()
+    /// While embedded: the part of the view that's on screen, and whether the host is scrolling or
+    /// zooming it (`place(_:visible:settled:)`).
+    var placementVisible: CGRect?
+    var placementMoving = false
     weak var controller: CanvasController? {
         didSet { pencilSettingsDidChange() }
     }
@@ -39,7 +43,7 @@ final class CanvasView: UIView {
         ViewTransform() // transform the bitmap is / will be rendered at once queued jobs run; pending strokes draw with this
     private(set) var displayedTransform = ViewTransform() // transform of the image currently in committedLayer.contents
     private(set) var fullRenderInFlight = false
-    private var fullRenderRequested = false
+    private(set) var fullRenderRequested = false
     private var modifiedSinceSnapshot = Set<UUID>()
     /// Strokes whose geometry was dropped while `warmGeometry` was building it in the background.
     private var modifiedSinceWarmup = Set<UUID>()
@@ -57,7 +61,7 @@ final class CanvasView: UIView {
     }
 
     private var gestureStartTransform = ViewTransform()
-    private var activeGestureCount = 0
+    private(set) var activeGestureCount = 0
     private var didTransformInTouchSequence = false
     /// Most fingers down at once since the last time none were; a three-finger swipe is undo/redo, not a page turn.
     private var maxDirectTouchesInSequence = 0
@@ -65,7 +69,7 @@ final class CanvasView: UIView {
     /// Total movement of the current pan, for page swipes (the recognizer's translation is reset every frame).
     private var panTranslation = CGPoint.zero
     /// Drives the short slide back to the fitted page after a swipe that didn't turn the page.
-    private var settleLink: CADisplayLink?
+    private(set) var settleLink: CADisplayLink?
     private var settleFrom = ViewTransform()
     private var settleTo = ViewTransform()
     private var settleStart: CFTimeInterval = 0
@@ -182,7 +186,7 @@ final class CanvasView: UIView {
     private var outstandingEstimates: [UUID: Int] = [:]
     private var hoverActive = false
     /// Where the Pencil hovers, in view points, while it does.
-    private var hoverLocation: CGPoint?
+    private(set) var hoverLocation: CGPoint?
 
     // HUD
     private var hud = PencilTelemetry.Snapshot()
@@ -354,9 +358,9 @@ final class CanvasView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         inkClipView.frame = bounds
-        templateView.frame = bounds
-        objectLayer.frame = bounds
-        tapeLayer.frame = bounds
+        templateView.place(in: bounds)
+        objectLayer.place(in: bounds)
+        tapeLayer.place(in: bounds)
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
         layoutZoomPanel()
@@ -377,7 +381,8 @@ final class CanvasView: UIView {
         bitmapScale = scale
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        committedLayer.bounds = bounds
+        // The layer keeps the size of the image it shows until a render at the new size replaces it
+        // (`publish`), so the old ink isn't stretched to the new size in the meantime.
         committedLayer.position = .zero
         committedLayer.contentsScale = scale
         CATransaction.commit()
@@ -394,11 +399,14 @@ final class CanvasView: UIView {
         CGSize(width: (size.width * scale).rounded(.up), height: (size.height * scale).rounded(.up))
     }
 
+    /// Swaps in a bitmap of the new size. On the render queue, behind any render still drawing into the
+    /// old one, so the main thread doesn't wait for it (as it did at the end of every pinch, when the
+    /// page's canvas changes size); the renders asked for after this draw into the new one.
     private func makeBitmap() {
         let pixelSize = bitmapPixelSize
         let scale = bitmapScale
-        renderQueue.sync {
-            self.bitmap = CommittedRenderer.makeBitmap(pixelSize: pixelSize, scale: scale)
+        renderQueue.async { [weak self] in
+            self?.bitmap = CommittedRenderer.makeBitmap(pixelSize: pixelSize, scale: scale)
         }
     }
 
@@ -510,6 +518,11 @@ final class CanvasView: UIView {
     private func publish(image: CGImage, transform: ViewTransform) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        let scale = max(committedLayer.contentsScale, 1)
+        let size = CGSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale)
+        if committedLayer.bounds.size != size {
+            committedLayer.bounds = CGRect(origin: .zero, size: size)
+        }
         committedLayer.contents = image
         displayedTransform = transform
         updateCommittedLayerTransform()
@@ -898,9 +911,10 @@ final class CanvasView: UIView {
         CATransaction.setDisableActions(true)
         pageLayer.frame = frame
         pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
-        templateView.follow(viewTransform)
-        objectLayer.follow(viewTransform)
-        tapeLayer.follow(viewTransform)
+        let moving = isMovingView, visible = visibleInView, page = document.pageBounds
+        for view in [templateView, objectLayer, tapeLayer] as [FollowingVectorView] {
+            view.follow(viewTransform, moving: moving, visible: visible, page: page)
+        }
         placeTextEditor()
         placeImageCrop()
         inkMask.frame = inkClipView.bounds
@@ -1430,6 +1444,8 @@ extension CanvasView {
         guard !isCancellingGesture else { return }
         if activeGestureCount == 0 {
             liveView.settle(at: viewTransform)
+            updatePageChrome() // sharp again, if it was scaled while moving
+            controller?.zoomDidChange(viewTransform.scale)
         }
         if activeGestureCount == 0, bitmapTransform != viewTransform || displayedTransform != viewTransform {
             requestFullRender()
@@ -1442,8 +1458,8 @@ extension CanvasView {
         updatePageChrome()
         liveView.follow(viewTransform)
         updateLassoOverlay()
-        requestFullRender()
-        controller?.zoomDidChange(viewTransform.scale)
+        requestRenderWhileMoving()
+        controller?.zoomDidChange(viewTransform.scale, settled: false)
     }
 
     @objc private func handlePan(_ g: UIPanGestureRecognizer) {
@@ -1702,31 +1718,6 @@ extension CanvasView: UIGestureRecognizerDelegate {
     func gestureRecognizer(_: UIGestureRecognizer,
                            shouldRequireFailureOf _: UIGestureRecognizer) -> Bool {
         false
-    }
-}
-
-// MARK: - Apple Pencil interactions
-
-extension CanvasView: UIPencilInteractionDelegate {
-    /// Double-tap (Pencil 2 and Pro). Does what the Pencil settings say, by default what Settings ›
-    /// Apple Pencil says; a palette shows at the hover position.
-    func pencilInteraction(_: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
-        guard let controller else { return }
-        let action = controller.pencilSettings.doubleTap
-            .resolved(system: UIPencilInteraction.preferredTapAction, fallback: .eraser)
-        controller.perform(action, at: tap.hoverPose?.location ?? hoverLocation ?? center(of: bounds))
-    }
-
-    /// Squeeze (Pencil Pro): by default the quick palette, at the hover position.
-    func pencilInteraction(_: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
-        guard squeeze.phase == .ended, let controller else { return }
-        let action = controller.pencilSettings.squeeze
-            .resolved(system: UIPencilInteraction.preferredSqueezeAction, fallback: .palette)
-        controller.perform(action, at: squeeze.hoverPose?.location ?? hoverLocation ?? center(of: bounds))
-    }
-
-    private func center(of r: CGRect) -> CGPoint {
-        CGPoint(x: r.midX, y: r.midY)
     }
 }
 

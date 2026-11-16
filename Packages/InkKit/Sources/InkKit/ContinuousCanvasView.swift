@@ -47,6 +47,11 @@ final class ContinuousCanvasView: UIView {
     /// How far above and below the view, as a fraction of its height, pages get a canvas before they're
     /// in view.
     static let prefetchFraction: CGFloat = 0.5
+    /// Mid-pinch, how far above and below the view a page keeps the canvas it has. A pinch changes which
+    /// pages are near the view every frame; making and dropping canvases for them (each a new bitmap and a
+    /// full render) is what made pinching across a page break stutter. So mid-pinch a page only gets a
+    /// canvas once it's in view, and only loses one once it's this far out.
+    static let pinchKeepFraction: CGFloat = 1
 
     init(notebook: InkNotebook, controller: CanvasController, telemetry: PencilTelemetry) {
         self.notebook = notebook
@@ -230,7 +235,13 @@ final class ContinuousCanvasView: UIView {
         guard layout.frames.count == pages.count else { return }
         let viewport = viewportInLayout
         let visible = layout.visiblePages(in: viewport)
-        let nearby = layout.visiblePages(in: viewport.insetBy(dx: 0, dy: -viewport.height * Self.prefetchFraction))
+        let pinching = scrollView.isZooming || scrollView.isZoomBouncing
+        let nearby: [Int] = if pinching {
+            layout.visiblePages(in: viewport.insetBy(dx: 0, dy: -viewport.height * Self.pinchKeepFraction))
+                .filter { visible.contains($0) || canvases[pages[$0].id] != nil }
+        } else {
+            Array(layout.visiblePages(in: viewport.insetBy(dx: 0, dy: -viewport.height * Self.prefetchFraction)))
+        }
         // Nearest the middle first, when there are more than the canvases allowed.
         let live = nearby.sorted { abs(layout.frames[$0].midY - viewport.midY) < abs(layout.frames[$1].midY - viewport.midY) }
             .prefix(Self.maxLiveCanvases)
@@ -249,7 +260,6 @@ final class ContinuousCanvasView: UIView {
             canvases[id] = nil
         }
         let contentViewport = CGRect(origin: scrollView.contentOffset, size: bounds.size)
-        let pinching = scrollView.isZooming || scrollView.isZoomBouncing
         for i in live {
             let page = pages[i]
             let existing = canvases[page.id]
@@ -261,13 +271,18 @@ final class ContinuousCanvasView: UIView {
             if canvas.frame != window {
                 canvas.frame = window
             }
-            canvas.place(transform(forPage: i, from: window.origin), settled: settled)
+            let onScreen = contentViewport.intersection(window).offsetBy(dx: -window.minX, dy: -window.minY)
+            canvas.place(transform(forPage: i, from: window.origin), visible: onScreen, settled: settled)
             // A new or resized canvas makes its bitmap now, at the placement it was just given, so its
             // first render already shows the page.
             canvas.layoutIfNeeded()
         }
         updatePaperLayers(for: visible.filter { !liveIDs.contains(pages[$0].id) })
-        updateCurrentPage(in: viewport)
+        // Pinching across a page break moves the middle of the view between the two pages over and
+        // over; the current page (the page bar, undo, the tools) catches up once the pinch ends.
+        if !pinching {
+            updateCurrentPage(in: viewport)
+        }
     }
 
     private func makeCanvas(for page: CanvasDocument, frame: CGRect) -> CanvasView {
@@ -483,7 +498,7 @@ extension ContinuousCanvasView: UIScrollViewDelegate {
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
-        controller?.zoomDidChange(scrollView.zoomScale)
+        controller?.zoomDidChange(scrollView.zoomScale, settled: !scrollView.isZooming && !scrollView.isZoomBouncing)
         setNeedsLayout()
         layoutIfNeeded()
     }
@@ -502,7 +517,8 @@ extension ContinuousCanvasView: UIScrollViewDelegate {
         settle()
     }
 
-    func scrollViewDidEndZooming(_: UIScrollView, with _: UIView?, atScale _: CGFloat) {
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with _: UIView?, atScale _: CGFloat) {
+        controller?.zoomDidChange(scrollView.zoomScale)
         settle()
     }
 

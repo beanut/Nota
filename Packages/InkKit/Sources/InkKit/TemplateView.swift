@@ -1,11 +1,12 @@
 import UIKit
 
 /// The page's template, between the paper and the ink. It's redrawn as vectors at the canvas's transform
-/// whenever the page moves or zooms, so lines stay one crisp width at every zoom instead of scaling a bitmap.
+/// whenever the page settles after moving or zooming, so lines stay one crisp width at every zoom; mid-pinch
+/// it shows what it last drew, scaled (see `FollowingVectorView`).
 ///
 /// Only what's on screen is drawn (`TemplateRenderer` skips pattern outside the visible rect), and nothing
 /// is drawn while ink is being written: the view only redraws for pan, zoom and template changes.
-final class TemplateView: UIView {
+final class TemplateView: FollowingVectorView {
     /// Everything needed to draw one page's template.
     struct Paper: Equatable {
         var template = PageTemplate.default
@@ -31,7 +32,6 @@ final class TemplateView: UIView {
     }
 
     private(set) var paper = Paper()
-    private var canvasTransform = ViewTransform()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -54,7 +54,7 @@ final class TemplateView: UIView {
         if paper != self.paper {
             self.paper = paper
             isHidden = paper.template.isPlain
-            setNeedsDisplay()
+            redraw()
         }
         return paper.palette.surface
     }
@@ -69,17 +69,8 @@ final class TemplateView: UIView {
         }
     }
 
-    /// Follows the canvas to `transform`.
-    func follow(_ transform: ViewTransform) {
-        guard transform != canvasTransform else { return }
-        canvasTransform = transform
-        if !isHidden {
-            setNeedsDisplay()
-        }
-    }
-
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        paper.draw(at: canvasTransform, viewRect: rect, scale: contentScaleFactor, fillsPaper: false, in: ctx)
+        paper.draw(at: drawnTransform, viewRect: rect, scale: contentScaleFactor, fillsPaper: false, in: ctx)
     }
 }

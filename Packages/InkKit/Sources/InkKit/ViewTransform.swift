@@ -54,6 +54,30 @@ struct ViewTransform: Equatable {
         return fitScale ... max(fitScale, 1) * maxZoomFactor
     }
 
+    /// How much a layer drawn at one transform may be magnified mid-gesture before it's drawn again.
+    /// Past this the ink and the template look soft; below it a pinch redraws only every 1.5× of zoom
+    /// instead of every frame.
+    static let maxMovingUpscale: CGFloat = 1.5
+
+    /// Mid-gesture, whether a layer drawn at `drawn` over `drawnRect` (view points at `drawn`) can still be
+    /// shown, scaled, at this transform: it isn't magnified past `maxMovingUpscale`, and it covers the
+    /// part of `page` (canvas space) that `visible` (view points at this transform) shows.
+    func canReuse(drawnAt drawn: ViewTransform, over drawnRect: CGRect, visible: CGRect, page: CGRect) -> Bool {
+        guard drawn.scale > 0, scale > 0, scale / drawn.scale <= Self.maxMovingUpscale * 1.0001 else { return false }
+        let needed = toCanvas(visible).intersection(page)
+        guard !needed.isNull, !needed.isEmpty else { return true }
+        let slack = 0.5 / scale // half a view point of rounding
+        return drawn.toCanvas(drawnRect).insetBy(dx: -slack, dy: -slack).contains(needed)
+    }
+
+    /// The view-space transform that moves a layer drawn at `drawn` to where this transform shows it.
+    func layerTransform(from drawn: ViewTransform) -> CGAffineTransform {
+        guard drawn != self, drawn.scale > 0 else { return .identity }
+        let k = scale / drawn.scale
+        return CGAffineTransform(a: k, b: 0, c: 0, d: k,
+                                 tx: offset.x - drawn.offset.x * k, ty: offset.y - drawn.offset.y * k)
+    }
+
     /// How far (0–1) to move the page towards its centred, fitted position when a pinch zooms from `old`
     /// to `new`. Within 25% of `fitScale`, zooming out closes the gap in step with the scale, so the page
     /// arrives centred exactly as it reaches the zoom-out limit. Zooming in, or above that band, gives 0.
