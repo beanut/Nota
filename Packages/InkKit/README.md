@@ -45,8 +45,9 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView+Input.swift` / `CanvasInput.swift` | Input: touch phases, coalesced and predicted samples, estimated-property updates (`EstimateTracker`), palm rejection and finger ink, feeding `LiveStroke`; a finished stroke goes to the render coordinator |
 | `CanvasView+Viewport.swift` / `CanvasViewport.swift` | Viewport: the view transform, the fitted transform, pan and pinch steps, page swipes, the slide back to the fitted page, cancelling an incidental pan or pinch. Pan and pinch steps (and the fitted transform) keep the offset on whole device pixels, so a gesture settles on the pixel grid with no extra render |
 | `RenderCoordinator.swift` | The committed side: which tiles the view needs, filling missing and stale ones off the main thread, showing them, drawing finished strokes (`PendingStroke`) into the tiles they reach, the geometry cache, revision tracking, the settled state, the page's `TileRaster` and the zoom panel's renders. Knows nothing of touches |
+| `RenderScheduler.swift` | `RenderScheduler` (`.shared`), `RenderJob`, `RenderPriority`, `RenderCancellation`: the one place render work runs (tiles, finished strokes, the zoom panel, the presentation mirror, thumbnails, geometry warm-up, page rasters), by priority, cancellable, on a bounded number of workers, published in batches on the main thread at most once a frame |
 | `TileCache.swift` | `TileLevel`, `TileKey` (256-pixel page-space tiles), `Tile` (pixels and the page revision they show) and `TileCache`, every page's tiles shared by every canvas and zoom panel, evicted least recently used under a byte budget |
-| `TileFiller.swift` | `TileFiller` and `CoreGraphicsTileFiller` (drawing strokes into a tile), `TileBitmap` (tile contexts in page points with the grain pinned to the page; assembling tiles into an image), `InkSnapshot` (the ink a render job draws from), `TileRaster` (a page's fitted tiles, compressed, for reopening it) |
+| `TileFiller.swift` | `TileFiller` and `CoreGraphicsTileFiller` (drawing strokes into a tile), `TileBitmap` (tile contexts in page points with the grain pinned to the page; assembling tiles into an image), `InkSnapshot` (the ink a render job draws from), `GeometryStore` (stroke geometry the jobs of one fill share and build), `TileRaster` (a page's fitted tiles, compressed, for reopening it) |
 | `TileLayers.swift` | `TileLayerGrid`: one level's tiles on screen as `CGImage` layer contents, placed by one transform |
 | `PencilSettings.swift` | `PencilSettings` (double-tap and squeeze actions, finger drawing, palm rejection, handedness, scribble toggles) and their persistence, quick-palette placement, and `PalmRejector` |
 | `PencilSettingsView.swift` | The More menu's Apple Pencil settings |
@@ -646,22 +647,24 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
      transform gives. A gesture ending within 2% of a level the page already has (the fitted page, the last
      zoom) snaps to it, so returning there fills nothing.
    - **What's filled.** `RenderCoordinator` works out the tiles in view (and a ring of one tile around them, so a
-     pan finds its next tiles cached) and fills only those missing or stale, on its render queue, every core at
-     once, each tile drawing in page order the strokes the page's `StrokeIndex` finds reaching it
+     pan finds its next tiles cached) and fills only those missing or stale, one `RenderScheduler` job per tile
+     (see Render scheduler below), each tile drawing in page order the strokes the page's `StrokeIndex` finds reaching it
      (`CoreGraphicsTileFiller`, through the same `StrokeRenderer.draw` as before). A pan at the same level over
      cached tiles fills nothing; a pinch fills nothing until it ends: the last level is scaled, over the
      **resting level** (the fitted page; continuous scrolling's column at zoom 1) where it has no tiles, masked
-     away wherever it has. When the gesture ends, the new level's tiles in view are filled and swapped in
-     together once they're all there (NOT-103 orders them centre-out and cancels stale ones; NOT-105 adds
-     progressive levels).
+     away wherever it has. When the gesture ends, the new level's tiles in view are filled, centre-out, and
+     swapped in together once they're all there (NOT-105 adds progressive levels).
    - **Revisions, not invalidation lists.** Each tile records the page revision it shows; a tile at any other
      revision is stale, stays on screen until its refill lands (nothing flashes blank) and is refilled when
      it's in view. A change that doesn't move the revision (strokes removed or moved mid-gesture) marks the
      tiles under it stale (`TileCache.invalidate(page:rect:)`). Edits still refill every tile in view
      (`invalidate(rect:)` is where NOT-104's change rects come in).
-   - **A finished stroke** is drawn into every cached tile it reaches, at every level, on the render queue in
-     order with the fills (which leave strokes still waiting for their estimates out), so it never blinks; the
-     tiles it doesn't reach move on to the new revision as they are (`TileCache.advance`).
+   - **A finished stroke** is drawn into every cached tile it reaches, at every level, by an `underPencil` job
+     (strokes sent meanwhile go in the next one, in order), so it never blinks; the tiles it doesn't reach move
+     on to the new revision as they are (`TileCache.advance`). Fills run beside it and leave strokes still
+     waiting for their estimates out, so a fill that started before the stroke was sent lands labelled with the
+     revision before it: where the stroke doesn't reach, the coordinator's stroke log moves the label on; where
+     it does, or the job saw a tile a fill has since replaced, the tile is marked stale and filled again.
    - **Live and committed match** as before: the same `.copy` run rule, multiply and wax, on a pixel grid
      aligned with the live layer's, and the pencil grain is pinned to the page in both
      (`PencilTexture.pinToPage`: the pattern anchored at the page origin's device pixel, not reduced modulo a
@@ -686,6 +689,42 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
    - A late estimate that changes a baked chunk re-bakes just the tiles it touches. Tiles are freed once every stroke has been committed.
    - A raster brush (the crayon) bakes its wax field on the GPU instead and gets its pixels back asynchronously (see Brushes › Raster brushes).
    - Multiply ink previews over the committed tiles on screen (`LiveInkView.underlay`, page rects and images).
+
+#### Render scheduler (NOT-103)
+
+All render work goes through `RenderScheduler.shared`: canvas tiles, finished strokes, the zoom window's panel,
+the presentation mirror, page thumbnails, geometry warm-up after a raster restore, and a closing page's
+`TileRaster`. There are no other render queues or in-flight/requested flags.
+
+- **Jobs** (`RenderJob`) carry a priority, a rank within it (tiles: their place centre-out) and optionally a
+  cancellation token and a coalescing key. `work` runs on a worker thread and returns an output; `publish` runs
+  on the main thread with it, or with nil when the job was dropped, exactly once.
+- **Priorities**, in order: `underPencil` (tiles within 8 pt of the nib, finished strokes), `visible` (tiles in
+  view, the zoom panel), `margin` (the ring around the view, the presentation mirror), `otherLevel` (the page
+  raster at the resting level), `background` (geometry warm-up, thumbnails). QoS follows: user-interactive,
+  user-initiated, utility. A queued job can be moved (`reprioritise`: a margin tile that came into view).
+- **Bounded.** At most every core but one run at once; while any canvas is in a gesture (the coordinator reports
+  `isMoving`), two performance cores fewer than the device has (`hw.perflevel0`), so the main thread and the
+  render server keep two. `otherLevel` and `background` jobs take at most two workers between them, so a slow
+  thumbnail never holds up a tile.
+- **Cancellation.** A cancelled job never starts; a running one is asked between strokes (`TileFiller.fill`'s
+  `isCancelled`, and `GeometryStore` between geometry builds) and its output is dropped even if it finished. The
+  coordinator cancels fills for tiles that left the wanted set, queued fills of a revision the page has moved on
+  from (they're submitted again), everything on `discardInFlight` (a token), and everything when it goes (its
+  lifetime token). A *running* fill of an older revision is left to finish, because its pixels are newer than
+  what's on screen (a dense fitted tile takes 100–250 ms, and an erase changes the page faster than that); its
+  tile is refilled when it lands. A coalescing key (zoom panel, mirror) cancels the older job if it hasn't
+  started, and drops its output if a newer one published first, so stale pixels never land over fresh ones.
+- **Published in batches.** Finished jobs are published together on the main thread, at most once per
+  120 Hz frame; an owner hears once per batch (`afterBatch`), so the coordinator stores the batch's tiles and
+  lays its layers out once.
+- **Settled.** Fills are tracked per tile until published or cancelled. `rendersSettled` means "no fill of a
+  tile in view and no finished stroke on its way, and every tile in view at the page's revision"; the margin's
+  fills may still be running (`RenderCoordinator.isFilling`), as they change nothing on screen. So
+  time-to-sharp no longer waits for the margin; benchmarks and tests that count fills wait for those too.
+- **Seams for later issues.** NOT-104's dirty-rect refills are tile jobs with a region (`TileFiller.fill`'s
+  `region`); NOT-105's progressive levels are `visible` jobs swapped in as each batch lands, with stale levels'
+  jobs cancelled (`startRender` already cancels fills of levels passed through during a pinch).
 
 #### Decision: tiled committed layer (NOT-99)
 
@@ -788,7 +827,7 @@ differ in 0.002%. So:
 | `TileCache` | NOT-102 (landed) | One for the app (`TileCache.shared`), shared by every canvas and zoom panel. Thread-safe. `tile(for:)` / `tiles(for:)` (`Tile`: `image`, nil when empty, and `revision`), `store` / `storeIfNewer`, `advance(page:from:to:outside:)`, `invalidate(page:rect:)` (marks stale at every level), `setInterest` (what a view shows and its resting level), LRU eviction under a byte budget, off-screen tiles first |
 | `TileFiller` | NOT-102 (landed) | `fill(_ key:, region:, strokes: [TileStroke], into:)`: draws the given strokes (from `InkSnapshot.drawable(in:)`, which asks the `StrokeIndex`) into a tile, or only `region` of it (cleared first; NOT-104's dirty rects). `CoreGraphicsTileFiller` is the only one in M1.5 |
 | `StrokeGeometry` pieces | not done | Each run's strips and stamps with their bounds, so a filler draws only the pieces reaching its tile. Left out of NOT-102: a copy of every stroke's pieces would roughly double the geometry cache (NOT-108 bounds it), and the spike's gain was at 6× only (7.9 → 5.6 ms a tile) |
-| `RenderScheduler`, `RenderJob` | NOT-103 | Jobs carry a key, a page revision and a priority (`.underPencil`, `.visible`, `.margin`, `.otherLevel`, `.background`); dropped before they start when stale or off screen, checked between strokes while running; results published in one batch per frame |
+| `RenderScheduler`, `RenderJob` | NOT-103 (landed) | Jobs carry a priority (`.underPencil`, `.visible`, `.margin`, `.otherLevel`, `.background`), a rank and a cancellation token; the coordinator tracks each tile's fill and its revision. Dropped before they start when stale or off screen, checked between strokes while running; results published in one batch per frame. See Render scheduler above |
 | `CanvasDocument` change rects | NOT-104 | Every command reports the page rect it changed; `TileCache.invalidate(page:rect:)` and a region refill per tile |
 
 **Order of the follow-ups**: NOT-100 (split `CanvasView`, no behaviour change) → NOT-101 (index: tiles query it
@@ -885,7 +924,7 @@ lasso and tap selection, and circle-to-select. Tiles (NOT-102) query it per tile
 More › Zoom Window shows a writing panel at the bottom of the canvas that magnifies a box on the page, for writing small and neatly. The page is refitted above the panel so the box is never under it.
 
 - **Input.** A touch that begins in the panel's ink area is mapped through the panel's transform instead of the page's (`inputTransform`), so the stroke is stored in page space inside the box like any other, and every tool (pens, both erasers, the lasso) works there. Width-in-view rules (sample spacing, the eraser's on-screen size, lasso slop) use the panel's scale.
-- **Rendering.** The panel shows the box the way the canvas shows the page: a committed image of just the strokes that reach the box, assembled from the page's tiles at the panel's own level, filling the ones the cache doesn't have, on the render queue whenever the page's committed tiles change (one render at a time), under its own `LiveInkView` showing the stroke being written. A finished stroke stays on the panel's live layer until a render that includes it lands, so it never blinks out. With the panel closed none of this exists and the ink path is unchanged; with it open, live strokes are filled in both live layers.
+- **Rendering.** The panel shows the box the way the canvas shows the page: a committed image of just the strokes that reach the box, assembled from the page's tiles at the panel's own level, filling the ones the cache doesn't have, as a `visible` scheduler job whenever the page's committed tiles change (a newer render supersedes one that hasn't started, and an older one landing after a newer is dropped), under its own `LiveInkView` showing the stroke being written. A finished stroke stays on the panel's live layer until a render that includes it lands, so it never blinks out. With the panel closed none of this exists and the ink path is unchanged; with it open, live strokes are filled in both live layers.
 - **Following the line.** `ZoomWindow` keeps the box on a line of the page's `WritingLines` (derived from the page's template by `WritingLines.lines(for:on:)`, which falls back to `WritingLines.standard` for templates without even rows; the host can override per page), with the baseline 72% of the way down. A stroke written in the panel that reaches the right-hand 30% moves the box on so the stroke ends a quarter of the way in; at the end of the line the next one sends it to the start of the next line. Dragging the box by its tab snaps it to the nearest line; its corner knob resizes it, which changes the magnification.
 
 ### Continuous scrolling
@@ -1086,7 +1125,14 @@ plain, multi-run, grain, scaled-grain, multiply, pixel-eraser and crayon ink; ag
 a stroke drawn into a cached tile against the tile filled again; `TileRaster` round trips; and the cache's
 eviction order, revision rules and `advance`. `RenderCoordinatorTests` checks settling, committed strokes,
 invalidation, that a pan over cached tiles and a pinch fill nothing (until the pinch ends), the 2% snap, and a
-reopened page restoring its raster instead of filling.
+reopened page restoring its raster instead of filling. `RenderSchedulerTests` checks the scheduler: priority,
+rank and submission order, `reprioritise`, cancellation before a job starts, while it runs and after it's done
+but before its batch (none publishes), cancellation tokens, coalescing (an older job finishing after a newer
+one is dropped), the worker limits in and out of a gesture and for low priorities, one batch for jobs that
+finish together and at most one batch a frame. `RenderJobOrderingTests` checks the coordinator's jobs: under
+the Pencil, then in view centre-out, then the margin; a discarded fill never reaching the cache; fills
+overtaken by an edit dropped or refilled, ending with tiles identical to ones drawn from scratch; and fewer
+workers during a gesture.
 
 `StrokeIndexTests` checks the spatial index: grid queries against a scan (z-order, huge, empty and off-page
 rects, renumbering), that a stroke's reach holds its ink for every bundled brush, and the page's index against

@@ -14,23 +14,35 @@ struct TileStroke {
 protocol TileFiller: Sendable {
     /// Draws `strokes`, in page order, into `ctx` (a bitmap from `TileBitmap.context(for:)`, addressed in
     /// page points), or only `region` (page points) of it, cleared first. Returns how many strokes reached it.
+    /// Asks `isCancelled` between strokes and stops when it says so (the render job was dropped: what's in
+    /// `ctx` is then unfinished and thrown away).
     @discardableResult
-    func fill(_ key: TileKey, region: CGRect?, strokes: [TileStroke], into ctx: CGContext) -> Int
+    func fill(_ key: TileKey, region: CGRect?, strokes: [TileStroke], into ctx: CGContext,
+              isCancelled: () -> Bool) -> Int
+}
+
+extension TileFiller {
+    /// `fill` to the end.
+    @discardableResult
+    func fill(_ key: TileKey, region: CGRect?, strokes: [TileStroke], into ctx: CGContext) -> Int {
+        fill(key, region: region, strokes: strokes, into: ctx, isCancelled: { false })
+    }
 }
 
 /// Fills tiles with Core Graphics, through `StrokeRenderer.draw`: the same `.copy` run rule, multiply
 /// highlighter, pixel eraser, grain and wax as the live layer, so live and committed pixels match.
 struct CoreGraphicsTileFiller: TileFiller {
     @discardableResult
-    func fill(_ key: TileKey, region: CGRect?, strokes: [TileStroke], into ctx: CGContext) -> Int {
-        draw(rect: key.rect, level: key.level, region: region, strokes: strokes, into: ctx)
+    func fill(_ key: TileKey, region: CGRect?, strokes: [TileStroke], into ctx: CGContext,
+              isCancelled: () -> Bool) -> Int {
+        draw(rect: key.rect, level: key.level, region: region, strokes: strokes, into: ctx, isCancelled: isCancelled)
     }
 
     /// `fill` for any part of the page: `rect` (page points) is what `ctx` covers at `level`. Drawing the
     /// whole page this way gives what its tiles show, assembled (the tile tests compare the two).
     @discardableResult
     func draw(rect pageRect: CGRect, level: TileLevel, region: CGRect? = nil, strokes: [TileStroke],
-              into ctx: CGContext) -> Int {
+              into ctx: CGContext, isCancelled: () -> Bool = { false }) -> Int {
         let rect = region.map { $0.intersection(pageRect) } ?? pageRect
         guard !rect.isNull, !rect.isEmpty else { return 0 }
         // Two pixels of anti-aliasing at this level, in page points.
@@ -42,6 +54,9 @@ struct CoreGraphicsTileFiller: TileFiller {
         }
         var drawn = 0
         for stroke in strokes {
+            if isCancelled() {
+                break
+            }
             let clip = stroke.geometry.bounds.insetBy(dx: -2, dy: -2)
             guard clip.intersects(reach) else { continue }
             StrokeRenderer.draw(runs: stroke.geometry.runs, clip: clip.intersection(reach), brush: stroke.brush,
@@ -126,6 +141,25 @@ struct InkSnapshot: @unchecked Sendable { // immutable values; geometry paths ar
         }
     }
 
+    /// The strokes reaching `rect` (page points) that a tile draws, in page order, geometry or not.
+    func candidates(in rect: CGRect) -> [Stroke] {
+        index.strokes(in: Self.query(rect)).compactMap { position in
+            let stroke = strokes[position]
+            return skipped.contains(stroke.id) ? nil : stroke
+        }
+    }
+
+    /// The strokes reaching `rect` (page points), in page order, with their geometry from `store` (built
+    /// there if no job has yet). Nil when `isCancelled` said stop first.
+    func drawable(in rect: CGRect, store: GeometryStore, isCancelled: () -> Bool) -> [TileStroke]? {
+        let strokes = candidates(in: rect)
+        guard let geometry = store.geometry(for: strokes, isCancelled: isCancelled) else { return nil }
+        return strokes.compactMap { stroke in
+            guard let g = geometry[stroke.id], g.bounds.insetBy(dx: -3, dy: -3).intersects(rect) else { return nil }
+            return TileStroke(geometry: g, brush: stroke.brush, color: stroke.color)
+        }
+    }
+
     /// Builds, on every core, the geometry of the strokes reaching `rects` that has none, and returns it.
     mutating func buildGeometry(reaching rects: [CGRect]) -> [(UUID, StrokeGeometry)] {
         var positions = Set<Int>()
@@ -143,17 +177,82 @@ struct InkSnapshot: @unchecked Sendable { // immutable values; geometry paths ar
     }
 }
 
-/// Lets a render job stop before its remaining tiles once what it draws is no longer wanted.
-final class RenderCancellation: @unchecked Sendable { // guarded by `lock`
-    private let lock = NSLock()
-    private var cancelled = false
+/// Stroke geometry shared by the render jobs of one fill: what the coordinator had cached, plus what the
+/// jobs build. A stroke reaching several tiles is built once, by the first job to need it, and the others
+/// wait for it. Building is serial within a job (the scheduler, not the job, decides how many cores
+/// work); a cancelled job stops between strokes and leaves the rest to whoever needs them.
+final class GeometryStore: @unchecked Sendable { // guarded by `condition`
+    private let condition = NSCondition()
+    private var geometry: [UUID: StrokeGeometry]
+    private var building = Set<UUID>()
+    private var built: [(UUID, StrokeGeometry)] = []
+    /// The owner's geometry generation when the store was made: what's built for a stroke changed since
+    /// isn't kept.
+    let generation: Int
 
-    var isCancelled: Bool {
-        lock.withLock { cancelled }
+    init(geometry: [UUID: StrokeGeometry], generation: Int = 0) {
+        self.geometry = geometry
+        self.generation = generation
     }
 
-    func cancel() {
-        lock.withLock { cancelled = true }
+    /// The geometry of `strokes`: building the ones nobody has, waiting for the ones another job is
+    /// building. Nil if `isCancelled` said stop.
+    func geometry(for strokes: [Stroke], isCancelled: () -> Bool) -> [UUID: StrokeGeometry]? {
+        while true {
+            condition.lock()
+            var claimed: [Stroke] = []
+            var waiting = false
+            for stroke in strokes where geometry[stroke.id] == nil {
+                if building.contains(stroke.id) {
+                    waiting = true
+                } else {
+                    building.insert(stroke.id)
+                    claimed.append(stroke)
+                }
+            }
+            if claimed.isEmpty {
+                defer { condition.unlock() }
+                if !waiting {
+                    var result: [UUID: StrokeGeometry] = [:]
+                    for stroke in strokes {
+                        result[stroke.id] = geometry[stroke.id]
+                    }
+                    return result
+                }
+                if isCancelled() {
+                    return nil
+                }
+                condition.wait()
+                continue
+            }
+            condition.unlock()
+            for (i, stroke) in claimed.enumerated() {
+                if isCancelled() {
+                    condition.withLock {
+                        for rest in claimed[i...] {
+                            building.remove(rest.id)
+                        }
+                        condition.broadcast()
+                    }
+                    return nil
+                }
+                let g = StrokeRenderer.geometry(for: stroke)
+                condition.withLock {
+                    geometry[stroke.id] = g
+                    built.append((stroke.id, g))
+                    building.remove(stroke.id)
+                    condition.broadcast()
+                }
+            }
+        }
+    }
+
+    /// What the jobs built since the last call, for the owner's geometry cache.
+    func takeBuilt() -> [(UUID, StrokeGeometry)] {
+        condition.withLock {
+            defer { built = [] }
+            return built
+        }
     }
 }
 

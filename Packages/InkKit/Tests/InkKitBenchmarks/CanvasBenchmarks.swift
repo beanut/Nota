@@ -81,6 +81,12 @@ final class CanvasBenchmarks: XCTestCase {
         try waitUntil(timeout: timeout) { canvas.rendersSettled }
     }
 
+    /// Runs the main run loop until `canvas` has settled and the tiles around its view are filled too
+    /// (`rendersSettled` doesn't wait for those): what fill counts are read after.
+    private func waitUntilIdle(_ canvas: CanvasView, timeout: TimeInterval = 30) throws {
+        try waitUntil(timeout: timeout) { canvas.rendersSettled && !canvas.coordinator.isFilling }
+    }
+
     @discardableResult
     private func waitUntil(timeout: TimeInterval, _ done: () -> Bool) throws -> Double {
         let start = Bench.now()
@@ -292,7 +298,7 @@ final class CanvasBenchmarks: XCTestCase {
         canvas.gestureBegan()
         canvas.zoom(by: ViewTransform.maxZoomFactor, about: canvas.viewTransform.toView(inkCentre))
         canvas.gestureEnded()
-        try waitUntilSettled(canvas)
+        try waitUntilIdle(canvas)
         let start6x = canvas.viewTransform
         var frames: [Double] = []
         var sharp: [Double] = []
@@ -308,6 +314,7 @@ final class CanvasBenchmarks: XCTestCase {
             try waitUntilSettled(canvas)
             sharp.append(Bench.milliseconds(since: start))
         }
+        try waitUntilIdle(canvas)
         let fill = canvas.coordinator.fillStats
         XCTAssertNotEqual(canvas.viewTransform, start6x)
         try assertCorrectPixels(canvas, "At 6× after the pan")
@@ -326,7 +333,7 @@ final class CanvasBenchmarks: XCTestCase {
             canvas.pan(by: CGPoint(x: n < Self.gestureFrames / 2 ? -10 : 10, y: 3))
         }
         canvas.gestureEnded()
-        try waitUntilSettled(canvas)
+        try waitUntilIdle(canvas)
         let refilled = canvas.coordinator.fillStats.tilesFilled - fill.tilesFilled
         BenchResults.record("pan.6x_dense.cached_tiles_filled", Double(refilled), unit: "tiles")
         XCTAssertEqual(refilled, 0, "a pan over cached tiles filled some again")

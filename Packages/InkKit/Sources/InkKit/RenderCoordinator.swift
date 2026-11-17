@@ -21,8 +21,8 @@ protocol RenderCoordinatorHost: AnyObject {
     /// True while the page's strokes are mid-edit (an erase or a lasso drag): a render then shows no
     /// revision of the document.
     var isEditingInk: Bool { get }
-    /// True while a stroke is being drawn.
-    var hasLiveStroke: Bool { get }
+    /// Where the Pencil is writing, in page points (nil when no stroke is being drawn): tiles there fill first.
+    var pencilLocation: CGPoint? { get }
     /// Whether some of the stroke's samples still expect refined force or tilt.
     func hasOutstandingEstimates(for strokeID: UUID) -> Bool
     /// A render was asked for before the surface has a size: lay the view out, which sizes it.
@@ -63,8 +63,36 @@ struct FillStats: Equatable {
     var jobs = 0
     var tilesFilled = 0
     var tilesRestored = 0
-    /// Wall time of the render jobs, in milliseconds.
+    /// Wall time during which any of the coordinator's tile fills was running, in milliseconds.
     var milliseconds = 0.0
+}
+
+/// Time spans (uptime nanoseconds), merged where they overlap: how long anything was running when many
+/// jobs ran side by side.
+struct BusyIntervals {
+    private(set) var spans: [ClosedRange<UInt64>] = []
+    /// The length of the oldest spans, no longer kept (jobs report in roughly the order they ran).
+    private var folded: UInt64 = 0
+
+    /// The total length of the spans, in milliseconds.
+    var milliseconds: Double {
+        Double(spans.reduce(folded) { $0 + ($1.upperBound - $1.lowerBound) }) / 1e6
+    }
+
+    mutating func add(_ span: ClosedRange<UInt64>) {
+        var merged = span
+        spans.removeAll { other in
+            guard other.overlaps(merged) else { return false }
+            merged = min(other.lowerBound, merged.lowerBound) ... max(other.upperBound, merged.upperBound)
+            return true
+        }
+        let i = spans.firstIndex { $0.lowerBound > merged.lowerBound } ?? spans.endIndex
+        spans.insert(merged, at: i)
+        while spans.count > 64 {
+            let oldest = spans.removeFirst()
+            folded += oldest.upperBound - oldest.lowerBound
+        }
+    }
 }
 
 /// The committed side of a canvas (NOT-100), drawn as page-space tiles (NOT-102): which tiles the view
@@ -100,11 +128,43 @@ final class RenderCoordinator {
     private(set) var displayedLevel: TileLevel?
     /// The last transform the tiles were laid out at while showing its own level.
     private(set) var displayedTransform = ViewTransform()
-    /// True while a render job is running on the render queue.
-    private(set) var isRendering = false
-    private var renderRequested = false
-    private var cancellation = RenderCancellation()
+    /// Where render work runs: tile fills, finished strokes, the zoom panel, rasters, geometry warm-up.
+    let scheduler: RenderScheduler
+    /// The tile fills submitted and not published yet, by tile: the job and the revision it draws.
+    private var fills: [TileKey: FillTicket] = [:]
+    private struct FillTicket {
+        let job: RenderJob
+        let revision: Int
+        let serial: Int
+    }
+
+    private var nextTicket = 0
+    /// True while tile fills are on their way.
+    var isFilling: Bool {
+        !fills.isEmpty
+    }
+
+    /// Cancelled when the coordinator goes: every job it submitted is dropped.
+    private let lifetime = RenderCancellation()
+    /// Cancelled by `discardInFlight`: the fills submitted until then.
+    private var cancellation: RenderCancellation
+    /// Whether the scheduler has been told this view is in a gesture.
+    private var reportedMoving = false
+    /// Finished strokes drawn into the tiles they reach since recent fills started, oldest first: a fill that
+    /// left one out (it was waiting) and doesn't reach it shows the stroke's revision as well.
+    private var strokeLog: [LoggedStroke] = []
+    /// A finished stroke drawn into the tiles: it took tiles from one revision to the next, in its reach.
+    private struct LoggedStroke {
+        let from: Int
+        let to: Int
+        let reach: CGRect
+    }
+
+    /// Finished strokes being drawn into the cached tiles they reach, by one job, in order.
+    private var drawing: [PendingStroke] = []
     private(set) var fillStats = FillStats()
+    /// When the fills counted in `fillStats` were running, merged: their wall time.
+    private var busy = BusyIntervals()
     /// The page's revision at the last `invalidate`: one with the same revision changed ink the revision
     /// doesn't account for.
     private var lastInvalidatedRevision = -1
@@ -150,11 +210,20 @@ final class RenderCoordinator {
         contentVersion &+= 1
     }
 
-    private var modifiedSinceSnapshot = Set<UUID>()
-    /// Strokes whose geometry was dropped while `warmGeometry` was building it in the background.
-    private var modifiedSinceWarmup = Set<UUID>()
+    /// Goes up each time a stroke's geometry is dropped; `modified` says when each was. Geometry a job built
+    /// from an older snapshot of a stroke changed since isn't kept.
+    private var geometryGeneration = 0
+    private var modified: [UUID: Int] = [:]
+    /// Geometry warm-up jobs under way, and zoom panel renders: both keep geometry built from a snapshot.
+    private var warming = 0
+    private var snapshotsInFlight = 0
+    /// A tile was restored from the page's raster, which builds no geometry: build it in the background.
+    private var needsWarmGeometry = false
+    /// A fill landed showing a revision the page has moved on from: ask for its tile again after the batch.
+    private var needsRefill = false
+    /// The geometry the fills of this generation share and build.
+    private var fillStore: GeometryStore?
 
-    private let renderQueue = DispatchQueue(label: "InkCanvas.render", qos: .userInteractive)
     private(set) var pixelSize = CGSize.zero
     /// Device pixels per point of the surface.
     private(set) var scale: CGFloat = 2
@@ -168,11 +237,13 @@ final class RenderCoordinator {
     private let panelInterest = NSObject()
 
     init(document: CanvasDocument, embedded: Bool, cache: TileCache = .shared,
-         filler: TileFiller = CoreGraphicsTileFiller()) {
+         filler: TileFiller = CoreGraphicsTileFiller(), scheduler: RenderScheduler = .shared) {
         self.document = document
         isEmbedded = embedded
         self.cache = cache
         self.filler = filler
+        self.scheduler = scheduler
+        cancellation = RenderCancellation(parent: lifetime)
         layer.anchorPoint = .zero
         fallbackHost.anchorPoint = .zero
         fallbackMask.fillRule = .evenOdd
@@ -184,6 +255,8 @@ final class RenderCoordinator {
     }
 
     deinit {
+        lifetime.cancel()
+        scheduler.setGesture(false, for: ObjectIdentifier(self))
         cache.removeInterest(ObjectIdentifier(self))
         cache.removeInterest(ObjectIdentifier(panelInterest))
     }
@@ -214,14 +287,19 @@ final class RenderCoordinator {
 
     /// True when the committed layer shows the page as it is, sharp at the current transform: the tiles
     /// on screen are at the transform's own level, every one in view shows the page's revision, and no
-    /// render or finished stroke is on its way. What the canvas benchmarks wait for after an edit, a
-    /// gesture or a page entering view.
+    /// fill of a tile in view or finished stroke is on its way. Fills of the margin around the view may
+    /// still be running (`isFilling`): they change nothing on screen. What the canvas benchmarks wait for
+    /// after an edit, a gesture or a page entering view.
     var isSettled: Bool {
-        guard !isRendering, !renderRequested, pending.isEmpty, pixelSize != .zero else { return false }
+        guard pending.isEmpty, pixelSize != .zero else { return false }
         let t = transform, want = level(for: t)
         guard displayedLevel == want, displayedTransform == t else { return false }
         let editing = host?.isEditingInk ?? false
-        return cache.tiles(for: visibleKeys(at: t, level: want)).allSatisfy {
+        let keys = visibleKeys(at: t, level: want)
+        if !fills.isEmpty, keys.contains(where: { fills[$0] != nil }) {
+            return false
+        }
+        return cache.tiles(for: keys).allSatisfy {
             $0?.revision == document.revision || (editing && $0?.revision == editLabel)
         }
     }
@@ -301,6 +379,7 @@ final class RenderCoordinator {
     /// the resting level's under them where they're missing. Switches to the transform's own level once
     /// its tiles in view are all cached (never mid-gesture at a moving scale).
     func updateLayerTransform() {
+        reportMoving()
         guard pixelSize != .zero else { return }
         let t = transform, want = level(for: t)
         if displayedLevel != want, displayedLevel == nil || !(host?.isMoving ?? false),
@@ -346,6 +425,14 @@ final class RenderCoordinator {
         if changed {
             host?.renderCoordinatorDidPublish()
         }
+    }
+
+    /// Tells the scheduler when the view starts or stops moving: fewer jobs run at once during a gesture.
+    private func reportMoving() {
+        let moving = host?.isMoving ?? false
+        guard moving != reportedMoving else { return }
+        reportedMoving = moving
+        scheduler.setGesture(moving, for: ObjectIdentifier(self))
     }
 
     /// The cached tiles of `level` in view at `transform`, and whether every one in view is cached.
@@ -458,8 +545,15 @@ final class RenderCoordinator {
     /// Drops a stroke's cached geometry after the stroke changed.
     func forgetGeometry(_ id: UUID) {
         geometryCache[id] = nil
-        modifiedSinceSnapshot.insert(id)
-        modifiedSinceWarmup.insert(id)
+        geometryGeneration += 1
+        modified[id] = geometryGeneration
+    }
+
+    /// Keeps geometry a job built from the strokes as they were at `generation`, for strokes unchanged since.
+    private func keep(_ built: [(UUID, StrokeGeometry)], from generation: Int) {
+        for (id, geometry) in built where geometryCache[id] == nil && (modified[id] ?? -1) <= generation {
+            geometryCache[id] = geometry
+        }
     }
 
     func geometry(for stroke: Stroke) -> StrokeGeometry {
@@ -504,7 +598,8 @@ final class RenderCoordinator {
     }
 
     /// Asks for the committed ink sharp at the host's current transform: lays out what's cached and fills
-    /// what's missing or stale in view (then a tile's margin around it), coalesced with a job running.
+    /// what's missing or stale in view (then a tile's margin around it). Fills already on their way for the
+    /// same tiles and revision carry on; the rest are cancelled.
     func requestRender() {
         // No surface for this size yet (a new view, or one just resized): sizing it (`resize`) renders.
         guard pixelSize != .zero, pixelSize == Self.pixelSize(of: bounds.size, scale: scale) else {
@@ -512,20 +607,17 @@ final class RenderCoordinator {
             return
         }
         updateLayerTransform()
-        if isRendering {
-            renderRequested = true
-        } else {
-            startRender()
-        }
+        startRender()
     }
 
-    /// Stops the tiles of jobs under way that haven't started yet: what they'd draw is out of date (a
-    /// cancelled gesture's transform, a page that changed under them). What they did draw is kept, as
-    /// every tile records the revision it shows.
+    /// Cancels the fills on their way: what they'd draw is out of date (a cancelled gesture's transform, a
+    /// page that changed under them). None of them publishes; what's already published is kept, as every
+    /// tile records the revision it shows. Finished strokes still land.
     func discardInFlight() {
         contentChanged()
         cancellation.cancel()
-        cancellation = RenderCancellation()
+        cancellation = RenderCancellation(parent: lifetime)
+        fills.removeAll()
     }
 
     /// The revision the tiles a job fills now will show: the page's, or when finished strokes are
@@ -544,6 +636,9 @@ final class RenderCoordinator {
         return revision == document.revision ? first.revisionBefore : Tile.unknownRevision
     }
 
+    /// Works out the tiles to fill for the current transform and submits a job for each one not already on
+    /// its way, from the middle out: tiles under the Pencil first, then those in view, then the margin.
+    /// Fills for tiles no longer wanted, or drawing a revision that's moved on, are cancelled.
     private func startRender() {
         let t = transform, want = level(for: t)
         // Nothing new since the last request covering these tiles: they're filled or being filled.
@@ -556,6 +651,7 @@ final class RenderCoordinator {
         // Nothing is filled at a scale still changing: the last level is shown scaled.
         if host?.isMoving ?? false, let shown = displayedLevel, shown != want {
             cache.setInterest(ObjectIdentifier(self), page: page, visible: shownKeys, resting: resting)
+            cancelFills { key, _ in key.level != shown }
             return
         }
         let visible = visibleKeys(at: t, level: want, centreOut: true)
@@ -565,82 +661,120 @@ final class RenderCoordinator {
         let wanted = visible + margin
         cache.setInterest(ObjectIdentifier(self), page: page, visible: shownKeys.union(wanted), resting: resting)
         let current = document.revision
-        let keys = zip(wanted, cache.tiles(for: wanted)).compactMap { key, tile -> TileKey? in
+        let stale = zip(wanted, cache.tiles(for: wanted)).compactMap { key, tile -> TileKey? in
             guard let tile else { return key }
             if tile.revision == current || (revision != Tile.unknownRevision && tile.revision == revision) {
                 return nil
             }
             return key
         }
-        guard !keys.isEmpty else { return }
+        let staleSet = Set(stale)
+        // Fills of tiles no longer wanted are dropped, running or not. Queued fills of an older revision are
+        // dropped and submitted again; a running one finishes, since its pixels are newer than those on
+        // screen (a dense fitted tile takes 100–250 ms, and an erase changes the page faster than that),
+        // and its tile is refilled once it lands (`needsRefill`).
+        cancelFills { key, ticket in
+            !staleSet.contains(key) || (ticket.revision != revision && !scheduler.hasStarted(ticket.job))
+        }
+        guard !stale.isEmpty else { return }
 
-        isRendering = true
-        modifiedSinceSnapshot.removeAll()
-        let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: geometryCache,
+        let inView = Set(visible)
+        let pencil = host?.pencilLocation
+        let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:],
                                    skipped: Set(waiting.map(\.live.stroke.id)))
-        let raster = document.tileRaster
-        let token = cancellation
-        let job = FillJob(keys: keys, ink: snapshot, revision: revision, raster: raster, cache: cache, filler: filler,
-                          cancellation: token)
-        renderQueue.async { [weak self] in
-            let result = Self.fill(job)
-            DispatchQueue.main.async { [weak self] in
-                self?.renderDidLand(result)
+        // One store per geometry generation: a new one shares the cache's storage, so the cache's next change
+        // copies it (on the main thread), and stores made per request would do that every pan frame.
+        let store: GeometryStore
+        if let reused = fillStore, reused.generation == geometryGeneration {
+            store = reused
+        } else {
+            store = GeometryStore(geometry: geometryCache, generation: geometryGeneration)
+            fillStore = store
+        }
+        let source = FillSource(ink: snapshot, store: store, revision: revision, raster: document.tileRaster,
+                                filler: filler)
+        var jobs: [RenderJob] = []
+        for (rank, key) in stale.enumerated() {
+            let priority: RenderPriority = pencil.map { key.rect.insetBy(dx: -8, dy: -8).contains($0) } == true
+                ? .underPencil : inView.contains(key) ? .visible : .margin
+            if let ticket = fills[key] {
+                if ticket.revision == revision {
+                    scheduler.reprioritise(ticket.job, to: priority, rank: Double(rank))
+                }
+                continue
             }
+            let job = fillJob(key, from: source, priority: priority, rank: Double(rank))
+            jobs.append(job)
+        }
+        scheduler.submit(jobs)
+    }
+
+    /// Cancels the fills `drop` picks.
+    private func cancelFills(where drop: (TileKey, FillTicket) -> Bool) {
+        for (key, ticket) in fills where drop(key, ticket) {
+            ticket.job.cancel()
+            fills[key] = nil
         }
     }
 
-    /// What a render job draws: these tiles, from this ink, labelled with this revision.
-    private struct FillJob: @unchecked Sendable { // immutable; the filler and cache are thread-safe
-        let keys: [TileKey]
+    /// What a tile's fill job hands back to be published.
+    private struct FillOutput {
+        let tile: Tile
+        let restored: Bool
+        let span: ClosedRange<UInt64>
+    }
+
+    /// What tiles are filled from: the ink, the geometry the jobs share, the revision they're labelled with,
+    /// the page raster to restore from, and the filler.
+    private struct FillSource: @unchecked Sendable { // immutable; the store, raster and filler are thread-safe
         let ink: InkSnapshot
+        let store: GeometryStore
         let revision: Int
         let raster: TileRaster?
-        let cache: TileCache
         let filler: TileFiller
-        let cancellation: RenderCancellation
     }
 
-    /// What a render job did.
-    private struct FillResult {
-        var filled = 0
-        var restored = 0
-        var geometry: [(UUID, StrokeGeometry)] = []
-        var milliseconds = 0.0
+    /// A job filling `key` from `source` (or restoring it from the page's raster), and publishing it into the
+    /// cache unless it was cancelled.
+    private func fillJob(_ key: TileKey, from source: FillSource, priority: RenderPriority, rank: Double) -> RenderJob {
+        nextTicket += 1
+        let serial = nextTicket
+        let job = RenderJob(priority: priority, rank: rank, cancellation: cancellation, work: { job in
+            Self.fill(key, from: source, isCancelled: { job.isCancelled })
+        }, publish: { [weak self] (output: FillOutput?) in
+            self?.fillDidLand(key, serial: serial, output: output, store: source.store)
+        })
+        fills[key] = FillTicket(job: job, revision: source.revision, serial: serial)
+        return job
     }
 
-    /// Fills the job's tiles (or restores them from its raster) into its cache, on every core. Render
-    /// queue only.
-    private nonisolated static func fill(_ job: FillJob) -> FillResult {
-        let keys = job.keys, revision = job.revision, raster = job.raster, cache = job.cache
-        let filler = job.filler, cancellation = job.cancellation
+    /// Fills (or restores) one tile. A worker thread; nil if cancelled part way.
+    private nonisolated static func fill(_ key: TileKey, from source: FillSource,
+                                         isCancelled: () -> Bool) -> FillOutput? {
+        let ink = source.ink, store = source.store, revision = source.revision, raster = source.raster
+        let filler = source.filler
         let start = DispatchTime.now().uptimeNanoseconds
-        var result = FillResult()
-        var toFill: [TileKey] = []
-        for key in keys {
-            if let raster, raster.holds(key, revision: revision), let tile = raster.restore(key) {
-                cache.storeIfNewer(tile, for: key)
-                result.restored += 1
+        var restored = false
+        let tile: Tile
+        if let raster, raster.holds(key, revision: revision), let held = raster.restore(key) {
+            tile = held
+            restored = true
+        } else {
+            guard let strokes = ink.drawable(in: key.rect, store: store, isCancelled: isCancelled) else { return nil }
+            if strokes.isEmpty {
+                tile = Tile(image: nil, revision: revision)
             } else {
-                toFill.append(key)
+                guard let ctx = TileBitmap.context(for: key) else { return nil }
+                filler.fill(key, region: nil, strokes: strokes, into: ctx, isCancelled: isCancelled)
+                guard !isCancelled() else { return nil }
+                tile = Tile(image: ctx.makeImage(), revision: revision)
             }
         }
-        if !toFill.isEmpty {
-            var snapshot = job.ink
-            result.geometry = snapshot.buildGeometry(reaching: toFill.map(\.rect))
-            let ink = snapshot
-            DispatchQueue.concurrentPerform(iterations: toFill.count) { i in
-                guard !cancellation.isCancelled else { return }
-                let key = toFill[i]
-                cache.storeIfNewer(Self.draw(key, from: ink, revision: revision, filler: filler), for: key)
-            }
-            result.filled = cancellation.isCancelled ? 0 : toFill.count
-        }
-        result.milliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
-        return result
+        return FillOutput(tile: tile, restored: restored, span: start ... DispatchTime.now().uptimeNanoseconds)
     }
 
-    /// `key`'s tile drawn from scratch: the strokes the index finds reaching it, in page order.
+    /// `key`'s tile drawn from scratch: the strokes the index finds reaching it, in page order (their
+    /// geometry already in `ink`).
     nonisolated static func draw(_ key: TileKey, from ink: InkSnapshot, revision: Int, filler: TileFiller) -> Tile {
         let strokes = ink.drawable(in: key.rect)
         guard !strokes.isEmpty, let ctx = TileBitmap.context(for: key) else {
@@ -650,23 +784,66 @@ final class RenderCoordinator {
         return Tile(image: ctx.makeImage(), revision: revision)
     }
 
-    private func renderDidLand(_ result: FillResult) {
-        isRendering = false
-        contentChanged()
-        for (id, geometry) in result.geometry where geometryCache[id] == nil && !modifiedSinceSnapshot.contains(id) {
-            geometryCache[id] = geometry
+    /// A tile's fill was published (or dropped): keeps the tile unless the fill was superseded, then lays
+    /// the tiles out once for the whole batch.
+    private func fillDidLand(_ key: TileKey, serial: Int, output: FillOutput?, store: GeometryStore) {
+        keep(store.takeBuilt(), from: store.generation)
+        guard fills[key]?.serial == serial else { return } // cancelled, or superseded by another fill
+        fills[key] = nil
+        if let output {
+            let revision = advanced(output.tile.revision, for: key)
+            cache.storeIfNewer(Tile(image: output.tile.image, revision: revision), for: key)
+            if revision != document.revision, revision != editLabel {
+                needsRefill = true
+            }
+            busy.add(output.span)
+            fillStats.jobs += 1
+            if output.restored {
+                fillStats.tilesRestored += 1
+                needsWarmGeometry = true
+            } else {
+                fillStats.tilesFilled += 1
+            }
+            fillStats.milliseconds = busy.milliseconds
         }
-        fillStats.jobs += 1
-        fillStats.tilesFilled += result.filled
-        fillStats.tilesRestored += result.restored
-        fillStats.milliseconds += result.milliseconds
+        contentChanged()
+        scheduler.afterBatch(self) { [weak self] in self?.batchDidLand() }
+    }
+
+    /// A fill labelled `revision` left out finished strokes drawn since (it started while they waited):
+    /// where none of them reaches `key`, the tile shows their revision too.
+    private func advanced(_ revision: Int, for key: TileKey) -> Int {
+        var revision = revision
+        for entry in strokeLog where entry.from == revision && !key.rect.intersects(entry.reach) {
+            revision = entry.to
+        }
+        return revision
+    }
+
+    /// The tiles published in a batch are laid out together; then anything still stale in view is asked for.
+    private func batchDidLand() {
         updateLayerTransform()
-        if result.restored > 0 {
+        if needsWarmGeometry {
+            needsWarmGeometry = false
             warmGeometry()
         }
-        if renderRequested {
-            renderRequested = false
-            startRender()
+        let refill = needsRefill
+        needsRefill = false
+        if fills.isEmpty {
+            if warming == 0, snapshotsInFlight == 0 {
+                modified.removeAll()
+            }
+            if !strokeLog.isEmpty, drawing.isEmpty {
+                strokeLog.removeAll()
+            }
+        }
+        guard !isSettled else { return }
+        if refill {
+            // A fill that kept running after the page moved on landed: fill its tile again.
+            requestRender()
+        } else if fills.isEmpty, !pending.contains(where: { !$0.submitted }), !(host?.isEditingInk ?? false) {
+            // A fill that lost a race with a finished stroke shows no revision: draw it again.
+            requestRender()
         }
     }
 
@@ -742,59 +919,108 @@ final class RenderCoordinator {
         }
     }
 
-    /// Draws a finished stroke into every cached tile of the page it reaches, at every level, on the render
-    /// queue. No cached tile has it yet (fills leave unsubmitted strokes out, and run in order with this),
-    /// so drawing it on top is what filling the tile again would give, and it never blinks. Tiles it
-    /// doesn't reach show the new revision as they are.
+    /// Marks a finished stroke ready to be drawn into the tiles it reaches, with its final geometry.
     private func submitPendingStroke(_ item: PendingStroke) {
         item.submitted = true
         let geom = item.live.geometry()
         item.geometry = geom
         item.bounds = geom.bounds
         geometryCache[item.live.stroke.id] = geom
-        let stroke = TileStroke(geometry: geom, brush: item.live.stroke.brush, color: item.live.stroke.color)
-        let from = item.revisionBefore
-        let to = item.revisionAfter >= 0 ? item.revisionAfter : Tile.unknownRevision
-        let reach = geom.bounds.insetBy(dx: -3, dy: -3)
-        let cache = cache, filler = filler, page = page
-
-        renderQueue.async { [weak self] in
-            let reached = cache.tiles(page: page).filter { $0.key.rect.intersects(reach) }.map { ($0.key, $0.value) }
-            DispatchQueue.concurrentPerform(iterations: reached.count) { i in
-                let (key, tile) = reached[i]
-                // Filled after the stroke was added (before it was handed over): it's in there already.
-                if to != Tile.unknownRevision, tile.revision >= to {
-                    return
-                }
-                let revision = tile.revision == from ? to : Tile.unknownRevision
-                if tile.image == nil, stroke.brush.erases {
-                    cache.store(Tile(image: nil, revision: revision), for: key)
-                    return
-                }
-                guard let ctx = TileBitmap.context(for: key, startingFrom: tile.image) else { return }
-                filler.fill(key, region: nil, strokes: [stroke], into: ctx)
-                cache.store(Tile(image: ctx.makeImage(), revision: revision), for: key)
-            }
-            cache.advance(page: page, from: from, to: to, outside: reach)
-            DispatchQueue.main.async { [weak self] in
-                self?.pendingDidLand(item, bounds: geom.bounds)
-            }
-        }
+        drawSubmittedStrokes()
     }
 
-    private func pendingDidLand(_ item: PendingStroke, bounds: CGRect) {
+    /// A finished stroke as its job draws it.
+    private struct SentStroke {
+        let stroke: TileStroke
+        let log: LoggedStroke
+    }
+
+    /// What a finished-stroke job did to one tile: the tile it started from, and the tile with the strokes.
+    private struct StrokeDraw {
+        let key: TileKey
+        let base: Tile
+        let drawn: Tile
+    }
+
+    /// Draws the finished strokes sent to be drawn into every cached tile of the page they reach, at every
+    /// level, in one job ahead of fills (`underPencil`), one batch at a time so they land in order. No
+    /// cached tile has them yet (fills leave unsent strokes out), so drawing them on top is what filling
+    /// the tile again would give, and they never blink. Tiles they don't reach show the new revision as
+    /// they are.
+    private func drawSubmittedStrokes() {
+        guard drawing.isEmpty else { return }
+        let batch = pending.filter(\.submitted)
+        guard !batch.isEmpty else { return }
+        drawing = batch
+        let strokes = batch.map { item in
+            SentStroke(stroke: TileStroke(geometry: item.geometry, brush: item.live.stroke.brush,
+                                          color: item.live.stroke.color),
+                       log: LoggedStroke(from: item.revisionBefore,
+                                         to: item.revisionAfter >= 0 ? item.revisionAfter : Tile.unknownRevision,
+                                         reach: item.geometry.bounds.insetBy(dx: -3, dy: -3)))
+        }
+        let reach = strokes.reduce(CGRect.null) { $0.union($1.log.reach) }
+        let reached = cache.tiles(page: page).filter { $0.key.rect.intersects(reach) }
+        let filler = filler
+        let job = RenderJob(priority: .underPencil, cancellation: lifetime, work: { _ -> [StrokeDraw]? in
+            reached.compactMap { key, base -> StrokeDraw? in
+                var tile = base
+                for s in strokes where s.log.reach.intersects(key.rect) {
+                    // Filled after the stroke was added (before it was sent): it's in there already.
+                    if s.log.to != Tile.unknownRevision, tile.revision >= s.log.to {
+                        continue
+                    }
+                    let revision = tile.revision == s.log.from ? s.log.to : Tile.unknownRevision
+                    if tile.image == nil, s.stroke.brush.erases {
+                        tile = Tile(image: nil, revision: revision)
+                        continue
+                    }
+                    guard let ctx = TileBitmap.context(for: key, startingFrom: tile.image) else { return nil }
+                    filler.fill(key, region: nil, strokes: [s.stroke], into: ctx)
+                    tile = Tile(image: ctx.makeImage(), revision: revision)
+                }
+                return StrokeDraw(key: key, base: base, drawn: tile)
+            }
+        }, publish: { [weak self] (draws: [StrokeDraw]?) in
+            self?.strokesDidLand(batch, draws: draws ?? [], log: strokes.map(\.log))
+        })
+        scheduler.submit(job)
+    }
+
+    private func strokesDidLand(_ batch: [PendingStroke], draws: [StrokeDraw],
+                                log: [LoggedStroke]) {
+        drawing = []
+        for draw in draws {
+            // A fill published since the job read the tile: keep it if it has the strokes, else mark it stale.
+            let held = cache.tile(for: draw.key)
+            if held?.revision == draw.base.revision, held?.image === draw.base.image {
+                cache.store(draw.drawn, for: draw.key)
+            } else if let held, draw.drawn.revision < 0 || held.revision < draw.drawn.revision {
+                cache.store(Tile(image: held.image, revision: Tile.unknownRevision), for: draw.key)
+            }
+        }
+        for entry in log {
+            cache.advance(page: page, from: entry.from, to: entry.to, outside: entry.reach)
+            if entry.from >= 0, entry.to >= 0 {
+                strokeLog.append(entry)
+            }
+        }
+        if strokeLog.count > 64 {
+            strokeLog.removeFirst(strokeLog.count - 64)
+        }
         contentChanged()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if let index = pending.firstIndex(where: { $0 === item }) {
-            pending.remove(at: index)
-        }
+        pending.removeAll { item in batch.contains { $0 === item } }
         updateLayerTransform()
-        host?.renderCoordinatorDidDrawPending(canvasRect: bounds)
+        for item in batch {
+            host?.renderCoordinatorDidDrawPending(canvasRect: item.bounds)
+        }
         CATransaction.commit()
-        // Tiles filled while the stroke waited, after something else changed too, show no revision: draw
+        drawSubmittedStrokes()
+        // Tiles filled while the strokes waited, after something else changed too, show no revision: draw
         // them again now that nothing is left out.
-        if !isSettled, !isRendering, !pending.contains(where: { !$0.submitted }), !(host?.isEditingInk ?? false) {
+        if !isSettled, drawing.isEmpty, !pending.contains(where: { !$0.submitted }), !(host?.isEditingInk ?? false) {
             requestRender()
         }
     }
@@ -802,20 +1028,28 @@ final class RenderCoordinator {
     // MARK: - Page raster
 
     /// Builds, in the background, the geometry of every stroke that has none cached: a page opened from
-    /// its raster drew none, and erasing, the lasso and the next refill all need it.
+    /// its raster drew none, and erasing, the lasso and the next refill all need it. In chunks, at
+    /// background priority, so it never holds up a fill.
     private func warmGeometry() {
         let strokes = document.strokes.filter { geometryCache[$0.id] == nil }
-        guard !strokes.isEmpty else { return }
-        modifiedSinceWarmup.removeAll()
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let geometries = CommittedRenderer.geometries(for: strokes)
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                for (stroke, geometry) in zip(strokes, geometries)
-                    where geometryCache[stroke.id] == nil && !modifiedSinceWarmup.contains(stroke.id) {
-                    geometryCache[stroke.id] = geometry
+        guard !strokes.isEmpty, warming == 0 else { return }
+        let generation = geometryGeneration
+        let chunk = 256
+        for start in stride(from: 0, to: strokes.count, by: chunk) {
+            let part = Array(strokes[start ..< min(start + chunk, strokes.count)])
+            warming += 1
+            scheduler.submit(RenderJob(priority: .background, cancellation: lifetime, work: { job in
+                var built: [(UUID, StrokeGeometry)] = []
+                for stroke in part {
+                    guard !job.isCancelled else { return nil }
+                    built.append((stroke.id, StrokeRenderer.geometry(for: stroke)))
                 }
-            }
+                return built
+            }, publish: { [weak self] (built: [(UUID, StrokeGeometry)]?) in
+                guard let self else { return }
+                warming -= 1
+                keep(built ?? [], from: generation)
+            }))
         }
     }
 
@@ -829,29 +1063,35 @@ final class RenderCoordinator {
               document.strokes.contains(where: { !$0.brush.erases })
         else { return }
         let keys = TileKey.keys(covering: document.pageBounds, page: page, level: level)
-        let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: geometryCache,
-                                   skipped: [])
-        let cache = cache, filler = filler
-        DispatchQueue.global(qos: .utility).async {
+        let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:], skipped: [])
+        let source = FillSource(ink: snapshot, store: GeometryStore(geometry: geometryCache), revision: revision,
+                                raster: nil, filler: filler)
+        let cache = cache
+        // Not cancelled with the canvas: the page raster outlives it.
+        scheduler.submit(RenderJob(priority: .otherLevel, work: { job -> (TileRaster, [(TileKey, Tile)])? in
             let held = cache.tiles(for: keys)
-            let missing = zip(keys, held).filter { $0.1?.revision != revision }.map(\.0)
-            var ink = snapshot
-            _ = ink.buildGeometry(reaching: missing.map(\.rect))
-            let filled = ink
-            var drawn = [TileKey: Tile]()
-            let lock = NSLock()
-            DispatchQueue.concurrentPerform(iterations: missing.count) { i in
-                let tile = Self.draw(missing[i], from: filled, revision: revision, filler: filler)
-                cache.storeIfNewer(tile, for: missing[i])
-                lock.withLock { drawn[missing[i]] = tile }
+            var drawn: [(TileKey, Tile)] = []
+            var tiles: [(key: TileKey, image: CGImage?)] = []
+            for (key, tile) in zip(keys, held) {
+                if let tile, tile.revision == revision {
+                    tiles.append((key, tile.image))
+                    continue
+                }
+                guard let fill = Self.fill(key, from: source, isCancelled: { job.isCancelled })
+                else { return nil }
+                drawn.append((key, fill.tile))
+                tiles.append((key, fill.tile.image))
             }
-            let tiles = zip(keys, held).map { key, tile in (key: key, image: (drawn[key] ?? tile)?.image) }
-            let raster = TileRaster(tiles: tiles, revision: revision, level: level)
-            DispatchQueue.main.async {
-                guard let raster, document.revision == raster.revision else { return }
+            return TileRaster(tiles: tiles, revision: revision, level: level).map { ($0, drawn) }
+        }, publish: { (output: (TileRaster, [(TileKey, Tile)])?) in
+            guard let (raster, drawn) = output else { return }
+            for (key, tile) in drawn {
+                cache.storeIfNewer(tile, for: key)
+            }
+            if document.revision == raster.revision {
                 document.tileRaster = raster
             }
-        }
+        }))
     }
 
     // MARK: - Snapshots (the zoom window's panel)
@@ -859,9 +1099,10 @@ final class RenderCoordinator {
     /// The committed ink that reaches `bounds` (view points of an image of their own) at `transform`,
     /// assembled from the page's tiles at that scale (filled where they're missing), handed to
     /// `completion` on the main queue with the transform it's drawn at: `transform` with its offset on
-    /// whole device pixels, so the tiles land on the image's pixels.
+    /// whole device pixels, so the tiles land on the image's pixels. A newer request supersedes one not
+    /// published yet, whose completion is then never called.
     func renderSnapshot(bounds: CGRect, transform: ViewTransform,
-                        completion: @escaping (CGImage?, ViewTransform) -> Void) {
+                        completion: @escaping @MainActor (CGImage?, ViewTransform) -> Void) {
         let scale = scale
         let t = transform.snapped(toPixels: scale)
         let level = level(for: t)
@@ -871,31 +1112,43 @@ final class RenderCoordinator {
         let revision = (host?.isEditingInk ?? false) ? Tile.unknownRevision : document.revision
         // The panel shows every stroke at once, waiting ones too; tiles like that aren't the canvas's to keep.
         let keeps = revision != Tile.unknownRevision && !pending.contains { !$0.submitted }
-        let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: geometryCache,
-                                   skipped: [])
-        let cache = cache, filler = filler
-        renderQueue.async {
-            let held = cache.tiles(for: keys)
-            let missing = zip(keys, held).filter { $0.1 == nil || $0.1?.revision != revision || !keeps }.map(\.0)
-            var ink = snapshot
-            _ = ink.buildGeometry(reaching: missing.map(\.rect))
-            var tiles = Dictionary(uniqueKeysWithValues: zip(keys, held).compactMap { key, tile in tile.map { (key, $0) } })
-            for key in missing {
-                let tile = Self.draw(key, from: ink, revision: revision, filler: filler)
-                tiles[key] = tile
-                if keeps {
-                    cache.storeIfNewer(tile, for: key)
-                }
-            }
-            var image: CGImage?
-            if let ctx = CommittedRenderer.makeBitmap(pixelSize: pixels, scale: scale) {
-                TileBitmap.compose(tiles.compactMap { key, tile in tile.image.map { (key, $0) } }, at: t, in: ctx)
-                image = ctx.makeImage()
-            }
-            DispatchQueue.main.async {
-                completion(image, t)
-            }
-        }
+        let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:], skipped: [])
+        let store = GeometryStore(geometry: geometryCache, generation: geometryGeneration)
+        let source = FillSource(ink: snapshot, store: store, revision: revision, raster: nil, filler: filler)
+        let cache = cache
+        let job = RenderJob(priority: .visible, coalescingKey: ObjectIdentifier(panelInterest), cancellation: lifetime,
+                            work: { job -> (CGImage?, [(TileKey, Tile)])? in
+                                let held = cache.tiles(for: keys)
+                                var tiles: [(key: TileKey, image: CGImage)] = []
+                                var drawn: [(TileKey, Tile)] = []
+                                for (key, tile) in zip(keys, held) {
+                                    if let tile, tile.revision == revision, keeps {
+                                        tile.image.map { tiles.append((key, $0)) }
+                                        continue
+                                    }
+                                    guard let fill = Self.fill(key, from: source, isCancelled: { job.isCancelled })
+                                    else { return nil }
+                                    fill.tile.image.map { tiles.append((key, $0)) }
+                                    if keeps {
+                                        drawn.append((key, fill.tile))
+                                    }
+                                }
+                                guard let ctx = CommittedRenderer.makeBitmap(pixelSize: pixels, scale: scale) else {
+                                    return (nil, drawn)
+                                }
+                                TileBitmap.compose(tiles, at: t, in: ctx)
+                                return (ctx.makeImage(), drawn)
+                            }, publish: { [weak self] (output: (CGImage?, [(TileKey, Tile)])?) in
+                                self?.snapshotsInFlight -= 1
+                                self?.keep(store.takeBuilt(), from: store.generation)
+                                guard let output else { return }
+                                for (key, tile) in output.1 {
+                                    cache.storeIfNewer(tile, for: key)
+                                }
+                                completion(output.0, t)
+                            })
+        snapshotsInFlight += 1
+        scheduler.submit(job)
     }
 
     /// Lets the cache evict the panel's tiles (the zoom window closed).

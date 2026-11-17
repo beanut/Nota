@@ -49,8 +49,9 @@ final class CanvasView: UIView {
     /// The committed ink: its surface, geometry cache, strokes waiting to be drawn and render requests.
     let coordinator: RenderCoordinator
     /// True when the committed layer shows the page as it is, sharp at the current transform: its tiles in
-    /// view are at the transform's own level and the page's revision, and no render or finished stroke is
-    /// on its way. What the canvas benchmarks wait for after an edit, a gesture or a page entering view.
+    /// view are at the transform's own level and the page's revision, and no fill of a tile in view or
+    /// finished stroke is on its way (the margin around the view may still be filling). What the canvas benchmarks wait for after an edit,
+    /// a gesture or a page entering view.
     var rendersSettled: Bool {
         coordinator.isSettled
     }
@@ -155,8 +156,8 @@ final class CanvasView: UIView {
     var zoomBoxView: ZoomBoxOverlayView?
     var zoomGeneration: UInt64 = 0
     var zoomRenderScheduled = false
-    var zoomRenderInFlight = false
-    var zoomRenderRequested = false
+    /// The newest render of the panel shown so far: an older one landing later is dropped.
+    var zoomShownGeneration: UInt64 = 0
     /// Strokes that ended while the panel was showing, kept on the panel's live layer until a render of
     /// the box includes them, so they never blink out.
     var zoomHeld: [LiveStroke] = []
@@ -744,8 +745,8 @@ extension CanvasView: RenderCoordinatorHost {
         eraseSession != nil || lassoSession != nil
     }
 
-    var hasLiveStroke: Bool {
-        live != nil
+    var pencilLocation: CGPoint? {
+        live?.stroke.points.last?.location
     }
 
     func hasOutstandingEstimates(for strokeID: UUID) -> Bool {
