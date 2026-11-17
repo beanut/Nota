@@ -121,14 +121,10 @@ struct BusyIntervals {
 @MainActor
 final class RenderCoordinator {
     let document: CanvasDocument
-    /// True for one page among several in continuous scrolling: its raster keeps only the tiles it had.
+    /// True for one page among several in continuous scrolling: its raster keeps only the tiles it had, and
+    /// its whole-tile fills don't keep the geometry they build with the page (a page only scrolled past never
+    /// needs it again; what an edit builds is kept, NOT-108).
     let isEmbedded: Bool
-    /// Whether geometry built to fill whole tiles is kept (and, after tiles are restored, every stroke's
-    /// built ahead) for the erasers, the lasso and later refills. An embedded page doesn't: continuous
-    /// scrolling shows many pages, each one's geometry is ~170 MB when dense, and a page that's only
-    /// scrolled past never needs it once its tiles are cached (NOT-107). It keeps what an edit builds:
-    /// geometry asked for on the main thread and built for refilling part of a tile.
-    let keepsGeometry: Bool
     weak var host: RenderCoordinatorHost?
     let cache: TileCache
     let filler: TileFiller
@@ -246,24 +242,12 @@ final class RenderCoordinator {
         contentVersion &+= 1
     }
 
-    /// Goes up each time a stroke's geometry is dropped; `modified` says when each was. Geometry a job built
-    /// from an older snapshot of a stroke changed since isn't kept.
-    private var geometryGeneration = 0
-    private var modified: [UUID: Int] = [:]
-    /// Geometry warm-up jobs under way, and zoom panel renders: both keep geometry built from a snapshot.
-    private var warming = 0
-    private var snapshotsInFlight = 0
-    /// A tile was restored from the page's raster, which builds no geometry: build it in the background.
-    private var needsWarmGeometry = false
     /// A fill landed showing a revision the page has moved on from: ask for its tile again after the batch.
     private var needsRefill = false
-    /// The geometry the fills of this generation share and build.
-    private var fillStore: GeometryStore?
 
     private(set) var pixelSize = CGSize.zero
     /// Device pixels per point of the surface.
     private(set) var scale: CGFloat = 2
-    private(set) var geometryCache: [UUID: StrokeGeometry] = [:]
 
     /// Finished strokes not drawn into the committed ink yet, in commit order.
     private(set) var pending: [PendingStroke] = []
@@ -280,7 +264,6 @@ final class RenderCoordinator {
          reusingLayersOf previous: RenderCoordinator? = nil) {
         self.document = document
         isEmbedded = embedded
-        keepsGeometry = !embedded
         self.cache = cache
         self.filler = filler
         self.scheduler = scheduler
@@ -696,32 +679,35 @@ final class RenderCoordinator {
 
     // MARK: - Geometry
 
-    /// Drops a stroke's cached geometry after the stroke changed.
+    /// The page's stroke geometry, shared with every canvas showing it (NOT-108).
+    var geometry: PageGeometry {
+        document.geometry
+    }
+
+    /// Drops a stroke's kept geometry after the stroke changed.
     func forgetGeometry(_ id: UUID) {
-        geometryCache[id] = nil
-        geometryGeneration += 1
-        modified[id] = geometryGeneration
+        geometry.forget(id)
     }
 
-    /// Keeps geometry a job built from the strokes as they were at `generation`, for strokes unchanged since.
-    private func keep(_ built: [(UUID, StrokeGeometry)], from generation: Int) {
-        for (id, geometry) in built where geometryCache[id] == nil && (modified[id] ?? -1) <= generation {
-            geometryCache[id] = geometry
-        }
+    /// A stroke's ink bounds: what the erasers and the selection ask, without unpacking or building its
+    /// geometry when the page knows them.
+    func bounds(of stroke: Stroke) -> CGRect {
+        geometry.bounds(for: stroke)
     }
 
-    func geometry(for stroke: Stroke) -> StrokeGeometry {
-        if let g = geometryCache[stroke.id] {
-            return g
-        }
-        let g = StrokeRenderer.geometry(for: stroke)
-        geometryCache[stroke.id] = g
-        return g
+    /// Keeps geometry already built for a stroke (a stroke just finished, from its live geometry).
+    func cache(_ built: StrokeGeometry, for id: UUID) {
+        geometry.keep(built, for: id)
     }
 
-    /// Caches geometry already built for a stroke (a stroke just finished, from its live geometry).
-    func cache(_ geometry: StrokeGeometry, for id: UUID) {
-        geometryCache[id] = geometry
+    /// The geometry a batch of fills drawing `rects` (page points) shares, for the strokes as they are now.
+    private func fillStore(drawing rects: [CGRect]) -> GeometryStore {
+        GeometryStore(page: geometry, generation: geometry.generation, releasing: rects)
+    }
+
+    /// The page rect a fill per `plan` draws strokes for.
+    private static func drawnRect(_ plan: FillPlan) -> CGRect {
+        plan.region.map { TileBitmap.strokeQuery(for: $0, level: plan.key.level) } ?? plan.key.rect
     }
 
     // MARK: - Render requests
@@ -919,22 +905,10 @@ final class RenderCoordinator {
         let pencil = host?.pencilLocation, ahead = host?.rendersAhead ?? false
         let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:],
                                    skipped: Set(waiting.map(\.live.stroke.id)))
-        // One store per geometry generation: a new one shares the cache's storage, so the cache's next change
-        // copies it (on the main thread), and stores made per request would do that every pan frame.
-        let store: GeometryStore
-        if let reused = fillStore, reused.generation == geometryGeneration {
-            store = reused
-        } else {
-            store = GeometryStore(geometry: geometryCache, generation: geometryGeneration)
-            fillStore = store
-        }
-        let source = FillSource(ink: snapshot, store: store, revision: revision, raster: document.tileRaster,
-                                filler: filler)
-        // Whole tiles of a page that doesn't keep geometry share what's built for them only until they're drawn.
-        let wholeKeys = plans.filter { $0.region == nil && !$0.restore }.map(\.key.rect)
-        let wholeSource = keepsGeometry || wholeKeys.isEmpty ? source
-            : FillSource(ink: snapshot, store: GeometryStore(geometry: geometryCache, releasing: wholeKeys),
-                         revision: revision, raster: document.tileRaster, filler: filler)
+        // The batch shares what it unpacks or builds only until the tiles it reaches are drawn.
+        let drawn = plans.filter { !$0.restore || $0.region != nil }.map(Self.drawnRect)
+        let source = FillSource(ink: snapshot, store: fillStore(drawing: drawn), revision: revision,
+                                raster: document.tileRaster, filler: filler, keepsWholeTileGeometry: !isEmbedded)
         var jobs: [RenderJob] = []
         for (rank, plan) in plans.enumerated() {
             let key = plan.key
@@ -946,8 +920,7 @@ final class RenderCoordinator {
                 }
                 continue
             }
-            let job = fillJob(plan, from: plan.region == nil ? wholeSource : source, priority: priority,
-                              rank: Double(rank))
+            let job = fillJob(plan, from: source, priority: priority, rank: Double(rank))
             jobs.append(job)
         }
         scheduler.submit(jobs)
@@ -1043,6 +1016,9 @@ final class RenderCoordinator {
         let revision: Int
         let raster: TileRaster?
         let filler: TileFiller
+        /// Whether whole-tile fills keep the geometry they unpack or build with the page. Refills of part of
+        /// a tile (edits) always do.
+        var keepsWholeTileGeometry = true
     }
 
     /// A job filling `key` from `source` (or restoring it from the page's raster), and publishing it into the
@@ -1054,7 +1030,7 @@ final class RenderCoordinator {
         let job = RenderJob(priority: priority, rank: rank, cancellation: cancellation, work: { job in
             Self.fill(plan, from: source, isCancelled: { job.isCancelled })
         }, publish: { [weak self] (output: FillOutput?) in
-            self?.fillDidLand(key, serial: serial, output: output, store: source.store)
+            self?.fillDidLand(key, serial: serial, output: output)
         })
         fills[key] = FillTicket(job: job, revision: source.revision, serial: serial)
         return job
@@ -1076,7 +1052,10 @@ final class RenderCoordinator {
             restored = true
         } else if let region = plan.region, let base = plan.base ?? held {
             let reach = TileBitmap.strokeQuery(for: region, level: key.level)
-            guard let strokes = ink.drawable(in: reach, store: store, isCancelled: isCancelled) else { return nil }
+            let candidates = ink.candidates(in: reach)
+            defer { store.release(candidates, drawnIn: reach) }
+            guard let strokes = ink.drawable(in: reach, store: store, keeps: true, isCancelled: isCancelled)
+            else { return nil }
             if strokes.isEmpty, base.image == nil {
                 tile = Tile(image: nil, revision: revision)
             } else {
@@ -1088,7 +1067,9 @@ final class RenderCoordinator {
         } else {
             let candidates = ink.candidates(in: key.rect)
             defer { store.release(candidates, drawnIn: key.rect) }
-            guard let strokes = ink.drawable(in: key.rect, store: store, isCancelled: isCancelled) else { return nil }
+            guard let strokes = ink.drawable(in: key.rect, store: store, keeps: source.keepsWholeTileGeometry,
+                                             isCancelled: isCancelled)
+            else { return nil }
             if strokes.isEmpty {
                 tile = Tile(image: nil, revision: revision)
             } else {
@@ -1115,8 +1096,7 @@ final class RenderCoordinator {
 
     /// A tile's fill was published (or dropped): keeps the tile unless the fill was superseded, then lays
     /// the tiles out once for the whole batch.
-    private func fillDidLand(_ key: TileKey, serial: Int, output: FillOutput?, store: GeometryStore) {
-        keep(store.takeBuilt(), from: store.generation)
+    private func fillDidLand(_ key: TileKey, serial: Int, output: FillOutput?) {
         guard fills[key]?.serial == serial else { return } // cancelled, or superseded by another fill
         fills[key] = nil
         if let output {
@@ -1130,7 +1110,6 @@ final class RenderCoordinator {
             fillStats.jobs += 1
             if output.restored {
                 fillStats.tilesRestored += 1
-                needsWarmGeometry = keepsGeometry
             } else {
                 fillStats.tilesFilled += 1
                 if output.partial {
@@ -1156,19 +1135,10 @@ final class RenderCoordinator {
     /// The tiles published in a batch are laid out together; then anything still stale in view is asked for.
     private func batchDidLand() {
         updateLayerTransform()
-        if needsWarmGeometry {
-            needsWarmGeometry = false
-            warmGeometry()
-        }
         let refill = needsRefill
         needsRefill = false
-        if fills.isEmpty {
-            if warming == 0, snapshotsInFlight == 0 {
-                modified.removeAll()
-            }
-            if !strokeLog.isEmpty, drawing.isEmpty {
-                strokeLog.removeAll()
-            }
+        if fills.isEmpty, !strokeLog.isEmpty, drawing.isEmpty {
+            strokeLog.removeAll()
         }
         guard !isSettled else { return }
         if refill {
@@ -1258,7 +1228,7 @@ final class RenderCoordinator {
         let geom = item.live.geometry()
         item.geometry = geom
         item.bounds = geom.bounds
-        geometryCache[item.live.stroke.id] = geom
+        geometry.keep(geom, for: item.live.stroke.id)
         drawSubmittedStrokes()
     }
 
@@ -1360,32 +1330,6 @@ final class RenderCoordinator {
 
     // MARK: - Page raster
 
-    /// Builds, in the background, the geometry of every stroke that has none cached: a page opened from
-    /// its raster drew none, and erasing, the lasso and the next refill all need it. In chunks, at
-    /// background priority, so it never holds up a fill.
-    private func warmGeometry() {
-        let strokes = document.strokes.filter { geometryCache[$0.id] == nil }
-        guard !strokes.isEmpty, warming == 0 else { return }
-        let generation = geometryGeneration
-        let chunk = 256
-        for start in stride(from: 0, to: strokes.count, by: chunk) {
-            let part = Array(strokes[start ..< min(start + chunk, strokes.count)])
-            warming += 1
-            scheduler.submit(RenderJob(priority: .background, cancellation: lifetime, work: { job in
-                var built: [(UUID, StrokeGeometry)] = []
-                for stroke in part {
-                    guard !job.isCancelled else { return nil }
-                    built.append((stroke.id, StrokeRenderer.geometry(for: stroke)))
-                }
-                return built
-            }, publish: { [weak self] (built: [(UUID, StrokeGeometry)]?) in
-                guard let self else { return }
-                warming -= 1
-                keep(built ?? [], from: generation)
-            }))
-        }
-    }
-
     /// The page is going away (its canvas leaves the window, or the app goes to the background): leaves its
     /// resting-level tiles with the document as its `TileRaster` (NOT-106), for the next time it's shown,
     /// should the cache have let them go by then, and for the app to keep between launches.
@@ -1423,8 +1367,8 @@ final class RenderCoordinator {
         }
         let fillsMissing = !isEmbedded, carried = kept
         let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:], skipped: [])
-        let source = FillSource(ink: snapshot, store: GeometryStore(geometry: geometryCache), revision: revision,
-                                raster: nil, filler: filler)
+        let source = FillSource(ink: snapshot, store: fillStore(drawing: keys.filter { carried[$0] == nil }.map(\.rect)),
+                                revision: revision, raster: nil, filler: filler, keepsWholeTileGeometry: !isEmbedded)
         let cache = cache
         // Not cancelled with the canvas: the page raster outlives it.
         scheduler.submit(RenderJob(priority: .otherLevel, work: { job -> (TileRaster, [(TileKey, Tile)])? in
@@ -1490,8 +1434,8 @@ final class RenderCoordinator {
         let plans = Dictionary(fillPlans(for: keys, revision: revision).map { ($0.key, $0) }, uniquingKeysWith: { $1 })
         let held = cache.tiles(for: keys)
         let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:], skipped: [])
-        let store = GeometryStore(geometry: geometryCache, generation: geometryGeneration)
-        let source = FillSource(ink: snapshot, store: store, revision: revision, raster: nil, filler: filler)
+        let source = FillSource(ink: snapshot, store: fillStore(drawing: plans.values.map(Self.drawnRect)),
+                                revision: revision, raster: nil, filler: filler)
         let cache = cache
         let job = RenderJob(priority: .visible, coalescingKey: ObjectIdentifier(panelInterest), cancellation: lifetime,
                             work: { job -> (CGImage?, [(TileKey, Tile)])? in
@@ -1514,16 +1458,13 @@ final class RenderCoordinator {
                                 }
                                 TileBitmap.compose(tiles, at: t, in: ctx)
                                 return (ctx.makeImage(), drawn)
-                            }, publish: { [weak self] (output: (CGImage?, [(TileKey, Tile)])?) in
-                                self?.snapshotsInFlight -= 1
-                                self?.keep(store.takeBuilt(), from: store.generation)
+                            }, publish: { (output: (CGImage?, [(TileKey, Tile)])?) in
                                 guard let output else { return }
                                 for (key, tile) in output.1 {
                                     cache.storeIfNewer(tile, for: key)
                                 }
                                 completion(output.0, t)
                             })
-        snapshotsInFlight += 1
         scheduler.submit(job)
     }
 

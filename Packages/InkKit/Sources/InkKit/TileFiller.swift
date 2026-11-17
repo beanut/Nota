@@ -226,10 +226,19 @@ struct InkSnapshot: @unchecked Sendable { // immutable values; geometry paths ar
     }
 
     /// The strokes reaching `rect` (page points), in page order, with their geometry from `store` (built
-    /// there if no job has yet). Nil when `isCancelled` said stop first.
-    func drawable(in rect: CGRect, store: GeometryStore, isCancelled: () -> Bool) -> [TileStroke]? {
-        let strokes = candidates(in: rect)
-        guard let geometry = store.geometry(for: strokes, isCancelled: isCancelled) else { return nil }
+    /// there if no job has yet; kept by the page if `keeps`). Nil when `isCancelled` said stop first.
+    func drawable(in rect: CGRect, store: GeometryStore, keeps: Bool = true,
+                  isCancelled: () -> Bool) -> [TileStroke]? {
+        // The index is conservative (whole grid cells): strokes whose ink bounds the page knows to miss
+        // `rect` aren't looked up at all. Bounds newer than the snapshot only matter where the change went,
+        // which is filled again for it.
+        let reach = rect.insetBy(dx: -3, dy: -3)
+        let found = candidates(in: rect)
+        let known = store.page.cachedBounds(found.map(\.id))
+        let strokes = zip(found, known).compactMap { stroke, bounds in
+            bounds.map { $0.intersects(reach) } == false ? nil : stroke
+        }
+        guard let geometry = store.geometry(for: strokes, keeps: keeps, isCancelled: isCancelled) else { return nil }
         return strokes.compactMap { stroke in
             guard let g = geometry[stroke.id], g.bounds.insetBy(dx: -3, dy: -3).intersects(rect) else { return nil }
             return TileStroke(geometry: g, brush: stroke.brush, color: stroke.color)
@@ -253,50 +262,45 @@ struct InkSnapshot: @unchecked Sendable { // immutable values; geometry paths ar
     }
 }
 
-/// Stroke geometry shared by the render jobs of one fill: what the coordinator had cached, plus what the
-/// jobs build. A stroke reaching several tiles is built once, by the first job to need it, and the others
-/// wait for it. Building is serial within a job (the scheduler, not the job, decides how many cores
-/// work); a cancelled job stops between strokes and leaves the rest to whoever needs them.
+/// Stroke geometry shared by the render jobs of one fill: a stroke reaching several of its tiles is
+/// unpacked from the page's `PageGeometry`, or built (and kept there) when it's let go of it, once, by the
+/// first job to need it, and the others wait for it. Building is serial within a job (the scheduler, not
+/// the job, decides how many cores work); a cancelled job stops between strokes and leaves the rest to
+/// whoever needs them.
 ///
-/// A store made `releasing` the tiles a batch of fills will draw keeps what it builds only until the
-/// last of those tiles that the stroke reaches is drawn (`release(_:drawnIn:)`), and hands nothing to the
-/// owner's cache. Pages only shown in continuous scrolling fill that way (NOT-107): a dense page's
-/// geometry is ~170 MB, and a page scrolled past never needs it again once its tiles are cached, but a
-/// stroke reaching several tiles is still built once. Tiles are filled from the middle out, so what's held
-/// at once is the band of strokes the tiles in flight reach.
+/// What it holds unpacked it lets go of as soon as the last of the batch's tiles (`releasing`) the stroke
+/// reaches is drawn (`release(_:drawnIn:)`): tiles are filled from the middle out, so what's held at once
+/// is the band of strokes the tiles in flight reach, and the page keeps only packed geometry (NOT-108).
 final class GeometryStore: @unchecked Sendable { // guarded by `condition`
     private let condition = NSCondition()
-    private var geometry: [UUID: StrokeGeometry]
+    private var geometry: [UUID: StrokeGeometry] = [:]
     private var building = Set<UUID>()
-    private var built: [(UUID, StrokeGeometry)] = []
-    /// The owner's geometry generation when the store was made: what's built for a stroke changed since
-    /// isn't kept.
+    /// Where geometry is kept between fills.
+    let page: PageGeometry
+    /// The page's geometry generation when the strokes being drawn were snapshotted.
     let generation: Int
-    /// The tiles (page rects) the batch draws, when the store releases what it builds as they're drawn;
-    /// nil when it keeps it all, for the owner's cache (`takeBuilt`).
-    private let releasing: [CGRect]?
-    /// For each stroke built while `releasing`, how many of those tiles are still to draw it.
+    /// The rects (page points) the batch's jobs draw, each released once drawn.
+    private let releasing: [CGRect]
+    /// For each stroke held, how many of those rects are still to draw it.
     private var uses: [UUID: Int] = [:]
 
-    init(geometry: [UUID: StrokeGeometry], generation: Int = 0, releasing tiles: [CGRect]? = nil) {
-        self.geometry = geometry
+    init(page: PageGeometry, generation: Int, releasing rects: [CGRect]) {
+        self.page = page
         self.generation = generation
-        releasing = tiles
+        releasing = rects
     }
 
-    /// Whether what the jobs build is kept for the owner's cache.
-    var retains: Bool {
-        releasing == nil
+    /// How many strokes are held unpacked now.
+    var heldCount: Int {
+        condition.withLock { geometry.count }
     }
 
-    /// The tile `rect` has been drawn with `strokes`' geometry (or given up on): a store `releasing` lets go
-    /// of what it built for them once no tile left to draw needs it.
+    /// The rect `rect` has been drawn with `strokes`' geometry (or given up on): lets go of what's held for
+    /// them once no rect left to draw needs it.
     func release(_ strokes: [Stroke], drawnIn rect: CGRect) {
-        guard releasing != nil else { return }
         condition.withLock {
             for stroke in strokes {
-                guard let left = uses[stroke.id], let g = geometry[stroke.id],
-                      Self.reaches(g, rect) else { continue }
+                guard let left = uses[stroke.id], let g = geometry[stroke.id], Self.reaches(g, rect) else { continue }
                 if left <= 1 {
                     uses[stroke.id] = nil
                     geometry[stroke.id] = nil
@@ -311,9 +315,10 @@ final class GeometryStore: @unchecked Sendable { // guarded by `condition`
         g.bounds.insetBy(dx: -3, dy: -3).intersects(rect)
     }
 
-    /// The geometry of `strokes`: building the ones nobody has, waiting for the ones another job is
-    /// building. Nil if `isCancelled` said stop.
-    func geometry(for strokes: [Stroke], isCancelled: () -> Bool) -> [UUID: StrokeGeometry]? {
+    /// The geometry of `strokes`: unpacking or building the ones nobody holds, waiting for the ones another
+    /// job is getting; with `keeps`, what's unpacked or built is kept by the page too. Nil if `isCancelled`
+    /// said stop.
+    func geometry(for strokes: [Stroke], keeps: Bool = true, isCancelled: () -> Bool) -> [UUID: StrokeGeometry]? {
         while true {
             condition.lock()
             var claimed: [Stroke] = []
@@ -352,27 +357,15 @@ final class GeometryStore: @unchecked Sendable { // guarded by `condition`
                     }
                     return nil
                 }
-                let g = StrokeRenderer.geometry(for: stroke)
-                let uses = releasing.map { tiles in tiles.reduce(0) { $0 + (Self.reaches(g, $1) ? 1 : 0) } }
+                let g = page.geometry(for: stroke, generation: generation, keeps: keeps)
+                let uses = releasing.reduce(0) { $0 + (Self.reaches(g, $1) ? 1 : 0) }
                 condition.withLock {
                     geometry[stroke.id] = g
-                    if let uses {
-                        self.uses[stroke.id] = uses
-                    } else {
-                        built.append((stroke.id, g))
-                    }
+                    self.uses[stroke.id] = uses
                     building.remove(stroke.id)
                     condition.broadcast()
                 }
             }
-        }
-    }
-
-    /// What the jobs built since the last call, for the owner's geometry cache.
-    func takeBuilt() -> [(UUID, StrokeGeometry)] {
-        condition.withLock {
-            defer { built = [] }
-            return built
         }
     }
 }

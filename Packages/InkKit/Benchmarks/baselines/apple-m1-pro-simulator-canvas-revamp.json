@@ -4,7 +4,7 @@
     "corpus": "synthetic",
     "device": "iPad17,4",
     "host_cpu": "Apple M1 Pro",
-    "note": "per-metric best of 2 runs of main's engine (NOT-98), Apple M1 Pro, iPad Pro 13-inch (M5) simulator",
+    "note": "per-metric best of 2 runs of main's engine (NOT-98), Apple M1 Pro, iPad Pro 13-inch (M5) simulator; memory.6x.* re-recorded by NOT-108 (geometry_mb is now the heap the page's geometry holds, ~295 MB with every stroke's CGPaths before; peak_mb has a budget)",
     "os": "iPadOS 27.2"
   },
   "metrics": {
@@ -115,15 +115,24 @@
     },
     "memory.6x.geometry_mb": {
       "unit": "MB",
-      "value": 108.578
+      "value": 55.078
+    },
+    "memory.6x.geometry_packed_mb": {
+      "unit": "MB",
+      "value": 18.284
+    },
+    "memory.6x.geometry_unpacked_mb": {
+      "unit": "MB",
+      "value": 31.959
     },
     "memory.6x.live_tiles_peak_mb": {
       "unit": "MB",
       "value": 15
     },
     "memory.6x.peak_mb": {
+      "budget": 80,
       "unit": "MB",
-      "value": 155.609
+      "value": 54.656
     },
     "memory.continuous_20_pages.model_mb": {
       "unit": "MB",

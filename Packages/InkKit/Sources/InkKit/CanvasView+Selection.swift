@@ -29,7 +29,7 @@ extension CanvasView {
 
     /// Fits a fresh box around the selection (see `SelectionGeometry.box`) and tells the controller.
     func updateSelectionBox() {
-        let strokeBounds = document.strokes.filter { selection.strokeIDs.contains($0.id) }.map { coordinator.geometry(for: $0).bounds }
+        let strokeBounds = document.strokes.filter { selection.strokeIDs.contains($0.id) }.map { coordinator.bounds(of: $0) }
         let objects = document.objects.filter { selection.objectIDs.contains($0.id) }
         selectionBox = SelectionGeometry.box(strokeBounds: strokeBounds, objects: objects)
         // Only armed while there's something to drag out, so its long press never touches the ink path.
@@ -93,7 +93,7 @@ extension CanvasView {
             guard !stroke.brush.erases else { return nil }
             let path = stroke.points.map(\.location)
             let radius = stroke.brush.maxWidth / 2
-            let bounds = coordinator.geometryCache[stroke.id]?.bounds
+            let bounds = coordinator.geometry.cachedBounds(stroke.id)
                 ?? LassoGeometry.bounds(of: path).insetBy(dx: -radius, dy: -radius)
             guard bounds.intersects(region) else { return nil }
             return SelectionGeometry.StrokeShape(id: stroke.id, path: path, bounds: bounds, radius: radius)

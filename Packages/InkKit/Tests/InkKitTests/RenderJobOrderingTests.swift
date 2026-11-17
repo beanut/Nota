@@ -189,7 +189,7 @@ struct RenderJobOrderingTests {
         // And they're the page as it is.
         let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex,
                                    geometry: Dictionary(uniqueKeysWithValues: document.strokes.map {
-                                       ($0.id, StrokeRenderer.geometry(for: $0))
+                                       ($0.id, StrokeRenderer.keptGeometry(for: $0))
                                    }), skipped: [])
         for key in keys {
             let expected = RenderCoordinator.draw(key, from: snapshot, revision: 0, filler: CoreGraphicsTileFiller())

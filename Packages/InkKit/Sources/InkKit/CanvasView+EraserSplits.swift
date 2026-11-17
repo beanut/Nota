@@ -8,7 +8,7 @@ extension CanvasView {
     /// above each stroke that overlaps it, so two partial erases that together sever a line count too.
     /// `hulls` are the eraser's own, reused from its `LiveStroke` (identical to a fresh build once it ended).
     func splits(cutBy eraser: Stroke, hulls eraserOwnHulls: [Hull]) -> [CanvasDocument.Split] {
-        let eraserBounds = coordinator.geometry(for: eraser).bounds
+        let eraserBounds = coordinator.bounds(of: eraser)
         guard !eraserBounds.isNull else { return [] }
         let strokes = document.strokes
         var eraserHulls: [UUID: [Hull]] = [eraser.id: eraserOwnHulls]
@@ -24,13 +24,13 @@ extension CanvasView {
         var splits: [CanvasDocument.Split] = []
         for index in document.strokeIndices(in: eraserBounds) where !strokes[index].brush.erases {
             let stroke = strokes[index]
-            let bounds = coordinator.geometry(for: stroke).bounds
+            let bounds = coordinator.bounds(of: stroke)
             guard bounds.intersects(eraserBounds) else { continue }
             let region = bounds.insetBy(dx: -1, dy: -1)
             var coverage = StrokeSplitter.Coverage()
             for above in document.strokeIndices(in: region) where above > index && strokes[above].brush.erases {
                 let other = strokes[above]
-                guard coordinator.geometry(for: other).bounds.intersects(region) else { continue }
+                guard coordinator.bounds(of: other).intersects(region) else { continue }
                 coverage.add(hulls(of: other), within: region)
             }
             coverage.add(hulls(of: eraser), within: region)
@@ -87,7 +87,7 @@ extension CanvasView {
         // Pixel-eraser strokes are invisible; removing them would resurrect ink, so they're skipped.
         for i in document.strokeIndices(in: sweep) where session.target.erases(strokes[i].brush) {
             let stroke = strokes[i]
-            let bounds = coordinator.geometry(for: stroke).bounds
+            let bounds = coordinator.bounds(of: stroke)
             guard bounds.intersects(sweep) else { continue }
             if session.isStandard {
                 if let pieces = StrokeSplitter.remainder(of: stroke, erasedFrom: from, to: point, radius: radius) {
@@ -103,10 +103,9 @@ extension CanvasView {
                 }
             }
         }
+        // Removed and cut strokes keep their geometry: they don't change (the pieces are new strokes), and
+        // undoing the erase brings them back as they were.
         let changed = Set(hits.map { strokes[$0].id } + cuts.map { strokes[$0.position].id })
-        for id in changed {
-            coordinator.forgetGeometry(id)
-        }
         if !hits.isEmpty {
             session.removals += document.remove(at: hits)
         }

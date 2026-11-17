@@ -115,7 +115,7 @@ struct TileRasterTests {
         let held = cache.tiles(page: page.cacheID).filter { $0.value.revision == page.inkVersion }
         #expect(!held.isEmpty)
         let wrong = await Task.detached { () -> [String] in
-            let geometry = Dictionary(uniqueKeysWithValues: strokes.map { ($0.id, StrokeRenderer.geometry(for: $0)) })
+            let geometry = Dictionary(uniqueKeysWithValues: strokes.map { ($0.id, StrokeRenderer.keptGeometry(for: $0)) })
             let ink = InkSnapshot(strokes: strokes, index: index, geometry: geometry, skipped: [])
             return held.compactMap { key, tile in
                 let expected = RenderCoordinator.draw(key, from: ink, revision: 0, filler: CoreGraphicsTileFiller())

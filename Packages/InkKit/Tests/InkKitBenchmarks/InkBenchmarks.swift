@@ -20,6 +20,8 @@ final class InkBenchmarks: XCTestCase {
     /// `.ink` file for a 5k-stroke page: under 1 MB, decoded in under 50 ms (NOT-5).
     static let inkFileBudgetKB = 1024.0
     static let inkDecodeBudgetMs = 50.0
+    /// A 5k-stroke page open at 6× while writing: its geometry, the screen's bitmap and the live layer (NOT-108).
+    static let memory6xBudgetMB = 80.0
 
     private var corpus: Corpus {
         Corpus.shared
@@ -493,28 +495,43 @@ final class InkBenchmarks: XCTestCase {
 
     // MARK: Memory
 
-    /// Memory with a 5k-stroke page open at 6× zoom (the maximum) while writing: the cached geometry of
-    /// every stroke, the committed bitmap drawn at 6×, and the live layer's tiles and baked tile bitmaps
-    /// as the corpus is replayed on top. Peak footprint over the baseline before the page was opened.
-    /// The baseline is taken with free memory handed back first, so the earlier benchmarks' leftovers
-    /// can't be reused and make the page look cheaper than it is (they made `geometry_mb` read half).
+    /// Memory with a 5k-stroke page open at 6× zoom (the maximum) while writing: the page's stroke geometry,
+    /// the committed bitmap drawn at 6×, and the live layer's tiles and baked tile bitmaps as the corpus is
+    /// replayed on top. Peak footprint over the baseline before the page was opened.
+    ///
+    /// The geometry is every stroke's, built once as filling the whole fitted page does, and kept as the page
+    /// keeps it (NOT-108): packed, in an app-wide cache under `GeometryCache.shared`'s budget
+    /// (`geometry_packed_mb` is what that budget counts). `geometry_mb` is the heap it holds; before NOT-108
+    /// every canvas kept every stroke's `CGPath`s, ~295 MB of heap (108 MB by the footprint this measured
+    /// then). The footprint baseline is taken with free memory handed back first, so the earlier benchmarks'
+    /// leftovers can't be reused and make the page look cheaper than it is.
     func testMemoryAt6xZoom() throws {
         let page = corpus.page(strokes: 5000)
         let before = Bench.settledFootprint()
+        let heapBefore = Bench.heapInUse()
         var peak = before
 
-        var cache: [UUID: StrokeGeometry] = [:]
+        let cache = GeometryCache(budget: GeometryCache.shared.budget,
+                                  unpackedBudget: GeometryCache.shared.unpackedBudget)
+        let geometry = PageGeometry(cache: cache)
         for stroke in page {
-            cache[stroke.id] = StrokeRenderer.geometry(for: stroke)
+            _ = geometry.geometry(for: stroke)
         }
-        let geometryBytes = Bench.footprint().subtractingClamped(before)
+        let geometryBytes = Bench.heapInUse().subtractingClamped(heapBefore)
+        peak = max(peak, Bench.footprint())
 
         let box = corpus.inkBounds
         let transform = Bench.zoomedTransform(for: corpus.pageSize, zoom: ViewTransform.maxZoomFactor,
                                               centredOn: CGPoint(x: box.midX, y: box.midY))
         let pixels = Bench.pixelSize
         let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale))
-        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: cache[$0.id], stroke: nil) }
+        // The strokes in view, unpacked to draw, as the tiles in view would be.
+        let inView = transform.toCanvas(Bench.screenBounds)
+        let items = page.compactMap { stroke -> CommittedRenderer.Item? in
+            guard geometry.bounds(for: stroke).intersects(inView) else { return nil }
+            return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
+                                          geometry: geometry.geometry(for: stroke), stroke: nil)
+        }
         CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
         let image = ctx.makeImage()
         peak = max(peak, Bench.footprint())
@@ -530,10 +547,13 @@ final class InkBenchmarks: XCTestCase {
         XCTAssertNotNil(image)
 
         let mb = { (bytes: UInt64) in Double(bytes) / 1_048_576 }
-        BenchResults.record("memory.6x.peak_mb", mb(peak.subtractingClamped(before)), unit: "MB")
+        BenchResults.record("memory.6x.peak_mb", mb(peak.subtractingClamped(before)), unit: "MB",
+                            budget: Self.memory6xBudgetMB)
         BenchResults.record("memory.6x.geometry_mb", mb(geometryBytes), unit: "MB")
+        BenchResults.record("memory.6x.geometry_packed_mb", mb(UInt64(cache.byteCount)), unit: "MB")
+        BenchResults.record("memory.6x.geometry_unpacked_mb", mb(UInt64(cache.unpackedByteCount)), unit: "MB")
         BenchResults.record("memory.6x.live_tiles_peak_mb", mb(UInt64(tilesPeak)), unit: "MB")
-        withExtendedLifetime((cache, image)) {}
+        withExtendedLifetime((geometry, image)) {}
     }
 }
 

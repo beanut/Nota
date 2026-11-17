@@ -117,7 +117,7 @@ final class CanvasBenchmarks: XCTestCase {
         let strokes = canvas.document.strokes
         let ink = InkSnapshot(strokes: strokes, index: StrokeIndex(strokes: strokes),
                               geometry: Dictionary(uniqueKeysWithValues: zip(strokes.map(\.id),
-                                                                             CommittedRenderer.geometries(for: strokes))),
+                                                                             strokes.map(StrokeRenderer.keptGeometry))),
                               skipped: [])
         let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: coordinator.level(for: canvas.viewTransform))
         var tiles: [(key: TileKey, image: CGImage)] = []

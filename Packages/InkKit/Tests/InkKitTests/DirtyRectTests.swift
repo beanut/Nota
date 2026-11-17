@@ -30,7 +30,7 @@ private func page(of kind: TileInk, count: Int = 18) -> [Stroke] {
 
 private func snapshot(_ strokes: [Stroke]) -> InkSnapshot {
     InkSnapshot(strokes: strokes, index: StrokeIndex(strokes: strokes),
-                geometry: Dictionary(uniqueKeysWithValues: strokes.map { ($0.id, StrokeRenderer.geometry(for: $0)) }),
+                geometry: Dictionary(uniqueKeysWithValues: strokes.map { ($0.id, StrokeRenderer.keptGeometry(for: $0)) }),
                 skipped: [])
 }
 

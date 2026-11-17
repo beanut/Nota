@@ -33,7 +33,7 @@ private func inkedPage() -> CanvasDocument {
 }
 
 /// Continuous scrolling on the tile cache (NOT-107): pooled page canvases, prefetch ahead of a scroll,
-/// pages that only scroll by keeping no geometry, and canvases staying where the host puts them.
+/// geometry shared by every canvas on a page, and canvases staying where the host puts them.
 @MainActor
 @Suite("Continuous canvases")
 struct ContinuousCanvasTests {
@@ -157,14 +157,28 @@ struct ContinuousCanvasTests {
         embedded.place(ViewTransform(scale: 1, offset: .zero), settled: true)
         embedded.layoutIfNeeded()
         try await waitUntil { embedded.rendersSettled && !embedded.coordinator.isFilling }
-        #expect(embedded.coordinator.geometryCache.isEmpty)
         #expect(embedded.coordinator.fillStats.tilesFilled > 0)
+        #expect(!page.strokes.contains { page.geometry.isKept($0.id) })
+    }
 
-        // A paged canvas keeps what its fills built, for the erasers and refills.
-        let paged = CanvasView(frame: CGRect(x: 0, y: 0, width: 800, height: 1000), document: inkedPage())
+    @Test func twoCanvasesOnOnePageShareItsGeometry() async throws {
+        let page = inkedPage()
+        let paged = CanvasView(frame: CGRect(x: 0, y: 0, width: 800, height: 1000), document: page)
         paged.layoutIfNeeded()
         try await waitUntil { paged.rendersSettled && !paged.coordinator.isFilling }
-        #expect(!paged.coordinator.geometryCache.isEmpty)
+        #expect(paged.coordinator.fillStats.tilesFilled > 0)
+        let built = page.geometry.builtCount
+        #expect(built > 0)
+        #expect(page.strokes.allSatisfy { page.geometry.isKept($0.id) })
+
+        // Another canvas on the page, at another scale (so it fills tiles of its own), builds none again.
+        let embedded = CanvasView(frame: CGRect(x: 0, y: 0, width: 800, height: 1000), document: page, embedded: true)
+        embedded.place(ViewTransform(scale: 0.6, offset: .zero), settled: true)
+        embedded.layoutIfNeeded()
+        try await waitUntil { embedded.rendersSettled && !embedded.coordinator.isFilling }
+        #expect(embedded.coordinator.fillStats.tilesFilled > 0)
+        #expect(page.geometry.builtCount == built)
+        withExtendedLifetime(paged) {}
     }
 
     /// The glitch NOT-105 found: a canvas resized while embedded (mid-pinch past the smallest zoom, or made

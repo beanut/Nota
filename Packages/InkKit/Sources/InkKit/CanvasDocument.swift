@@ -339,8 +339,18 @@ public final class CanvasDocument: Identifiable {
     }
 
     /// Strokes whose points changed in place in the most recent change (transformed by the lasso, its undo
-    /// or redo, or refined by a late estimate), so a view can invalidate their cached geometry.
-    private(set) var lastReshapedIDs: Set<UUID> = []
+    /// or redo, or refined by a late estimate). Their kept geometry is dropped as they're set.
+    private(set) var lastReshapedIDs: Set<UUID> = [] {
+        didSet {
+            if !lastReshapedIDs.isEmpty {
+                geometry.forget(lastReshapedIDs)
+            }
+        }
+    }
+
+    /// The strokes' geometry, kept packed for every canvas showing the page, its erasers and its tile fills
+    /// (NOT-108). The page drops what it keeps of a stroke whenever the stroke changes in place.
+    nonisolated let geometry = PageGeometry()
     var canUndo: Bool {
         !undoStack.isEmpty
     }
@@ -883,6 +893,9 @@ public final class CanvasDocument: Identifiable {
         guard old != stroke else { return }
         let reachBefore = strokeIndex.strokeBounds(at: position)
         strokes[position] = stroke
+        if old.id == stroke.id {
+            geometry.forget(stroke.id)
+        }
         if !Self.sameReach(old, stroke) {
             strokeIndex.updateStroke(at: position, to: stroke)
         }
@@ -903,8 +916,24 @@ public final class CanvasDocument: Identifiable {
             suffix += 1
         }
         noteInkChange(InkChangeLog.changedReach(from: old, to: new))
+        forgetChanged(from: old[prefix ..< old.count - suffix], to: new[prefix ..< new.count - suffix])
         strokes = new
         strokeIndex.replaceStrokes(prefix ..< old.count - suffix, with: new[prefix ..< new.count - suffix])
+    }
+
+    /// Drops the kept geometry of strokes in `new` that are in `old` too but drawn differently.
+    private func forgetChanged(from old: ArraySlice<Stroke>, to new: ArraySlice<Stroke>) {
+        guard !old.isEmpty, !new.isEmpty else { return }
+        let before = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
+        let changed = new.filter { stroke in before[stroke.id].map { !Self.sameInk($0, stroke) } ?? false }.map(\.id)
+        if !changed.isEmpty {
+            geometry.forget(changed)
+        }
+    }
+
+    /// Whether `a` and `b` have the same geometry (their colour may differ).
+    private static func sameInk(_ a: Stroke, _ b: Stroke) -> Bool {
+        sameReach(a, b) && a.waxGrain == b.waxGrain
     }
 
     /// Whether the index files `a` and `b` alike. Copy-on-write points compare by identity first, so an

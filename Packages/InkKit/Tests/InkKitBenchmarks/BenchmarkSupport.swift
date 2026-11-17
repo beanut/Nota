@@ -55,6 +55,14 @@ enum Bench {
         return footprint()
     }
 
+    /// The bytes malloc has handed out and not had back: unlike the footprint, it doesn't count freed memory
+    /// malloc still holds, nor lose memory freed by work done before, so it measures what a structure keeps.
+    static func heapInUse() -> UInt64 {
+        var stats = malloc_statistics_t()
+        malloc_zone_statistics(nil, &stats)
+        return UInt64(stats.size_in_use)
+    }
+
     /// The process's physical footprint (what jetsam counts), in bytes.
     static func footprint() -> UInt64 {
         var info = task_vm_info_data_t()

@@ -42,7 +42,7 @@ public extension CanvasDocument {
     /// canvas showing the page would when it goes away, and tells the observers.
     func leaveTilesForTesting(pixelsPerPoint: CGFloat = 1) {
         let level = TileLevel(pixelsPerPoint: pixelsPerPoint)
-        let geometry = Dictionary(strokes.map { ($0.id, StrokeRenderer.geometry(for: $0)) }, uniquingKeysWith: { $1 })
+        let geometry = Dictionary(strokes.map { ($0.id, StrokeRenderer.keptGeometry(for: $0)) }, uniquingKeysWith: { $1 })
         let ink = InkSnapshot(strokes: strokes, index: strokeIndex, geometry: geometry, skipped: [])
         let tiles = TileKey.keys(covering: pageBounds, page: cacheID, level: level).map { key in
             (key: key, image: RenderCoordinator.draw(key, from: ink, revision: inkVersion,

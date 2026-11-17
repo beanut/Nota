@@ -108,7 +108,7 @@ struct RenderCoordinatorTests {
         #expect(coordinator.pending.count == 1)
         try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         #expect(coordinator.pending.isEmpty)
-        #expect(coordinator.geometryCache[live.stroke.id] != nil)
+        #expect(document.geometry.isKept(live.stroke.id))
         let shown = try #require(coordinator.composedImage())
         #expect(try differingFraction(shown, reference()) < 0.002)
     }
@@ -121,7 +121,7 @@ struct RenderCoordinatorTests {
         try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
 
-        let bounds = coordinator.geometry(for: first.stroke).bounds
+        let bounds = coordinator.bounds(of: first.stroke)
         coordinator.forgetGeometry(first.stroke.id)
         _ = document.remove(ids: [first.stroke.id])
         coordinator.invalidate(rect: bounds)
