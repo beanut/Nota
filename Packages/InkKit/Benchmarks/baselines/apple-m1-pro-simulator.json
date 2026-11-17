@@ -4,12 +4,100 @@
     "corpus": "synthetic",
     "device": "iPad17,4",
     "host_cpu": "Apple M1 Pro",
+    "note": "per-metric best of 2 runs at the close of the canvas revamp (NOT-112), Apple M1 Pro, iPad Pro 13-inch (M5) simulator",
     "os": "iPadOS 27.2"
   },
   "metrics": {
+    "edit.erase_stroke_5k_ms": {
+      "budget": 16,
+      "unit": "ms",
+      "value": 563.982
+    },
+    "edit.pixel_erase_5k_ms": {
+      "budget": 16,
+      "unit": "ms",
+      "value": 12.925
+    },
+    "edit.undo_5k_ms": {
+      "budget": 16,
+      "unit": "ms",
+      "value": 44.767
+    },
     "full_redraw.5k_ms": {
       "unit": "ms",
-      "value": 1881.035
+      "value": 1295.696
+    },
+    "full_redraw.crayon_500_ms": {
+      "unit": "ms",
+      "value": 156.014
+    },
+    "index.build_20k_ms": {
+      "unit": "ms",
+      "value": 13.157
+    },
+    "index.query_page_5k_us": {
+      "unit": "us",
+      "value": 32.148
+    },
+    "index.query_tile_20k_us": {
+      "unit": "us",
+      "value": 36.187
+    },
+    "index.query_tile_5k_us": {
+      "unit": "us",
+      "value": 36.441
+    },
+    "index.scan_tile_20k_us": {
+      "unit": "us",
+      "value": 102.743
+    },
+    "ink_file.5k_kb": {
+      "budget": 1024,
+      "unit": "KB",
+      "value": 1909.21
+    },
+    "ink_file.bytes_per_point": {
+      "unit": "B",
+      "value": 2.572
+    },
+    "ink_file.decode_5k_ms": {
+      "budget": 50,
+      "unit": "ms",
+      "value": 21.918
+    },
+    "ink_file.encode_5k_ms": {
+      "unit": "ms",
+      "value": 56.699
+    },
+    "live_event.crayon.long_stroke.first_quarter_p95_ms": {
+      "unit": "ms",
+      "value": 0.555
+    },
+    "live_event.crayon.long_stroke.last_quarter_p95_ms": {
+      "budget": 2,
+      "unit": "ms",
+      "value": 0.535
+    },
+    "live_event.crayon.p50_ms": {
+      "unit": "ms",
+      "value": 0.032
+    },
+    "live_event.crayon.p95_ms": {
+      "budget": 2,
+      "unit": "ms",
+      "value": 0.435
+    },
+    "live_event.crayon.p99_ms": {
+      "unit": "ms",
+      "value": 0.709
+    },
+    "live_event.crayon.wax_latency_p50_ms": {
+      "unit": "ms",
+      "value": 0.485
+    },
+    "live_event.crayon.wax_latency_p95_ms": {
+      "unit": "ms",
+      "value": 0.803
     },
     "live_event.long_stroke.first_quarter_p95_ms": {
       "unit": "ms",
@@ -22,81 +110,259 @@
     },
     "live_event.p50_ms": {
       "unit": "ms",
-      "value": 0.066
+      "value": 0.061
     },
     "live_event.p95_ms": {
       "budget": 2,
       "unit": "ms",
-      "value": 0.19
+      "value": 0.166
     },
     "live_event.p99_ms": {
       "unit": "ms",
-      "value": 0.295
+      "value": 0.26
     },
     "live_event.stamp.p50_ms": {
       "unit": "ms",
-      "value": 0.237
+      "value": 0.206
     },
     "live_event.stamp.p95_ms": {
+      "budget": 2,
       "unit": "ms",
-      "value": 0.901
+      "value": 0.509
     },
     "live_event.stamp.p99_ms": {
+      "budget": 2,
       "unit": "ms",
-      "value": 2.226
+      "value": 0.747
     },
     "memory.6x.geometry_mb": {
       "unit": "MB",
-      "value": 206.563
+      "value": 55.078
+    },
+    "memory.6x.geometry_packed_mb": {
+      "unit": "MB",
+      "value": 18.284
+    },
+    "memory.6x.geometry_unpacked_mb": {
+      "unit": "MB",
+      "value": 31.959
     },
     "memory.6x.live_tiles_peak_mb": {
       "unit": "MB",
-      "value": 15
+      "value": 12
     },
     "memory.6x.peak_mb": {
+      "budget": 80,
       "unit": "MB",
-      "value": 225.828
+      "value": 14.078
+    },
+    "memory.continuous_20_pages.model_mb": {
+      "unit": "MB",
+      "value": 815.529
+    },
+    "memory.continuous_20_pages_mb": {
+      "budget": 300,
+      "unit": "MB",
+      "value": 209.534
+    },
+    "objects.pan.frame_max_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 4.629
+    },
+    "objects.pan.tiles_filled": {
+      "unit": "tiles",
+      "value": 24
+    },
+    "objects.pan_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 2.984
+    },
+    "objects.zoom.frame_p95_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 1.659
+    },
+    "objects.zoom_settle.fill_cpu_ms": {
+      "unit": "ms",
+      "value": 447.856
+    },
+    "objects.zoom_settle.template_fill_cpu_ms": {
+      "unit": "ms",
+      "value": 400.269
+    },
+    "objects.zoom_settle_ms": {
+      "budget": 150,
+      "unit": "ms",
+      "value": 93.52
     },
     "page_open.5k_ms": {
       "budget": 150,
       "unit": "ms",
-      "value": 15.073
+      "value": 16.639
     },
     "page_open_cold.1k_ms": {
       "unit": "ms",
-      "value": 473.727
+      "value": 371.768
     },
     "page_open_cold.20k_ms": {
       "unit": "ms",
-      "value": 9430.259
+      "value": 7653.496
     },
     "page_open_cold.5k_ms": {
       "unit": "ms",
-      "value": 2216.54
+      "value": 1799.107
     },
     "page_raster.5k_kb": {
       "unit": "KB",
-      "value": 5234.979
+      "value": 5041.506
     },
     "page_raster.capture_5k_ms": {
       "unit": "ms",
-      "value": 190.722
+      "value": 171.579
+    },
+    "pan.6x_dense.cached_tiles_filled": {
+      "unit": "tiles",
+      "value": 0
+    },
+    "pan.6x_dense.frame_max_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 4.179
+    },
+    "pan.6x_dense.frame_p50_ms": {
+      "unit": "ms",
+      "value": 0.094
+    },
+    "pan.6x_dense.frame_p95_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 0.887
+    },
+    "pan.6x_dense.step_render_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 1.835
+    },
+    "pan.6x_dense.tiles_filled": {
+      "unit": "tiles",
+      "value": 78
+    },
+    "pan.6x_dense.time_to_sharp_ms": {
+      "budget": 150,
+      "unit": "ms",
+      "value": 1.568
+    },
+    "scroll.fling_20_pages.blank_frames": {
+      "budget": 0.5,
+      "unit": "frames",
+      "value": 0
+    },
+    "scroll.fling_20_pages.blank_tiles": {
+      "unit": "tiles",
+      "value": 0
+    },
+    "scroll.fling_20_pages.canvases_made": {
+      "unit": "canvases",
+      "value": 0
+    },
+    "scroll.fling_20_pages.frame_max_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 23.975
+    },
+    "scroll.fling_20_pages.frame_p50_ms": {
+      "unit": "ms",
+      "value": 0.716
+    },
+    "scroll.fling_20_pages.frame_p95_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 2.568
+    },
+    "scroll.fling_20_pages.peak_mb": {
+      "unit": "MB",
+      "value": 222.159
+    },
+    "scroll.page_enter_5k_ms": {
+      "budget": 50,
+      "unit": "ms",
+      "value": 4.941
+    },
+    "scroll.page_enter_first_5k_ms": {
+      "unit": "ms",
+      "value": 1914.007
     },
     "stroke_geometry.corpus_ms": {
       "unit": "ms",
-      "value": 12.467
+      "value": 12.266
     },
     "stroke_geometry.per_stroke_us": {
       "unit": "us",
-      "value": 194.803
+      "value": 191.663
     },
     "stroke_geometry.stamp.corpus_ms": {
       "unit": "ms",
-      "value": 54.385
+      "value": 41.226
     },
     "stroke_geometry.stamp.per_stroke_us": {
       "unit": "us",
-      "value": 849.759
+      "value": 644.16
+    },
+    "zoom.pinch_1x_6x.fill_cpu_ms": {
+      "unit": "ms",
+      "value": 1327.27
+    },
+    "zoom.pinch_1x_6x.frame_max_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 5.739
+    },
+    "zoom.pinch_1x_6x.frame_p50_ms": {
+      "unit": "ms",
+      "value": 0.225
+    },
+    "zoom.pinch_1x_6x.frame_p95_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 0.73
+    },
+    "zoom.pinch_1x_6x.tiles_filled": {
+      "unit": "tiles",
+      "value": 111
+    },
+    "zoom.pinch_1x_6x.time_to_sharp_ms": {
+      "budget": 150,
+      "unit": "ms",
+      "value": 202.426
+    },
+    "zoom.pinch_1x_6x_held.fill_cpu_ms": {
+      "unit": "ms",
+      "value": 1142.26
+    },
+    "zoom.pinch_1x_6x_held.frame_max_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 3.535
+    },
+    "zoom.pinch_1x_6x_held.frame_p50_ms": {
+      "unit": "ms",
+      "value": 0.164
+    },
+    "zoom.pinch_1x_6x_held.frame_p95_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 0.702
+    },
+    "zoom.pinch_1x_6x_held.tiles_filled": {
+      "unit": "tiles",
+      "value": 98
+    },
+    "zoom.pinch_1x_6x_held.time_to_sharp_ms": {
+      "budget": 150,
+      "unit": "ms",
+      "value": 164.507
     }
   },
   "schema": 1

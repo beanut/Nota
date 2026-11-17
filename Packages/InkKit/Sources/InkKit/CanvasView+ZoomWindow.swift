@@ -8,7 +8,7 @@ import UIKit
 /// the line, and at the end of the line on to the next (`ZoomWindow`).
 ///
 /// The panel shows the box's ink the way the canvas shows the page's: a committed image, rendered off the
-/// main thread whenever the page's committed bitmap changes, under a live layer for the stroke being written.
+/// main thread whenever the page's committed tiles change, under a live layer for the stroke being written.
 extension CanvasView {
     /// Space between the panel and the page above it, and the panel's inset from the sides.
     static let zoomPanelGap: CGFloat = 16

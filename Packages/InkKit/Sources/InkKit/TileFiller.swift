@@ -104,8 +104,25 @@ struct CoreGraphicsTileFiller: TileFiller {
     }
 }
 
-/// Tile bitmaps: premultiplied BGRA like `CommittedRenderer.makeBitmap`, addressed in page points.
+/// Tile bitmaps: premultiplied BGRA (`bitmapInfo`), addressed in page points.
 enum TileBitmap {
+    /// Every committed bitmap's layout: premultiplied BGRA, as Core Animation takes it without converting.
+    static let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+
+    /// A bitmap `pixelSize` pixels big laid out like the tiles, addressed in view points with UIKit's
+    /// top-left origin: what tiles are assembled into (`compose`) for the zoom panel and the pixel checks.
+    static func viewBitmap(pixelSize: CGSize, scale: CGFloat) -> CGContext? {
+        guard pixelSize.width > 0, pixelSize.height > 0,
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: Int(pixelSize.width), height: Int(pixelSize.height),
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: space, bitmapInfo: bitmapInfo)
+        else { return nil }
+        ctx.translateBy(x: 0, y: pixelSize.height)
+        ctx.scaleBy(x: scale, y: -scale)
+        ctx.setShouldAntialias(true)
+        return ctx
+    }
+
     /// `rect` (page points) grown to whole pixels of `key`'s tile and cut to the tile: a region whose
     /// edges fall between pixels, so refilling it leaves the pixels around it exactly as they were.
     /// `.null` if it misses the tile; `key.rect` itself if it covers it.
@@ -153,7 +170,7 @@ enum TileBitmap {
         let side = TileKey.side
         guard pixels.width == side, pixels.height == side, let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: space, bitmapInfo: CommittedRenderer.bitmapInfo)
+                                  space: space, bitmapInfo: Self.bitmapInfo)
         else { return nil }
         let rect = CGRect(x: 0, y: 0, width: side, height: side) // base space: upright, like `context(for:)`
         ctx.interpolationQuality = .none
@@ -177,7 +194,7 @@ enum TileBitmap {
         let width = Int(pixelRect.width), height = Int(pixelRect.height)
         guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: space, bitmapInfo: CommittedRenderer.bitmapInfo)
+                                  space: space, bitmapInfo: Self.bitmapInfo)
         else { return nil }
         if let image {
             ctx.setBlendMode(.copy)
@@ -194,7 +211,7 @@ enum TileBitmap {
         return ctx
     }
 
-    /// Draws `tiles` (one level) into `ctx`, a bitmap in view points (`CommittedRenderer.makeBitmap`), with
+    /// Draws `tiles` (one level) into `ctx`, a bitmap in view points (`viewBitmap`), with
     /// the page at `transform`. At the tiles' own scale and a pixel-aligned offset, each pixel lands on one.
     static func compose(_ tiles: [(key: TileKey, image: CGImage)], at transform: ViewTransform, in ctx: CGContext) {
         ctx.saveGState()
@@ -274,7 +291,7 @@ struct InkSnapshot: @unchecked Sendable { // immutable values; geometry paths ar
         let missing = positions.sorted().map { strokes[$0] }
             .filter { geometry[$0.id] == nil && !skipped.contains($0.id) }
         guard !missing.isEmpty else { return [] }
-        let built = Array(zip(missing.map(\.id), CommittedRenderer.geometries(for: missing)))
+        let built = Array(zip(missing.map(\.id), StrokeRenderer.geometries(for: missing)))
         for (id, g) in built {
             geometry[id] = g
         }

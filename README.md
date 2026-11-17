@@ -145,6 +145,13 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   background save landed) draws from scratch next launch. One resting level is kept per page: switching between
   paged and continuous scrolling (different zooms) or resizing the window fills the page again. The first view
   of a page ever is still drawn from scratch (about 2 s for 5k strokes on the simulator).
+- The canvas (M1.5's tiled render path) has only been measured on the simulator, on synthetic Pencil input; no
+  budget is confirmed on a physical iPad yet. There, on the 5k-stroke benchmark page, some things are still
+  bounded by Core Graphics drawing strokes and over budget: an undo (~45 ms against 16), a stroke-eraser sweep
+  through dense ink (~0.5 s, as it refills ~1,000 strokes' worth of tiles), ink going sharp after a pinch to a new zoom level (~0.2 s), and a
+  page shown for the very first time (~2 s; afterwards its kept tiles open it in milliseconds). A finished
+  stroke is handed from the live layer to the tiles only at the zoom it was written at; other cached levels
+  draw it again. Metal tile fills (NOT-111) were deferred.
 - A note's cover is re-rendered when its editor closes, so a note whose editor was open when the app was
   killed shows its previous cover until it's next opened and closed.
 - The library index (SwiftData) is rebuilt from packages at launch if notes are missing from it, with title,
@@ -198,5 +205,5 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 
 ## Next steps
 
-1. Real thumbnails from the committed bitmap.
+1. Verify the canvas on a physical iPad with Apple Pencil (NOT-12, and NOT-112's on-device checklist).
 2. PDF import and annotation.

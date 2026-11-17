@@ -188,7 +188,7 @@ struct TileRaster: @unchecked Sendable { // immutable; `data` is never written
     static func compress(_ image: CGImage?) -> Blob? {
         guard let image else { return .empty }
         guard image.width == TileKey.side, image.height == TileKey.side, image.bytesPerRow == bytesPerRow,
-              image.bitsPerPixel == 32, image.bitmapInfo.rawValue == CommittedRenderer.bitmapInfo,
+              image.bitsPerPixel == 32, image.bitmapInfo.rawValue == TileBitmap.bitmapInfo,
               let bytes = image.dataProvider?.data, CFDataGetLength(bytes) >= tileBytes
         else { return nil }
         let destination = UnsafeMutablePointer<UInt8>.allocate(capacity: tileBytes)
@@ -240,7 +240,7 @@ struct TileRaster: @unchecked Sendable { // immutable; `data` is never written
         }
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: TileKey.side, height: TileKey.side, bitsPerComponent: 8,
-                                  bytesPerRow: Self.bytesPerRow, space: space, bitmapInfo: CommittedRenderer.bitmapInfo),
+                                  bytesPerRow: Self.bytesPerRow, space: space, bitmapInfo: TileBitmap.bitmapInfo),
               let target = ctx.data
         else { return nil }
         let decoded = data.withUnsafeBytes { raw -> Int in

@@ -337,7 +337,7 @@ final class LiveInkView: UIView {
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                                       | CGBitmapInfo.byteOrder32Little.rawValue)
         else { return nil }
-        // Same pixel grid and antialiasing as the committed bitmap, addressed in canvas space.
+        // Same pixel grid and antialiasing as the committed tiles, addressed in canvas space.
         ctx.translateBy(x: 0, y: CGFloat(pixels))
         ctx.scaleBy(x: scale, y: -scale)
         ctx.translateBy(x: -tileFrame.minX, y: -tileFrame.minY)

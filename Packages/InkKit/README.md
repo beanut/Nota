@@ -50,7 +50,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `RenderCoordinator.swift` | The committed side: which tiles the view needs, filling missing and stale ones off the main thread, showing them (the current level over the level before it and the resting level while it fills in), drawing finished strokes (`PendingStroke`) into the tiles they reach, revision tracking, the settled state, the page's `TileRaster` and the zoom panel's renders. Knows nothing of touches |
 | `RenderScheduler.swift` | `RenderScheduler` (`.shared`), `RenderJob`, `RenderPriority`, `RenderCancellation`: the one place render work runs (tiles, finished strokes, the zoom panel, the presentation mirror, thumbnails, page rasters), by priority, cancellable, on a bounded number of workers, published in batches on the main thread at most once a frame |
 | `TileCache.swift` | `TileLevel`, `TileKey` (256-pixel page-space tiles), `Tile` (pixels and the page revision they show) and `TileCache`, every page's tiles shared by every canvas and zoom panel, evicted least recently used under a byte budget |
-| `TileFiller.swift` | `TileFiller` and `CoreGraphicsTileFiller` (drawing strokes into a tile), `TileBitmap` (tile contexts in page points with the grain pinned to the page; assembling tiles into an image), `InkSnapshot` (the ink a render job draws from), `GeometryStore` (stroke geometry the jobs of one fill share, unpack and build) |
+| `TileFiller.swift` | `TileFiller` and `CoreGraphicsTileFiller` (drawing strokes into a tile), `TileBitmap` (the committed bitmap layout; tile contexts in page points with the grain pinned to the page; assembling tiles into an image), `InkSnapshot` (the ink a render job draws from), `GeometryStore` (stroke geometry the jobs of one fill share, unpack and build) |
 | `GeometryCache.swift` | `GeometryCache` (`.shared`: every page's packed stroke geometry under one byte budget, least recently used let go) and `PageGeometry` (a page's view of it, on `CanvasDocument.geometry`: shared by every canvas on the page, its erasers and fills; ink bounds; what's still current) |
 | `PackedGeometry.swift` | `PackedGeometry`: a stroke's geometry packed ~15× smaller (stamps as their nib, strips as varint deltas) and unpacked to `CGPath`s to draw |
 | `TileRaster.swift` | `TileRaster`: a page's resting-level tiles, compressed, in a versioned format an app can keep between launches (NOT-106) |
@@ -77,7 +77,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `PenTrayView.swift` | The pen tray popover |
 | `ColorPickerView.swift` | The colour picker popover (spectrum, hue, hex, eyedropper, recent colours, palettes) and the Pen Case's colour well |
 | `EyedropperOverlay.swift` / `CanvasView+Eyedropper.swift` | The eyedropper's overlay, loupe and banner, and sampling one device pixel of the canvas as drawn |
-| `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, and the incremental `LiveStroke` |
+| `StrokeRenderer.swift` | Nib model (from the descriptor: pressure → width, tilt → ellipse + opacity, taper, speed), centripetal Catmull-Rom, the hull path (tangent strips and nib stamps) and the stamp path, drawing, hit-testing, geometry for many strokes built on every core, and the incremental `LiveStroke` |
 | `PencilTexture.swift` | Procedural paper-tooth grain (scale, contrast, seed) for grain-textured brushes such as the pencil |
 | `WaxRenderer.swift` | The raster brush (the crayon) on the GPU: each nib stamp lays wax on the page's paper tooth roughened by the stroke's own grain, max-blended into a field, drawn into any context `StrokeRenderer.draw` is given |
 | `WaxShaders.swift` | `WaxRenderer`'s Metal shaders, as source compiled at run time (in the background when a canvas is made), so the build doesn't need the Metal toolchain |
@@ -104,7 +104,6 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView+SelectionActions.swift` | What the lasso does with a selection: cut, copy, paste, duplicate, recolour, thickness, bring to front / send to back, screenshot, drag out as an image; its menu (`UIEditMenuInteraction`) and ⌘X / ⌘C / ⌘V / ⌘D / Delete |
 | `SelectionClip.swift` | `SelectionClip`, a copied selection on the pasteboard (its format, fresh copies with new ids), and `PastePlacement`, where a paste lands |
 | `SelectionAction.swift` | `SelectionAction` and `LassoSelection`: the app's own items in the selection's menu (convert to text, AI actions) |
-| `CommittedRenderer.swift` | Bitmaps laid out like the committed tiles, geometry for many strokes built in parallel, and the old whole-screen render in parallel bands (only the benchmarks' whole-page timings use it now) |
 | `InputRecording.swift` | `InkInputRecording`, the recorded-Pencil-input format; the recorder the canvas feeds; and the replayer the benchmarks drive |
 | `PageRenderer.swift` | Renders a page snapshot (template + objects + ink + tape) to an image off the main actor (thumbnails), or pages to a PDF |
 | `TapeObject.swift` / `CanvasView+Tape.swift` | `TapeObject` (a strip drawn over the ink, revealed or hidden, plain / striped / grid, lenient JSON), revealing and hiding tape on a page; the tape tool and tap-to-toggle on the canvas |
@@ -193,7 +192,7 @@ with Pencil (NOT-12).
   match and nothing grows with stroke length.
 - **Raster brushes.** A `wax` texture (the crayon) isn't filled as paths: `StrokeRenderer.draw` hands it to
   `WaxRenderer`, which draws it with Metal into whatever context it was given, so the live layer, the
-  committed bitmap (band by band), page images, thumbnails and exports all get the same wax.
+  committed tiles (tile by tile), page images, thumbnails and exports all get the same wax.
   - Its geometry is the stamp path's, and each stamp keeps its nib and grain (`Hull.rasterStamp`, carried
     into `StrokeRun.stamps` as `RasterStamp`s), so erasing, splitting, the lasso and hit testing treat it
     like any stroke.
@@ -661,322 +660,207 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
 
 ### Rendering pipeline
 
-1. **Committed layer: page-space tiles** (NOT-102, following the decision below). Finished ink is drawn into
-   256 × 256 device-pixel tiles of the page at a **level** (device pixels per page point), kept in the shared
-   `TileCache` and shown as `CGImage` layer contents (`TileLayerGrid`).
-   - **Settled, a canvas shows its own level**: `viewTransform.scale × displayScale`, with the offset on whole
-     device pixels, so each tile pixel is a screen pixel and the tiles are what drawing the page whole at that
-     transform gives. A gesture ending within 2% of a level the page already has (the fitted page, the last
-     zoom) snaps to it, so returning there fills nothing.
-   - **What's filled.** `RenderCoordinator` works out the tiles in view (and a ring of one tile around them, so a
-     pan finds its next tiles cached) and fills only those missing or stale, one `RenderScheduler` job per tile
-     (see Render scheduler below), each tile drawing in page order the strokes the page's `StrokeIndex` finds reaching it
-     (`CoreGraphicsTileFiller`, through the same `StrokeRenderer.draw` as before). A pan at the same level over
-     cached tiles fills nothing; a pinch fills nothing until it ends: the last level is scaled, over the
-     **resting level** (the fitted page; continuous scrolling's column at zoom 1) where it has no tiles, masked
-     away wherever it has. When the gesture ends, the new level's tiles in view are filled, centre-out, and
-     each appears as its batch lands (see Zoom levels below).
-   - **Zoom levels: progressive refinement (NOT-105).** A canvas shows up to three levels, each in a layer
-     masked away wherever a level above it has a tile, so blurrier ink never shows around the sharp:
-     - the **displayed level** (`displayedLevel`): mid-gesture the last settled one, scaled; once the gesture
-       ends, the transform's own level at once, its tiles appearing as they land, centre-out;
-     - the **level before it** (`underLevel`), scaled under it until the new level's tiles cover the view,
-       then let go; so a pinch from 2× to 3× shows the 2× ink where 3× hasn't landed, never blank or the
-       fitted page's softer ink;
-     - the **resting level** (the fitted page; continuous scrolling's column at zoom 1) under both.
+The canvas draws in three layers: the **paper** (template and objects, page-space tiles: `VectorTileLayer`),
+the **committed ink** (page-space tiles), and the **live ink** (the strokes being written). Everything that
+draws pixels goes through one scheduler. The milestone that built this (M1.5, NOT-98 to NOT-112) replaced a
+single screen-sized bitmap that was drawn whole, in parallel bands, on every undo, erase, zoom and page entry;
+that path and its renderer are gone. `PageRenderer` still draws a page whole, for thumbnails, PDF export and
+the golden snapshots.
 
-     Nothing is filled at a scale still changing, with two exceptions, both at fixed levels. A pinch out
-     past the tiles drawn (fast, or after the cache let the resting level's tiles go) fills the resting
-     level's missing tiles in view, so the page is never blank. And a pinch that holds a scale (within the 2%
-     snap) for 100 ms (`steadyDelay`) fills that level's tiles in view while the fingers are still down;
-     lifting them there snaps to it (levels being filled count as cached), so it's sharp sooner. Zooming
-     back to a level still cached (the fitted page always is, as is a recent zoom) fills nothing, and the
-     snap lands on the level's scale exactly (a scale a rounding error off would be another level).
-     Settled levels stay exact rather than quantised to powers of √2: NOT-99 chose the transform's own level
-     so a settled tile pixel is a screen pixel and the live layer matches; the fallbacks above do the
-     quantised levels' job of always having something to show.
+#### Committed ink: page-space tiles
 
-     The cache evicts tiles of levels nobody shows (one zoomed through) before the shown levels' off-screen
-     tiles (the margin a pan uses next), and those before the resting level's (`TileCache.setInterest`'s
-     `shown`), all within its 192 MB. The template and objects are tiles too (`VectorTileLayer`, NOT-109) and
-     follow the same rule, more simply: mid-gesture the last level, scaled, over the resting level's tiles
-     (the whole page at the fitted level is kept for them); once the view settles, the new level's tiles in
-     view are drawn and swapped in together.
-   - **Versions and dirty rects (NOT-104).** Each tile records the version of the page's ink it shows
-     (`CanvasDocument.inkVersion`, which moves on with every change to the strokes: each command, undo and
-     redo, and each step of an erase or a lasso drag, which `revision` only counts once recorded). The page
-     logs where each change went (`inkChanges`, an `InkChangeLog` of the last 256): the reach of every stroke
-     it added, removed or changed, before and after, padded a point. A recolour or a reorder counts only the
-     strokes that differ; a standard erase, the strokes cut and their pieces. So a tile at an older version
-     is brought up to date by what the changes since reach of it:
-     - nothing: it's relabelled, unfilled (cached tiles at every level are moved on as changes arrive,
-       `TileCache.advance`, and the rest when looked at);
-     - part of it: only that part is refilled (`FillPlan.region`, a region job): the strokes the index finds
-       there are drawn into a blank tile clipped to just around it, and its pixels there replace the old
-       tile's, which stay on screen until the job lands;
-     - all of it, or changes too old for the log, or the page resized: the tile is filled whole.
+- **Tiles.** Finished ink is drawn into 256 × 256 device-pixel tiles of the page at a **level** (device pixels
+  per page point): tile (col, row) covers page pixels [col × 256, (col + 1) × 256) × [row × 256, (row + 1) ×
+  256) at that level (`TileLevel`, `TileKey`). Tiles are kept in one app-wide `TileCache` (192 MB, least
+  recently used first, never a tile on screen; a tile with no ink keeps no bitmap) and shown as `CGImage` layer
+  contents (`TileLayerGrid`). They're keyed by page (`CanvasDocument.cacheID`), level and position, so the paged
+  canvas, the embedded canvases of continuous scrolling, a second window on the note and the zoom window's
+  panel all share them.
+- **Settled, a canvas shows its own level**: `viewTransform.scale × displayScale`, with the offset on whole
+  device pixels, so each tile pixel is a screen pixel and the live layer lines up with it. A gesture ending
+  within 2% of a level the page already has (the fitted page, the last zoom) snaps to it exactly, so returning
+  there fills nothing. Levels aren't quantised: the fallbacks below do that job of always having something to
+  show.
+- **What's filled.** `RenderCoordinator` works out the tiles in view and a ring of one tile around them (so a
+  pan finds its next tiles cached), and fills only those missing or stale, one scheduler job per tile, centre
+  out. A fill draws, in page order, the strokes the page's `StrokeIndex` finds reaching the tile
+  (`CoreGraphicsTileFiller`, through `StrokeRenderer.draw`, the same code as the live layer). A pan at one level
+  over cached tiles fills nothing.
+- **Zoom levels: progressive refinement.** A canvas shows up to three levels, each in a layer masked away
+  wherever a level above it has a tile, so blurrier ink never shows around the sharp:
+  - the **displayed level**: mid-gesture the last settled one, scaled; once the gesture ends, the transform's
+    own level at once, its tiles appearing as they land;
+  - the **level before it** (`underLevel`), scaled under it until the new level's tiles cover the view;
+  - the **resting level** (the fitted page; continuous scrolling's column at zoom 1) under both.
 
-     A refilled region is the tile filled again to within one level in a few pixels (a clip moves Core
-     Graphics' coverage that much; it never builds up, since a region is drawn from nothing each time). A
-     grain stroke drawn through a transparency layer isn't clipped, as its pattern would shift. Every canvas
-     and the zoom panel read the same log, so a second window's tiles catch up the same way. On the 5k
-     benchmark page at the fitted zoom an undo of one stroke is ~45 ms (from ~1.4 s), and a stroke erase of
-     ~90 strokes ~0.5 s (a 550 × 180 pt band of the densest page, so ~1,000 strokes to draw again); at 6× the
-     tiles hold few strokes each. Closing that needs a cheaper fill per stroke (see the decision below).
-   - **A finished stroke** is drawn into every cached tile it reaches, at every level, by an `underPencil` job
-     (strokes sent meanwhile go in the next one, in order), so it never blinks; the tiles it doesn't reach move
-     on to the new revision as they are (`TileCache.advance`). Fills run beside it and leave strokes still
-     waiting for their estimates out, so a fill that started before the stroke was sent lands labelled with the
-     revision before it: where the stroke doesn't reach, the coordinator's stroke log moves the label on; where
-     it does, or the job saw a tile a fill has since replaced, the tile is marked stale and filled again.
-   - **No second rasterization at the level it was written at (NOT-110).** The live layer has already drawn the
-     stroke, alone, on the same pixel grid, so the tiles of the level it was written at take those pixels instead
-     (`LiveInkView.bakedInk(of:)`, `TileBitmap.composite`): each tile lays its quarter of a live tile over what it
-     has with a normal blend, which is what drawing the stroke on gives, to a level of rounding at its
-     anti-aliased edges (the tests hold such tiles to fills within 2 of 255 in all but 0.2% of pixels). The
-     stroke is drawn from its geometry, as before, where that isn't so: multiply ink and erasers (they need
-     what's under them), a stroke with estimates still to come, a page origin off a whole device pixel, other
-     levels' cached tiles, tiles the live layer never covered (off screen), and a crayon's tiles whose wax isn't
-     back. `FillStats.finishedStrokeFills` / `finishedStrokeCopies` count the two.
-   - **Live and committed match** as before: the same `.copy` run rule, multiply and wax, on a pixel grid
-     aligned with the live layer's, and the pencil grain is pinned to the page in both
-     (`PencilTexture.pinToPage`: the pattern anchored at the page origin's device pixel, not reduced modulo a
-     cell, so a scaled grain lines up too).
-   - **One cache, every view.** Tiles are keyed by page (`CanvasDocument.cacheID`), level and position, so the
-     paged canvas, each embedded canvas in continuous scrolling (a re-centred render window, or a pooled
-     canvas handed another page, finds that page's tiles as they were) and the zoom window's panel share them. The cache keeps 192 MB, evicting least
-     recently used tiles that no view shows first, then resting-level ones, never one on screen. Empty tiles
-     keep no bitmap.
-   - **Reopening a page (NOT-106).** With its tiles still cached, a page opens with no fill at all. When any
-     canvas leaves a page (it leaves the window, or the app goes to the background), it hands the document a
-     `TileRaster`: its resting-level tiles (the fitted page, or the column at zoom 1 in continuous
-     scrolling), LZFSE-compressed, about 5 MB for 5k strokes. A paged canvas fills any it doesn't have
-     cached in the background first; an embedded one leaves only the tiles it had. A fill restores a tile
-     from it instead of drawing it once the cache has let it go (`FillPlan.restore`).
-   - **The raster outlives edits.** It's labelled with the `inkVersion` it shows, and a tile is caught up from
-     `inkChanges` like a cached one: restored as it is where no change since reaches it, restored and
-     refilled only in the region one does, filled whole when the log no longer knows (more than 256
-     changes since, or a resize). Leaving the page again carries the tiles no change reached into the new
-     raster still compressed, so only tiles that changed are compressed again.
-   - **Kept between launches.** `raster.data` is a self-describing format (`TileRaster`: magic,
-     `formatVersion`, `rendererVersion`, tile side, level, page size, a table of tiles, then their LZFSE
-     bytes), handed out as `CanvasDocument.committedTiles` and taken back by `restoreCommittedTiles(_:)`,
-     which refuses another format, renderer or page size. InkKit doesn't know where it's kept: Nota's
-     `PageTileCache` (NotaCore) stores it keyed by the hash of the page's saved ink file. **Bump
-     `TileRaster.rendererVersion` whenever a fill's pixels change for the same strokes** (the renderer, a
-     built-in brush, grain, wax, colour handling), or kept tiles will show the old look. A tile whose bytes
-     don't decode is filled.
-   - `PageRenderer` (thumbnails, PDF, the golden snapshots) still draws the page whole; tiles differ from it in
-     well under 0.2% of pixels (Core Graphics' coverage of a path cut by a different clip), and the tile tests
-     hold them to that.
-2. **Live layer.** The in-progress stroke is drawn in a separate view made of tile layers, so per-frame work doesn't grow with stroke length, screen size or zoom:
-   - **On the committed grid (NOT-110).** A live tile is 512 device pixels square (256 pt at 2×), laid from the page origin's device pixel, so it covers exactly 2 × 2 committed tiles of the level the view is settled at. Its bitmaps are then the committed tiles' pixels, and a finished stroke hands them over (Committed layer › No second rasterization). The layer is still view-sized: it covers the view, not the page.
-   - The stroke is cut into chunks of 8 segments. A chunk that is complete, and whose points are no longer waiting for estimated-property updates, is **baked**: rasterized once into a per-stroke bitmap for each tile it reaches, and never filled again. A tile draw bakes at most 64 runs (`bakeBudget`), carrying on next draw, so several chunks settling at once when late estimates arrive (a stamp brush's chunk is about a hundred runs, up to a millisecond to bake) don't land on one touch event.
-   - Only the **hot** part (what the tile hasn't baked: the newest chunk or two and the provisional tail) is re-filled each frame, and only in the tiles under the new ink, clipped to the invalidated rect. Runs whose own bounds miss that rect are skipped (`LiveStroke.runs(within:)`).
-   - Baking uses `.copy`, the same "later run replaces earlier" rule as the committed path, so live and committed pixels match.
-   - A late estimate that changes a baked chunk re-bakes just the tiles it touches. Tiles are freed once every stroke has been committed.
-   - A raster brush (the crayon) bakes its wax field on the GPU instead and gets its pixels back asynchronously (see Brushes › Raster brushes).
-   - Multiply ink previews over the committed tiles on screen (`LiveInkView.underlay`, page rects and images).
+  Nothing is filled at a scale still changing, with two exceptions, both at fixed levels: a pinch out past the
+  tiles drawn fills the resting level's missing tiles in view, so the page is never blank; and a pinch that
+  holds a scale (within the 2% snap) for 100 ms (`steadyDelay`) fills that level's tiles in view while the
+  fingers are still down, so lifting them there is sharp sooner. The cache lets go of levels nobody shows (one
+  zoomed through) before the shown levels' off-screen tiles, and those before the resting level's
+  (`TileCache.setInterest`).
+- **Edits refill only what they changed.** Each tile records the version of the page's ink it shows
+  (`CanvasDocument.inkVersion`, which moves with every change to the strokes: each command, undo and redo, and
+  each step of an erase or a lasso drag). The page logs where each change went (`inkChanges`, an
+  `InkChangeLog` of the last 256): the reach of every stroke it added, removed or changed, before and after.
+  A tile at an older version is brought up to date by what the changes since reach of it: nothing (it's
+  relabelled, `TileCache.advance`), part of it (only that region is drawn again into a blank tile clipped to
+  just around it and copied over the old pixels, which stay on screen until then: `FillPlan.region`), or all
+  of it, or the log no longer knows (filled whole). A refilled region matches a fill from scratch to within a
+  level in a few pixels; a grain stroke drawn through a transparency layer isn't clipped, as its pattern would
+  shift. Every canvas and the zoom panel read the same log, so a second window's tiles catch up the same way.
+- **A finished stroke** is drawn into every cached tile it reaches, at every level, by an `underPencil` job,
+  so it never blinks. At the level it was written at the live layer has already drawn it, on the same pixel
+  grid, so those tiles take its pixels instead of filling it again (`LiveInkView.bakedInk(of:)`,
+  `TileBitmap.composite`): the same picture to a level of rounding at anti-aliased edges. It's drawn from its
+  geometry where that isn't so: multiply ink and erasers (they need what's under them), a stroke with
+  estimates still to come, a page origin off a whole device pixel, other levels' tiles, tiles the live layer
+  never covered (off screen), and a crayon tile whose wax isn't back. `FillStats.finishedStrokeFills` /
+  `finishedStrokeCopies` count the two. Fills that started before the stroke land labelled with the version
+  before it, and are moved on or refilled as the stroke log says.
+- **Live and committed match**: the same `.copy` run rule, multiply and wax, the grain pinned to the page in
+  both (`PencilTexture.pinToPage`: the pattern anchored at the page origin's device pixel, so a scaled grain
+  lines up across tiles too). Each thread keeps its own grain pattern colours: Core Graphics caches a pattern
+  image's rasterization, and threads sharing one at different levels left each other a few pixels.
+- **Reopening a page.** With its tiles still cached, a page opens with no fill at all. When a canvas leaves a
+  page (it leaves the window, or the app goes to the background) it hands the document a `TileRaster`: its
+  resting-level tiles, LZFSE-compressed, about 5 MB for 5k strokes. A fill restores a tile from it instead of
+  drawing it once the cache has let it go (`FillPlan.restore`). The raster is labelled with the `inkVersion`
+  it shows and caught up from `inkChanges` like a cached tile, so it outlives edits.
+- **Kept between launches.** `raster.data` is a self-describing format (`TileRaster`: magic, `formatVersion`,
+  `rendererVersion`, tile side, level, page size, a table of tiles, then their LZFSE bytes), handed out as
+  `CanvasDocument.committedTiles` and taken back by `restoreCommittedTiles(_:)`, which refuses another format,
+  renderer or page size. InkKit doesn't know where it's kept: Nota's `PageTileCache` (NotaCore) stores it keyed
+  by the hash of the page's saved ink file. **Bump `TileRaster.rendererVersion` whenever a fill's pixels change
+  for the same strokes** (the renderer, a built-in brush, grain, wax, colour handling), or kept tiles will show
+  the old look. A tile whose bytes don't decode is filled.
+- **Geometry** for fills comes from the page's budgeted cache (see Stroke geometry › Keeping geometry); a batch
+  of fills shares a `GeometryStore`, so each stroke is unpacked or built once per batch.
+- **Checks.** `rendersSettled` means the tiles in view are at the page's version, sharp, at the current
+  transform, with no finished stroke on its way. `RenderCoordinator.composedImage()` assembles them into one
+  image, which the benchmarks and tests compare with the same tiles drawn from scratch. Tiles assembled into a
+  page differ from `PageRenderer`'s whole page in well under 0.2% of pixels (Core Graphics' coverage of a path
+  cut by a different clip), and the tile tests hold them to that.
 
-#### Render scheduler (NOT-103)
+#### Live ink
 
-All render work goes through `RenderScheduler.shared`: canvas tiles, finished strokes, the zoom window's panel,
-the presentation mirror, page thumbnails, and a closing page's
-`TileRaster`. There are no other render queues or in-flight/requested flags.
+The in-progress stroke is drawn in a separate view made of tile layers, so per-frame work doesn't grow with
+stroke length, screen size or zoom:
+
+- **On the committed grid.** A live tile is 512 device pixels square (256 pt at 2×), laid from the page
+  origin's device pixel, so it covers exactly 2 × 2 committed tiles of the level the view is settled at. Its
+  bitmaps are then the committed tiles' pixels, and a finished stroke hands them over (above). The layer covers
+  the view (in continuous scrolling, the page's render window), not the page: it only holds strokes being
+  written or waiting to be drawn, and frees its tiles once every stroke is committed.
+- The stroke is cut into chunks of 8 segments. A chunk that is complete, and whose points are no longer waiting
+  for estimated-property updates, is **baked**: rasterized once into a per-stroke bitmap for each tile it
+  reaches, and never filled again. A tile draw bakes at most 64 runs (`bakeBudget`), carrying on next draw, so
+  several chunks settling at once when late estimates arrive don't land on one touch event.
+- Only the **hot** part (what the tile hasn't baked: the newest chunk or two and the provisional tail) is filled
+  again each frame, only in the tiles under the new ink, clipped to the invalidated rect. Runs whose own bounds
+  miss that rect are skipped (`LiveStroke.runs(within:)`).
+- Baking uses `.copy`, the same "later run replaces earlier" rule as the committed tiles. A late estimate that
+  changes a baked chunk bakes just the tiles it touches again.
+- A raster brush (the crayon) bakes its wax field on the GPU instead and gets its pixels back asynchronously
+  (see Brushes › Raster brushes).
+- Multiply ink previews over the committed and paper tiles on screen (`LiveInkView.underlay`).
+
+#### Render scheduler
+
+All render work goes through `RenderScheduler.shared`: committed tiles, finished strokes, paper tiles, the zoom
+window's panel, the presentation mirror, page thumbnails and a closing page's `TileRaster`. There are no other
+render queues or in-flight flags.
 
 - **Jobs** (`RenderJob`) carry a priority, a rank within it (tiles: their place centre-out) and optionally a
   cancellation token and a coalescing key. `work` runs on a worker thread and returns an output; `publish` runs
   on the main thread with it, or with nil when the job was dropped, exactly once.
 - **Priorities**, in order: `underPencil` (tiles within 8 pt of the nib, finished strokes), `visible` (tiles in
-  view, the zoom panel), `margin` (the ring around the view, the presentation mirror), `otherLevel` (the page
-  raster at the resting level), `background` (thumbnails). QoS follows: user-interactive,
-  user-initiated, utility. A queued job can be moved (`reprioritise`: a margin tile that came into view).
-- **Bounded.** At most every core but one run at once; while any canvas is in a gesture (the coordinator reports
-  `isMoving`), two performance cores fewer than the device has (`hw.perflevel0`), so the main thread and the
-  render server keep two. `otherLevel` and `background` jobs take at most two workers between them, so a slow
-  thumbnail never holds up a tile.
+  view, the zoom panel), `margin` (the ring around the view, pages ahead of a scroll, the presentation mirror),
+  `otherLevel` (the page raster at the resting level), `background` (thumbnails). A queued job can be moved
+  (`reprioritise`: a margin tile that came into view).
+- **Bounded.** At most every core but one run at once; while any canvas is in a gesture, two performance cores
+  fewer than the device has (`hw.perflevel0`), so the main thread and the render server keep two. `otherLevel`
+  and `background` jobs take at most two workers between them, so a slow thumbnail never holds up a tile.
 - **Cancellation.** A cancelled job never starts; a running one is asked between strokes (`TileFiller.fill`'s
-  `isCancelled`, and `GeometryStore` between geometry builds) and its output is dropped even if it finished. The
-  coordinator cancels fills for tiles that left the wanted set, queued fills of a revision the page has moved on
-  from (they're submitted again), everything on `discardInFlight` (a token), and everything when it goes (its
-  lifetime token). A *running* fill of an older revision is left to finish, because its pixels are newer than
-  what's on screen (a dense fitted tile takes 100–250 ms, and an erase changes the page faster than that); its
-  tile is refilled when it lands. A coalescing key (zoom panel, mirror) cancels the older job if it hasn't
-  started, and drops its output if a newer one published first, so stale pixels never land over fresh ones.
-- **Published in batches.** Finished jobs are published together on the main thread, at most once per
-  120 Hz frame; an owner hears once per batch (`afterBatch`), so the coordinator stores the batch's tiles and
-  lays its layers out once.
-- **Settled.** Fills are tracked per tile until published or cancelled. `rendersSettled` means "no fill of a
-  tile in view and no finished stroke on its way, and every tile in view at the page's revision"; the margin's
-  fills may still be running (`RenderCoordinator.isFilling`), as they change nothing on screen. So
-  time-to-sharp no longer waits for the margin; benchmarks and tests that count fills wait for those too.
-- **Region jobs.** NOT-104's dirty-rect refills are tile jobs like any other, with a region
-  (`TileFiller.fill`'s `region`) and the tile they start from. NOT-105's progressive levels are `visible`
-  jobs shown as each batch lands; fills of levels passed through during a pinch are cancelled, bar the
-  resting level's missing tiles and a held scale's (see Zoom levels above).
+  `isCancelled`, and `GeometryStore` between geometry builds) and its output is dropped. The coordinator cancels
+  fills for tiles that left the wanted set, queued fills of a version the page has moved on from, everything on
+  `discardInFlight`, and everything when it goes. A *running* fill of an older version is left to finish (its
+  pixels are newer than what's on screen) and its tile is refilled when it lands. A coalescing key (zoom panel,
+  mirror) cancels the older job if it hasn't started, and drops its output if a newer one published first.
+- **Published in batches.** Finished jobs are published together on the main thread, at most once per 120 Hz
+  frame; an owner hears once per batch (`afterBatch`), so the coordinator lays its layers out once.
+- **Settled.** `rendersSettled` ignores the margin's fills, which change nothing on screen
+  (`RenderCoordinator.isFilling` covers them); benchmarks and tests that count fills wait for those too.
 
-#### Decision: tiled committed layer (NOT-99)
+#### Why tiles: the decision (NOT-99)
 
-**Core Graphics fills page-space tiles; Core Animation composites them (option 3, "hybrid"). Metal fill is
-deferred out of M1.5**, kept possible by the `TileFiller` interface below. The spike prototyped all three
-options on the 5k-stroke benchmark page (`Tests/InkKitBenchmarks/RenderSpike.swift`, not part of the
-benchmark run; `-only-testing:InkKitBenchmarks/RenderSpike` in Release prints `[inkbench] spike.*`). Numbers
-are from the iPad Pro 13-inch (M5) simulator on an M1 Pro (10 cores), so the GPU is the Mac's:
+**Core Graphics fills page-space tiles; Core Animation composites them. Metal fill is deferred**, kept possible
+by the `TileFiller` protocol. The spike prototyped three options on the 5k-stroke benchmark page (the
+prototypes were deleted in NOT-112; they're in the NOT-99 commit, `Tests/InkKitBenchmarks/RenderSpike.swift`).
+iPad Pro 13-inch (M5) simulator on an M1 Pro (10 cores), so the GPU is the Mac's:
 
-| | Today (one bitmap, bands) | CG tiles, 256 px, pieces culled | Metal, stencil-then-cover, 4× MSAA |
+| | One bitmap, bands (before M1.5) | CG tiles, 256 px | Metal, stencil-then-cover, 4× MSAA |
 | --- | ---: | ---: | ---: |
 | One tile at the fitted zoom (p50 / p95) | – | 100 / 232 ms | – |
 | One tile at 6× (p50 / p95) | – | 5.6 / 7.1 ms | 2–4.5 ms (512 px) |
 | Whole page at the fitted zoom, every core | 1,817 ms | 1,408 ms (80 tiles) | 36–44 ms |
 | Screen at 6×, every core | 150 ms | 102 ms (99 tiles) | 7–15 ms |
-| Undo of one word-sized stroke, fitted zoom | 1,886 ms (`edit.undo_5k_ms`) | 220 ms whole tiles; **31 ms** dirty rect only | – |
-| Same undo, only the tiles on screen at 6× | – | 9.4 ms | – |
+| Undo of one word-sized stroke, fitted zoom | 1,886 ms | 220 ms whole tiles; 31 ms dirty rect only | – |
 | Memory | 22 MB bitmap | 256 KB a tile: 20 MB fitted page, 25 MB screen at 6× | 203 MB of vertices, 217 MB of MSAA targets |
-| Pixels differing from today's (> 2 of 255) | – | 0.13% (0.06% at 512 px) | 35% at 1×, 14% at 6× |
+| Pixels differing from the bitmap's (> 2 of 255) | – | 0.13% | 35% at 1×, 14% at 6× |
 
-What decided it:
-
-- **Core Graphics is slow per stroke, not per pixel.** In a fitted-zoom tile a plain stroke costs 0.39 ms, a
-  stroke with tilt-varying alpha (two or more runs, drawn through a transparency layer) 1.48 ms, a grain
-  stroke 0.57 ms, whatever share of the tile it covers. So tiles don't make a full page cheaper (1.4 s), and a
-  fitted-zoom tile on this page (up to 281 strokes) is 100–250 ms. What tiles buy is **not filling**: a pan
-  over cached tiles fills nothing, an edit refills only its rect, and at 6× a tile holds few strokes.
-- **Culling to pieces** (a tile fills only the strips and stamps of each stroke that reach it) takes a 6× tile
-  from 7.9 to 5.6 ms (p50) and the 6× screen from 157 to 102 ms; it does nothing at the fitted zoom, where most
-  of a stroke reaches the tile anyway.
-- **Dirty rects, not dirty tiles.** Refilling whole tiles for an undo is 220 ms at the fitted zoom (10 tiles of
-  ~100 ms); clearing and refilling only the stroke's padded bounds inside each tile is 31 ms, with 253 strokes
-  under that rect on this page. That's still 2× the 16 ms edit budget on the benchmark page (a pile of corpus
-  copies far denser than real notes); at 6× the visible part is 9.4 ms.
+- **Core Graphics is slow per stroke, not per pixel.** A plain stroke costs ~0.4 ms in a fitted-zoom tile, a
+  stroke with tilt-varying alpha (several runs, drawn through a transparency layer) ~1.5 ms, whatever share of
+  the tile it covers. So tiles don't make a full page cheaper; what they buy is **not filling**: a pan over
+  cached tiles fills nothing, an edit refills only its rect, a page seen before restores its tiles, and at 6× a
+  tile holds few strokes.
 - **Tile size 256 px.** 512 px tiles take 26 ms each at 6× and 1024 px 128 ms: too coarse for a scheduler to
-  cancel, prioritise and publish within a frame, and an undo refills 4–16× the pixels. 256 px costs the same
-  memory at the fitted zoom (20 MB) and less at 6× (25 vs 30 MB), at up to ~100 layers on screen.
-- **Metal is ~30× faster for a whole page (7–15× for the 6× screen), but isn't the same picture.** The prototype has no grain, no `.copy`
-  between runs, an approximate multiply, and MSAA coverage instead of Core Graphics' analytic coverage: 35% of
-  pixels differ at the fitted zoom. Closing that means porting the grain and the run rule to shaders and
-  accepting that Core Graphics (PDF export, thumbnails, the goldens, the live layer) and Metal never match
-  exactly. Its naive tessellation is 203 MB of vertices for 5k strokes (twice the 109 MB geometry cache) and
-  0.6–1.9 s of CPU to build. That's a milestone of its own, not a step of this one.
-- **Hand-off is cheap.** Snapshotting a tile bitmap as a `CGImage` for `CALayer.contents` is 0.03 ms
-  (copy-on-write); uploading 512 px into an `MTLTexture` by hand is 1.1 ms. So tiles go to layers as images and
-  Core Animation uploads them.
+  cancel, prioritise and publish within a frame, and an undo refills 4–16× the pixels.
+- **Hand-off is cheap.** A tile bitmap as a `CGImage` for `CALayer.contents` is 0.03 ms (copy-on-write);
+  uploading 512 px into an `MTLTexture` by hand is 1.1 ms. So tiles go to layers as images.
+- **Metal is ~30× faster for a whole page, but isn't the same picture.** The prototype had no grain, no `.copy`
+  between runs, an approximate multiply and MSAA coverage instead of Core Graphics' analytic coverage (35% of
+  pixels differ at the fitted zoom), and its naive tessellation was 203 MB of vertices for 5k strokes. That's a
+  milestone of its own.
 
-**Tiles.**
+**Where the budgets ended up** (NOT-112, simulator; on-device numbers are still to come): see Benchmarks for
+every metric. What stays over budget is fill-bound: a dense tile at the fitted zoom is 100–250 ms of Core
+Graphics, so an edit that reaches ~1,000 strokes of the benchmark page (`edit.erase_stroke_5k_ms`), a new
+level whose ~110 tiles add up to ~1.4 s of fills (`zoom.pinch_1x_6x.time_to_sharp_ms`), and the first view of a
+page ever (`scroll.page_enter_first_5k_ms`) are all bounded by drawing strokes. Closing them needs a cheaper
+fill per stroke: drawing straight from packed geometry without an intermediate `CGPath`, culling each run to
+the pieces reaching a tile, or the Metal fill.
 
-- A tile is **256 × 256 device pixels** of one page at one **level** (pixels per page point). Tile (col, row)
-  covers page pixels [col × 256, (col + 1) × 256) × [row × 256, (row + 1) × 256) at that level, so its page
-  rect is that divided by the level. Tiles are in page space: the same tile serves the paged canvas, embedded
-  canvases in continuous scrolling and the zoom window's panel at the same level, wherever they're placed.
-- A tile with no ink is stored as "empty" (no bitmap). A tile bitmap is premultiplied BGRA from
-  `CommittedRenderer.makeBitmap`, 256 KB.
-- Each tile remembers the page revision it shows. An edit marks tiles **stale** but keeps their pixels on
-  screen until the refill lands, so nothing flashes blank.
-
-**Zoom levels.**
-
-- **Settled, a canvas shows tiles at exactly its scale.** The level is `viewTransform.scale × displayScale`,
-  and when a gesture ends the transform's offset is snapped to whole device pixels so the tile grid lands on
-  the screen's pixel grid. Then a tile's pixels are what drawing the page whole at that transform gives (to the
-  0.13% above), the live layer is unchanged and still matches, and `CanvasBenchmarks`' pixel check keeps
-  meaning "correct at the current transform".
-- **Levels are reused, not quantised.** When a pinch ends within 2% of a level already cached for the page (the
-  fitted level, the last zoom), the transform's scale snaps to that level exactly, so double-tapping back to fit
-  or returning to a zoom refills nothing. Otherwise the new scale is a new level.
-- **During a gesture nothing is filled at the moving scale.** The layers of the last settled level are
-  transformed (as the bitmap is today), over the fitted level's tiles as a fallback where they're missing. When
-  the gesture ends, the visible tiles of the new level are filled centre-out and swapped in as they land
-  (NOT-105, landed: see Zoom levels in the pipeline above).
-- The **fitted level** of each layout (paged; continuous) is kept for every open page; other levels go first
-  under the byte budget. A fitted 5k-stroke page is 20 MB of tiles.
-
-**Live and committed pixels stay matched** the way they do today: the committed tiles use the same
-`StrokeRenderer.draw` (the `.copy` run rule, `WaxRenderer` for raster brushes) at the same scale, on a pixel
-grid aligned with the live layer's. The pencil grain's pattern phase comes from the tile's page-pixel origin
-(the pattern is anchored at a bitmap's bottom-left corner in device pixels), so grain is pinned to the page
-across tiles. Committing a stroke draws it into the cached tiles it reaches at the current level (as it's
-drawn onto the bitmap today, so it never blinks) and marks it stale at other levels.
-
-**Golden snapshots don't change.** They're drawn by `PageRenderer` (whole page, one bitmap), which stays as it
-is for thumbnails, PDF and the goldens. Tiles differ from a whole-page draw in 0.13% of pixels: not at the seams
-(0.012% within 2 px of a tile edge) but inside, where Core Graphics' coverage of a path cut by a different clip
-differs by a few levels (up to 50 for plain ink, 158 for grain). Today's bands, which only cut horizontally,
-differ in 0.002%. So:
-
-- Tile tests compare tiles with the **same tiles drawn from scratch** (exact), and tiles assembled into a page
-  with `PageRenderer`'s whole page within a tolerance (0.2% of pixels by more than 2 levels).
-- `CanvasBenchmarks.mismatch(of:)` draws its reference through the tile path from scratch (or relaxes its
-  0.1% threshold to 0.2%); NOT-102 decides and updates it with `liveView.underlay`, which tiles replace.
-
-**Types the follow-up issues build** (names are the proposal; adjust in review, then keep this list current):
-
-| Type | Issue | Role |
-| --- | --- | --- |
-| `RenderCoordinator` | NOT-100, NOT-102 (landed) | The committed side pulled out of `CanvasView`: geometry cache, pending strokes, revision tracking, render requests. `CanvasView`, embedded canvases and the zoom panel talk to it; it owns no touches. Wraps today's bitmap behind `invalidate(rect:)` / `invalidateAll()`, `strokeCommitted(_:geometry:revisionBefore:)`, `visibleRect(for:)`, `isSettled` (what `rendersSettled` reads) and `publishedImage` (what `CanvasBenchmarks.mismatch(of:)` reads), so NOT-102 swaps the inside. The viewport already keeps the offset on device pixels (each pan or pinch step, and the fitted transform), so a settled transform is pixel-aligned |
-| `StrokeIndex` | NOT-101 (landed) | Per page, owned by `CanvasDocument`, kept in step by every change (see Spatial index below). `strokes(in: CGRect) -> [Int]` (positions in page (z) order), `objects(in:)`; `CanvasDocument.strokeIndices(in:)` / `strokes(in:)` / `objects(in:)` wrap it. A uniform grid of 32 pt cells. No `nearest(to:limit:)`: tap selection wants the topmost stroke under the finger, which a rect query around the tap gives in z-order |
-| `TileLevel`, `TileKey` | NOT-102 (landed) | `TileLevel(pixelsPerPoint:)` (and `isNear`, the 2% snap); `TileKey(page: UUID, level:, col:, row:)`, `TileKey.side = 256`, `rect` in page points, `pixelRect`, `keys(covering:page:level:)` |
-| `TileCache` | NOT-102 (landed) | One for the app (`TileCache.shared`), shared by every canvas and zoom panel. Thread-safe. `tile(for:)` / `tiles(for:)` (`Tile`: `image`, nil when empty, and `revision`), `store` / `storeIfNewer`, `advance(page:from:to:outside:)`, `invalidate(page:rect:)` (marks stale at every level), `setInterest` (what a view shows and its resting level), LRU eviction under a byte budget, off-screen tiles first |
-| `TileFiller` | NOT-102 (landed) | `fill(_ key:, region:, strokes: [TileStroke], into:)`: draws the given strokes (from `InkSnapshot.drawable(in:)`, which asks the `StrokeIndex`) into a tile, or only `region` of it (cleared first; NOT-104's dirty rects). `CoreGraphicsTileFiller` is the only one in M1.5 |
-| `StrokeGeometry` pieces | not done | Each run's strips and stamps with their bounds, so a filler draws only the pieces reaching its tile. Left out of NOT-102: a copy of every stroke's pieces would roughly double the geometry cache (NOT-108 bounds it), and the spike's gain was at 6× only (7.9 → 5.6 ms a tile) |
-| `RenderScheduler`, `RenderJob` | NOT-103 (landed) | Jobs carry a priority (`.underPencil`, `.visible`, `.margin`, `.otherLevel`, `.background`), a rank and a cancellation token; the coordinator tracks each tile's fill and its revision. Dropped before they start when stale or off screen, checked between strokes while running; results published in one batch per frame. See Render scheduler above |
-| `CanvasDocument` change rects | NOT-104 (landed) | `inkVersion` moves on with every change to the strokes, mid-gesture too, and `inkChanges` (`InkChangeLog`) keeps the rect each touched; the coordinator relabels tiles no change reached and refills the rest by region (`FillPlan`, `TileFiller.fill(_:region:…)`). The rects travel in the document rather than with `invalidate(rect:)`, so every canvas and level showing the page uses them, whichever view made the change |
-| Progressive levels | NOT-105 (landed) | `RenderCoordinator.displayedLevel` / `underLevel` over the resting level, each masked where the level above has tiles; the resting level's missing tiles and a held pinch's level filled mid-gesture (`steadyDelay`); `TileCache` evicts levels nobody shows first. The template and objects follow it as tiles too (`VectorTileLayer`, NOT-109) |
-
-**Order of the follow-ups**: NOT-100 (split `CanvasView`, no behaviour change) → NOT-101 (index: tiles query it
-per tile, and a linear scan per tile over 5k strokes would cost more than small fills) → NOT-102 (tiles, levels,
-piece culling; pans and zoom levels reuse pixels) → NOT-103 (scheduler: cancellation and priorities make
-time-to-sharp and pan margins work; leaves two performance cores free during gestures) → NOT-104 (dirty-rect
-edits). What to expect against the NOT-98 budgets on the 5k page:
-
-- `pan.6x_dense.*`: met after NOT-102/103 (cached tiles fill nothing; a new column of eleven 6× tiles every
-  ~13 frames at 10 pt a frame is ~60 ms of background fill).
-- `zoom.pinch_1x_6x.time_to_sharp_ms`: ~100 ms of fill on every core for the 6× screen, so about the 150 ms
-  budget once the scheduler holds two cores back; centre-out order gets the middle sharp first. Measured
-  after NOT-105: ~200 ms on the M1 Pro simulator, ~110 tiles whose fills add up to ~1.4 s (7.7 ms a tile
-  alone, ~13 ms each when nine run side by side), so it's fill-bound; NOT-105 shows the tiles as they land
-  and fills a held pinch's level before the fingers lift (`zoom.pinch_1x_6x_held`). Cutting run paths to
-  the tile as they're drawn was tried and was slower (and not byte-identical): closing the rest needs
-  cheaper strokes or the Metal fill.
-- `edit.*`: ~31 ms at the fitted zoom after NOT-104, so still about 2× over on this page; 9 ms at 6×. Closing
-  it needs cheaper strokes: the multi-run transparency layer is 4× a plain fill. Proposed as a follow-up
-  (see below) rather than more scope for NOT-104.
-- A **new zoom level near the fitted zoom** refills most of the page: ~1.4 s on this page, progressively,
-  centre-out, over the scaled tiles. That's the case Metal fill would fix.
-- `scroll.page_enter_5k_ms` (50 ms) is met for a page seen before, in this launch or (with the app's tile
-  cache) an earlier one: its kept tiles are restored, not drawn (NOT-106). The first time a page is ever
-  shown, its tiles in view are filled (`scroll.page_enter_first_5k_ms`, about 2 s on this page): nothing
-  but a cheaper fill helps there.
-
-**Metal fill: deferred.** Revisit after M1.5 if zoom-level refills or dense-page edits stay over budget on
-device. A Metal `TileFiller` would need: the grain as a shader (as the wax tooth is), the `.copy` run rule
-inside a stroke (stencil per run, later runs masking earlier), exact multiply (programmable blending reads the
-destination on Apple GPUs), indexed tessellation built lazily per stroke rather than fans for the whole page,
-and an answer for matching Core Graphics: either the live layer fills with Metal too and the goldens are
-re-recorded, or a tolerance everywhere the two meet.
+**Metal fill: deferred** (NOT-111, skipped in M1.5). Revisit if zoom-level refills or dense-page edits stay over
+budget on device. A Metal `TileFiller` would need: the grain as a shader (as the wax tooth is), the `.copy` run
+rule inside a stroke (stencil per run, later runs masking earlier), exact multiply (programmable blending reads
+the destination on Apple GPUs), indexed tessellation built lazily per stroke, and an answer for matching Core
+Graphics: either the live layer fills with Metal too and the goldens are recorded again, or a tolerance
+everywhere the two meet.
 
 **What the crayon's `WaxRenderer` taught** (NOT-93/NOT-96), the first Metal on the ink path:
 
 - **Make every pixel a function of its own inputs** and splitting the work can't show. The wax field is
-  max-blended and its tooth comes from the page position of the device pixel, so tiles, bands and the live
+  max-blended and its tooth comes from the page position of the device pixel, so tiles, regions and the live
   layer's dirty rects all give the same pixels, and a test checks it. Source-over ink isn't order-free like
   max, so a GPU filler for ordinary ink must keep page order within each tile.
-- **Never wait for the GPU on a touch.** Waiting per live tile cost 0.3–1.5 ms on the simulator, several times
-  an event; it now commits and gets pixels back on the main queue (0.5 ms p50, 0.85 ms p95). The committed path
-  still waits, one GPU pass per stroke and band (`full_redraw.crayon_500_ms` 159 ms for 500 crayon strokes):
-  batch strokes per tile in one pass instead.
-- **Reading back is cheap if nothing is copied**: output lands in a shared `MTLBuffer` wrapped as a `CGImage`
-  and composited by Core Graphics or Core Animation, so the GPU's output fits the same tile cache.
+- **Never wait for the GPU on a touch.** The live layer commits and gets pixels back on the main queue. The
+  committed path still waits, one GPU pass per stroke and tile (`full_redraw.crayon_500_ms`): batch strokes per
+  tile in one pass instead.
+- **Reading back is cheap if nothing is copied**: output lands in a shared `MTLBuffer` wrapped as a `CGImage`,
+  so the GPU's output fits the same tile cache.
 - **Shaders compile from source at runtime** (`makeLibrary(source:)`, since the package has no Metal build
   step), so the first use is slow: prewarm off the main thread. Keep a Core Graphics fallback (no Metal device,
-  regions over 8192²), and the fallback is what PDF export and old builds see.
-- **Simulator GPU numbers are the Mac's GPU.** None of this, wax or spike, has run on an iPad; on-device
-  Instruments is the check before Metal goes further.
+  regions over 8192²); the fallback is what PDF export sees.
+- **Simulator GPU numbers are the Mac's GPU.** None of this has run on an iPad; on-device Instruments is the
+  check before Metal goes further.
 
 ### Spatial index
 
 Every question "what reaches this rect?" goes to the page's `StrokeIndex` rather than walking its strokes: the
-committed layer's culling (full renders and the zoom panel draw only what the index finds on screen), the stroke
+committed layer's tile fills and the zoom panel (each draws only what the index finds reaching it), the stroke
 and standard erasers (the sweep), the pixel eraser's splits (the strokes under it and the erasers above each),
-lasso and tap selection, and circle-to-select. Tiles (NOT-102) query it per tile.
+lasso and tap selection, and circle-to-select.
 
 - **What it holds.** A uniform grid of 32 pt cells (`SpatialGrid`) for the strokes and another for the objects.
   Each item is filed under a conservative rectangle. For a stroke that is its **reach**
@@ -1039,7 +923,18 @@ More › Scroll Direction › Vertical (`PageLayoutMode.continuous`, the default
 - **Pooled canvases (NOT-107).** Views follow what's on screen (at most 6 canvases), not the note's length, and scrolling makes none: a page leaving view leaves its tiles, finishes what belonged to it (a text box, a crop, the selection), stops its coordinator (`CanvasView.leavePage()`) and its canvas waits, hidden, for the next page to enter view, which it's handed with its layers, gestures and interactions (`show(_:)`). The page gets a new `RenderCoordinator` over the old one's tile layers. A canvas taking ink is never handed on.
 - **Prefetch ahead of the scroll.** How far ahead pages get a canvas grows with the scroll's speed (`ContinuousPageLayout.prefetchRect`: half a screen either way, plus 0.4 s of the scroll ahead, at most two screens), so a fling's next pages have their canvas, and their tiles on their way, before they're on screen. A page not on screen yet fills behind every page that is (`CanvasView.isAhead`: its fills are `margin` priority). A page scrolled into view zoomed in gets its resting level in view first where that isn't cached (restored, or filled at a quarter of the tiles or fewer), shown blurred under the zoomed level until that lands, rather than paper.
 - **Pages that scroll past keep no geometry.** Every page keeps its strokes' geometry in the page's `PageGeometry`, in the app's one budgeted `GeometryCache` (see Stroke geometry › Keeping geometry), and none is built after restoring tiles. A page's first fills in continuous scrolling use what's kept (another canvas on the page may have built it) but add nothing; edits keep what they build. That's what brought `memory.continuous_20_pages_mb` from ~800 MB to under 300 (NOT-107, then with a `keepsGeometry` flag per coordinator; NOT-108 made it the shared cache's keep rule).
-- **Scrolling doesn't draw ink again.** Each canvas sits in the scroll content over its *render window* (`ContinuousPageLayout.renderWindow`): the viewport plus half a screen above and below and a quarter to each side, cut to the page. At zoom 1 that's the whole page. The scroll view moves the canvas, ink and all, with the paper. The window is kept even though the ink, template and objects are page-space tiles (which never need it, NOT-109): it still bounds the canvas's view-sized layers (live ink, lasso), so they're drawn again only when the window re-centres, not every frame of a scroll. NOT-110 put the live layer's tiles on the page's pixel grid but kept the layer view-sized (it only holds strokes being written or waiting to be drawn), so the windows stay; letting them go is left to NOT-112. A page fills tiles only when it gets its canvas and they aren't cached, when the zoom changes (at the new level, once the pinch ends), and, when zoomed in, for the tiles a re-centred window uncovers. During a pinch the window keeps its size and the last level is scaled. The host places each page with `place(_:settled:)`, and an embedded canvas that's resized keeps that placement (a canvas resized mid-pinch past the smallest zoom used to draw its page fitted to its new size, over the page beside it).
+- **Scrolling doesn't draw ink again.** The canvases sit in the scroll content, so the scroll view moves them,
+  ink and all, with the paper. Each covers its page's *render window* (`ContinuousPageLayout.renderWindow`): the
+  viewport plus half a screen above and below and a quarter to each side, cut to the page; at zoom 1 that's the
+  whole page. The ink, template and objects are page-space tiles and don't need the window: re-centring it
+  draws nothing, it only lays the cached tiles out at their new place and fills the few it uncovered. What the
+  window bounds is the canvas itself, so its view-sized parts (the tiles it asks for, the live layer, the lasso
+  overlay, its hit-testing) stay the size of the screen rather than of a page at 6×. NOT-112 kept it for that:
+  making each canvas page-sized would move the same question (which part of the page is in view) into the
+  coordinator, for no measured gain. A page fills tiles only when it gets its canvas and they aren't cached,
+  when the zoom changes (at the new level, once the pinch ends), and, zoomed in, for the tiles a re-centred
+  window uncovers. During a pinch the window keeps its size and the last level is scaled. The host places each
+  page with `place(_:settled:)`, and an embedded canvas that's resized keeps that placement.
 - **Paged and continuous share the page bar and sidebar:** choosing a page scrolls to it, and reordering keeps the page being read where it was on screen. Writing in the bottom 15% of the last page adds a page like it.
 - **Writing across pages** (`PageSeam`). Ink and the eraser (every mode) carry on from one page onto the next without lifting the Pencil. The touch keeps arriving at the page the stroke began on, which hands each event to `ContinuousCanvasView`; every page with a canvas takes part while the Pencil is within its *reach* above or below it, and runs a piece of the stroke of its own, in its own coordinates, through the same `LiveStroke` path as any stroke (`joinStroke`, `continueStroke`, `leaveStroke`). The reach is the brush's longest taper plus twice its nib radius plus 12 points (at most 160), so neighbouring pages' pieces overlap across the gap: the piece above runs on past its bottom edge and the piece below starts above its top. Each page clips its ink to the page, so what shows is the same ink from the same samples up to the edge, and the pieces' ends, tapers and the stabiliser settling in all fall off the page. Each piece is committed as an ordinary stroke of its page, so saving needs nothing new. A piece whose ink never reached its page is dropped; a joined piece is never a tap or a shape (the shape tool, the lasso and the gesture tools stay on their page, and holding still doesn't snap a stroke on two pages). The pages' pieces share one `CanvasDocument.editGroup`, and undo or redo on any of them takes back the others' (`InkNotebook.undoGroup(_:)`), unless a page was edited since. Refined force and tilt are forwarded to the pages that joined. While a stroke is under way, the pages taking part keep their canvases and stay put, the scroll view doesn't pan or zoom, and writing past the end of the last page adds the next page at once, so the stroke carries on onto it. The cost per event is a location check for each page with a canvas (at most six).
 - **Not yet:** the lasso works on one page at a time, so a selection can't span two pages or be dragged onto another; and the zoom window is offered only in paged mode.
@@ -1117,9 +1012,9 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `live_event.p50/p95/p99_ms` | One touch event of a replayed stroke: appending its coalesced samples, finalizing segments, rebuilding the predicted tail, applying estimate updates, and drawing the dirty live-layer tiles | p95 < 2 ms |
 | `live_event.long_stroke.*` | The same for the longest stroke (a 4 s tilted shading scribble), first quarter vs last quarter: work mustn't grow with length | last-quarter p95 < 2 ms |
 | `page_open.5k_ms` | Reopening a 5k-stroke page whose tiles the cache let go (or after a relaunch): its kept tiles read from their file (mapped) and restored tile by tile from the `TileRaster` (with them still cached, opening fills nothing) | < 150 ms |
-| `page_open_cold.{1,5,20}k_ms` | Opening a page with no raster (first time shown at this size): a fresh committed bitmap, every stroke's geometry built, the page drawn | – |
+| `page_open_cold.{1,5,20}k_ms` | Opening a page with no raster (the first time it's ever shown): every stroke's geometry built and every tile of the fitted page filled, on every core | – |
 | `page_raster.*` | Compressing a 5k-stroke page's committed layer when the page closes (in the background), and its size | – |
-| `full_redraw.5k_ms` | Re-rendering a 5k-stroke page with geometry cached (undo, erase, end of zoom) | – |
+| `full_redraw.5k_ms` | Filling every tile of a fitted 5k-stroke page with geometry cached, on every core: a new zoom level near the fitted one (undo, erase and pans no longer redraw the page) | – |
 | `ink_file.5k_kb`, `ink_file.bytes_per_point` | Size of a 5k-stroke page's `.ink` file. Each corpus copy is stretched a little so the compressor can't match copies against each other | < 1024 KB |
 | `ink_file.encode_5k_ms` / `decode_5k_ms` | Encoding that page, and decoding it back (which joins page open in NOT-6) | decode < 50 ms |
 | `stroke_geometry.stamp.*` | `stroke_geometry.*` with every stroke drawn by a stamp brush (bristles, jitter) | – (baseline only) |
@@ -1127,10 +1022,10 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `live_event.crayon.p50/p95/p99_ms` | `live_event.*` with every stroke drawn with the crayon: encoding each dirty tile's GPU job, plus copying back the wax that's finished (the main queue is drained after each event, without waiting) | p95 < 2 ms |
 | `live_event.crayon.wax_latency_p50/p95_ms` | From committing a tile's crayon job to its pixels being back on the main queue | – |
 | `live_event.crayon.long_stroke.*` | `live_event.long_stroke.*` with the crayon: its baked field must keep the work flat as the stroke grows | last-quarter p95 < 2 ms |
-| `full_redraw.crayon_500_ms` | Re-rendering a page of 500 crayon strokes into the committed bitmap, one GPU pass per stroke and band | – |
+| `full_redraw.crayon_500_ms` | The same for a page of 500 crayon strokes, one GPU pass per stroke and tile | – |
 | `index.build_20k_ms` | Building a 20k-stroke page's `StrokeIndex` from scratch (on open, off the main actor) | – |
 | `index.query_tile_{5k,20k}_us`, `index.scan_tile_20k_us` | One tile-sized (128 pt) query, over every tile of the page: on the 5k page, and on a 20k page holding the same 5k strokes plus 15k elsewhere (it must not grow), against a scan of every stroke's rect | – |
-| `memory.6x.*` | A 5k page open at 6× zoom while the corpus is written on top: `peak_mb` is the physical footprint (every stroke's geometry kept as the page keeps it, the screen's bitmap, live tiles), measured from a settled baseline (free memory returned first) so earlier benchmarks don't change it; `geometry_mb` is the heap the page's geometry holds (~295 MB before NOT-108), `geometry_packed_mb` and `geometry_unpacked_mb` what the cache's two budgets count | `peak_mb` < 80 MB |
+| `memory.6x.*` | A 5k page open at 6× zoom while the corpus is written on top: `peak_mb` is the physical footprint (every stroke's geometry kept as the page keeps it, the tiles in view, live tiles), measured from a settled baseline (free memory returned first) so earlier benchmarks don't change it; `geometry_mb` is the heap the page's geometry holds (~295 MB before NOT-108), `geometry_packed_mb` and `geometry_unpacked_mb` what the cache's two budgets count | `peak_mb` < 80 MB |
 
 ### Canvas benchmarks
 
@@ -1162,16 +1057,19 @@ simulator's GPU isn't an iPad's. An on-device Instruments profile is the check o
 | `pan.6x_dense.step_render_ms` | The tile fills the pans at 6× set off (what they uncovered and a tile's margin ahead), per frame, off the main thread. `tiles_filled` counts them; `cached_tiles_filled` counts fills in an untimed pan back over the last pass's cached tiles, which must be 0 | < 8 ms |
 | `scroll.page_enter_5k_ms` | A 5k-stroke page seen before entering view in continuous scrolling: read from its file again (nothing in the tile cache), its kept tiles read from their file (mapped), a pooled embedded canvas handed the page (`show(_:)`, NOT-107), placed and laid out, its tiles in view restored (NOT-106) | < 50 ms |
 | `scroll.page_enter_first_5k_ms` | The same page entering view for the first time ever: its tiles in view filled | – |
-| `memory.continuous_20_pages_mb` | Peak footprint scrolling a 20-page note of 5k-stroke pages page by page, each page drawn for the first time, over the note's own strokes (`memory.continuous_20_pages.model_mb`). As in the app (NOT-107): the view is in a window, and each page's kept tiles are written to a file and swapped for the mapped file as `DocumentStore` does | < 300 MB |
+| `memory.continuous_20_pages_mb` | Peak footprint scrolling a 20-page note of 5k-stroke pages page by page, each page drawn for the first time, over a baseline taken before the note was made, less the note's own strokes (`memory.continuous_20_pages.model_mb`, the heap they hold: their footprint swings ±70 MB with what malloc kept from earlier benchmarks, which made the old footprint-only split noisy, NOT-112). As in the app (NOT-107): the view is in a window, and each page's kept tiles are written to a file and swapped for the mapped file as `DocumentStore` does | < 300 MB |
 | `scroll.fling_20_pages.frame_p50/p95/max_ms` | Then a fling over the same note, every page seen before: up to the top and down to the bottom at 6,000 points a second (50 a frame at 120 Hz). Main-thread work per frame | p95 and max < 8 ms |
 | `scroll.fling_20_pages.blank_frames` | Frames of the fling on which a page on screen showed paper where ink belongs (a tile in view not laid out, with no resting-level tile under it). `blank_tiles` adds them up, `canvases_made` counts canvases made on the way back down (must be 0: the pool is warm), `peak_mb` the footprint over the note | none (< 0.5) |
 
-The budgets are where the canvas revamp (milestone M1.5) is headed; today's engine misses most of them, and
-`baselines/apple-m1-pro-simulator-canvas-revamp.json` (today's engine, every metric) records them as known
-misses, so they only gate a run once a change meets them. It's the per-metric best of two full runs on an
-M1 Pro that wasn't idle, so a single run on a busy Mac can read worse than it with no code change; rerun before
-believing a regression, and compare against your base branch on the same machine as well. `*_max_ms` regressions are reported but don't fail a
-run (one scheduler hiccup moves them); their budgets still count.
+The canvas revamp (milestone M1.5) closed with `baselines/apple-m1-pro-simulator.json` recorded again
+(NOT-112), every metric included: the budgets it meets now gate every run, and the ones it misses are known
+misses (undo and stroke erase on the dense page, time to sharp after a pinch to a new level; see Rendering
+pipeline › Why tiles for why). The engine before M1.5 missed nearly all of them: undo 1.9 s, stroke erase
+3.6 s, pinch time to sharp 318 ms, pan step render 190 ms, page entry 2.3 s, 20-page scroll 941 MB (the NOT-98
+baseline, in git history). The baseline is the per-metric best of two full runs on an M1 Pro that wasn't idle,
+so a single run on a busy Mac can read worse than it with no code change; rerun before believing a regression,
+and compare against your base branch on the same machine as well. `*_max_ms` regressions are reported but
+don't fail a run (one scheduler hiccup moves them), and neither does missing their budget.
 
 `ObjectLayerBenchmarks` (NOT-109) times what the template and objects cost on a page of them: a PDF template
 (3,000 vector paths and some text) ruled over, 20 text boxes and 10 pictures, no ink. The canvas is in a window,
@@ -1182,9 +1080,6 @@ so layers drawn on display are drawn and counted.
 | `objects.pan_ms` | Main-thread work per frame (p95) of three half-second pans (10 pt a frame) at 2× over the page; `pan.frame_max_ms` the worst frame, `pan.tiles_filled` the template and object tiles drawn meanwhile (the ground the first pass uncovered) | < 8 ms |
 | `objects.zoom_settle_ms` | From the fingers lifting after a pinch from the fitted page to 3× (at a level not drawn before) to the template and objects sharp; `zoom.frame_p95_ms` the pinch's frames, `zoom_settle.fill_cpu_ms` (and `template_fill_cpu_ms`) the tile drawing it waited for, added up | < 150 ms |
 
-`RenderSpike` (NOT-99) sits beside them but isn't run by `scripts/run-benchmarks.sh` and has no baseline: it's
-the throwaway prototypes of the render architectures behind Architecture › Rendering pipeline › Decision.
-Run it with `-only-testing:InkKitBenchmarks/RenderSpike` when revisiting that decision.
 
 ### Recorded input
 
@@ -1205,7 +1100,7 @@ tiled from the same strokes.
 
 ```bash
 scripts/run-benchmarks.sh bench-output          # Release, iPad Pro 13-inch simulator; ~10 min
-scripts/bench-compare.py bench-output/results.json --baseline Packages/InkKit/Benchmarks/baselines/apple-m1-pro-simulator-canvas-revamp.json
+scripts/bench-compare.py bench-output/results.json --baseline Packages/InkKit/Benchmarks/baselines/apple-m1-pro-simulator.json
 ```
 
 Run them in Release (`-configuration Release ENABLE_TESTABILITY=YES`, which the script does); a Debug build
@@ -1241,7 +1136,8 @@ outline import and `LinkHistory`.
 
 `TileTests` checks the committed tiles: tiles assembled against the page drawn whole (seams and inside) for
 plain, multi-run, grain, scaled-grain, multiply, pixel-eraser and crayon ink; against `PageRenderer` within 0.2%;
-a stroke drawn into a cached tile against the tile filled again; `TileRaster` round trips (through its bytes
+a stroke drawn into a cached tile against the tile filled again; grain tiles filled on many threads at
+once, at several levels, against a fill alone; `TileRaster` round trips (through its bytes
 too, and refusing damaged, foreign or other-renderer bytes); and the cache's
 eviction order, revision rules and `advance`. `RenderCoordinatorTests` checks settling, committed strokes,
 invalidation, that a pan over cached tiles and a pinch fill nothing (until the pinch ends), the 2% snap, and a

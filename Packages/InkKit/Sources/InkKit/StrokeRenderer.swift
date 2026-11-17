@@ -860,6 +860,23 @@ enum StrokeRenderer {
         return StrokeGeometry(runs: runs(from: hulls), bounds: bounds)
     }
 
+    /// Every stroke's geometry, in order, built on every core (in contiguous slices, several per core, so a
+    /// slice of long strokes doesn't hold up the rest). A handful is built on the calling thread.
+    static func geometries(for strokes: [Stroke]) -> [StrokeGeometry] {
+        guard strokes.count >= 64 else { return strokes.map(geometry(for:)) }
+        var result = [StrokeGeometry?](repeating: nil, count: strokes.count)
+        let slices = min(strokes.count, ProcessInfo.processInfo.activeProcessorCount * 4)
+        result.withUnsafeMutableBufferPointer { out in
+            let out = out
+            DispatchQueue.concurrentPerform(iterations: slices) { s in
+                for i in (strokes.count * s / slices) ..< (strokes.count * (s + 1) / slices) {
+                    out[i] = geometry(for: strokes[i])
+                }
+            }
+        }
+        return result.map { $0! }
+    }
+
     // MARK: Drawing
 
     /// Draws a stroke's runs. `ctx` must already be in canvas space.

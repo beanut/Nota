@@ -193,7 +193,7 @@ extension CanvasView {
     }
 
     /// Cancels any incidental pan/pinch from multi-finger taps or swipes and restores the transform from
-    /// before them. Returns true if the transform was reverted and needs a full render when undo/redo is a no-op.
+    /// before them. Returns true if the transform was reverted and needs its tiles laid out again when undo/redo is a no-op.
     func cancelIncidentalPanZoom() -> Bool {
         guard viewport.activeGestureCount > 0 || viewport.didTransformInTouchSequence else { return false }
         viewport.isCancellingGesture = true

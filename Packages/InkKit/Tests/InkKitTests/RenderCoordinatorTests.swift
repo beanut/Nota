@@ -19,9 +19,11 @@ private func finishedStroke(y: CGFloat, brush: BrushDescriptor = .pen) -> LiveSt
     return live
 }
 
-/// Lets the main queue run until `done`, or fails after `timeout`.
+/// Lets the main queue run until `done`, or fails after `timeout`. The timeout is long: in a full parallel
+/// run other suites hold the main actor for seconds at a time (a page settling took 12 s once), and these
+/// tests check what the coordinator does, not how fast.
 @MainActor
-private func waitUntil(timeout: TimeInterval = 10, _ done: () -> Bool) async throws {
+private func waitUntil(timeout: TimeInterval = 60, _ done: () -> Bool) async throws {
     let deadline = Date(timeIntervalSinceNow: timeout)
     while !done() {
         guard Date() < deadline else {
@@ -67,6 +69,10 @@ struct RenderCoordinatorTests {
         canvas = CanvasView(frame: Self.bounds, document: document)
         canvas.traitOverrides.displayScale = 2
         canvas.layoutIfNeeded()
+        // These tests pinch at their own pace. In a full parallel run a step can wait on the main actor past
+        // the 100 ms that makes a scale held, and that level would be filled: only the test of holding a
+        // scale holds one (`aPinchHeldAtAScaleFillsThatLevelBeforeItEnds`).
+        canvas.coordinator.steadyDelay = 600
     }
 
     private var coordinator: RenderCoordinator {
@@ -75,12 +81,8 @@ struct RenderCoordinatorTests {
 
     /// The page drawn from scratch at the canvas's transform.
     private func reference() throws -> CGImage {
-        let items = document.strokes.map {
-            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0)
-        }
-        let ctx = try #require(CommittedRenderer.makeBitmap(pixelSize: coordinator.pixelSize, scale: 2))
-        CommittedRenderer.render(items, into: ctx, bounds: Self.bounds, transform: canvas.viewTransform)
-        return try #require(ctx.makeImage())
+        try #require(wholePageImage(of: document.strokes, bounds: Self.bounds, transform: canvas.viewTransform,
+                                    scale: 2))
     }
 
     @Test func aNewCanvasSettlesShowingItsOwnLevel() async throws {
@@ -254,6 +256,7 @@ struct RenderCoordinatorTests {
 
     /// A pinch that holds a scale fills that level under it, so lifting the fingers there finds it filled.
     @Test func aPinchHeldAtAScaleFillsThatLevelBeforeItEnds() async throws {
+        coordinator.steadyDelay = 0.1
         document.add(finishedStroke(y: 300).stroke)
         try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         let fitted = coordinator.displayedLevel

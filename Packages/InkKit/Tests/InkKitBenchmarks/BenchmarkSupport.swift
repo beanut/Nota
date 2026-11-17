@@ -14,7 +14,7 @@ enum Bench {
         CGRect(origin: .zero, size: screen)
     }
 
-    /// The committed bitmap's size for `screen`.
+    /// `screen` in device pixels: what the tiles in view are assembled into for the pixel checks.
     static var pixelSize: CGSize {
         CGSize(width: screen.width * displayScale, height: screen.height * displayScale)
     }

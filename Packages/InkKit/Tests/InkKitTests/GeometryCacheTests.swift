@@ -20,7 +20,7 @@ private func elements(of path: CGPath) -> [CGPoint?] {
 private func pixels(_ geometry: StrokeGeometry, _ stroke: Stroke, pixelsPerPoint: CGFloat) -> [UInt8] {
     let rect = geometry.bounds.insetBy(dx: -2, dy: -2).integral
     let width = Int(rect.width * pixelsPerPoint), height = Int(rect.height * pixelsPerPoint)
-    let ctx = CommittedRenderer.makeBitmap(pixelSize: CGSize(width: width, height: height), scale: 1)!
+    let ctx = TileBitmap.viewBitmap(pixelSize: CGSize(width: width, height: height), scale: 1)!
     ctx.scaleBy(x: pixelsPerPoint, y: pixelsPerPoint)
     ctx.translateBy(x: -rect.minX, y: -rect.minY)
     StrokeRenderer.fillPaths(runs: geometry.runs, clip: rect, brush: stroke.brush, color: stroke.color, in: ctx)

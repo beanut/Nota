@@ -20,7 +20,7 @@ extension CanvasView {
         for id in ids {
             coordinator.forgetGeometry(id)
         }
-        // Moved strokes may still be waiting in `pending` with stale geometry; the full render redraws them.
+        // Moved strokes may still be waiting in `pending` with stale geometry; their tiles are refilled where they moved.
         coordinator.dropPending(ids)
         if !selection.isEmpty {
             updateSelectionBox()
@@ -122,7 +122,7 @@ extension CanvasView {
                 return
             }
             if let box = selectionBox, !selection.isEmpty, let handle = selectionHandle(at: p, box: box) {
-                // Dragging the selection or a handle transforms it. Pending strokes are redrawn by the full render.
+                // Dragging the selection or a handle transforms it. Pending strokes are refilled where they moved.
                 coordinator.dropPending(selection.strokeIDs)
                 lassoSession = .transforming(SelectionDrag(handle: handle, start: p, box: box,
                                                            session: document.beginTransform(selection)))

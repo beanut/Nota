@@ -652,7 +652,7 @@ final class RenderCoordinator {
     /// The committed ink on screen, assembled into one image the size of the surface at the transform it
     /// was laid out at (the benchmarks' and tests' pixel checks).
     func composedImage() -> CGImage? {
-        guard let ctx = CommittedRenderer.makeBitmap(pixelSize: pixelSize, scale: scale) else { return nil }
+        guard let ctx = TileBitmap.viewBitmap(pixelSize: pixelSize, scale: scale) else { return nil }
         TileBitmap.compose(current.shownImages, at: displayedTransform, in: ctx)
         return ctx.makeImage()
     }
@@ -841,7 +841,8 @@ final class RenderCoordinator {
     }
 
     /// How long a gesture has to hold a scale (within the 2% snap) before that level is filled under it.
-    static let steadyDelay: CFTimeInterval = 0.1
+    /// (Tests that pinch at their own pace set it longer, so a slow test machine never reads as a held pinch.)
+    var steadyDelay: CFTimeInterval = 0.1
     /// Mid-gesture, the level the view has stayed near and since when.
     private var steady: (level: TileLevel, since: CFTimeInterval)?
 
@@ -850,10 +851,10 @@ final class RenderCoordinator {
     private func steadyLevel(for want: TileLevel) -> TileLevel? {
         let now = CACurrentMediaTime()
         if let steady, steady.level.isNear(want) {
-            return now - steady.since >= Self.steadyDelay ? steady.level : nil
+            return now - steady.since >= steadyDelay ? steady.level : nil
         }
         steady = (want, now)
-        checkSteady(after: Self.steadyDelay)
+        checkSteady(after: steadyDelay)
         return nil
     }
 
@@ -868,7 +869,7 @@ final class RenderCoordinator {
             guard let self else { return }
             steadyCheckScheduled = false
             guard host?.isMoving == true, let steady else { return }
-            let left = steady.since + Self.steadyDelay - CACurrentMediaTime()
+            let left = steady.since + steadyDelay - CACurrentMediaTime()
             if left > 0 {
                 checkSteady(after: left)
             } else {
@@ -1132,10 +1133,15 @@ final class RenderCoordinator {
 
     // MARK: - Finished strokes
 
+    /// How long a finished stroke waits for its estimates (and a raster stroke for its wax) before it's
+    /// drawn into the committed ink anyway. (The hand-off tests set it longer, so a busy main queue can't
+    /// send them down the fallback.)
+    var pendingWait: CFTimeInterval = 0.25
+
     /// A finished stroke was added to the document (`revisionBefore` is the revision before it): it's
     /// drawn into the committed ink once its estimates are in, and shown by the live layer until then.
     func strokeCommitted(_ live: LiveStroke, geometry: StrokeGeometry, revisionBefore: Int) {
-        let deadline = CACurrentMediaTime() + 0.25
+        let deadline = CACurrentMediaTime() + pendingWait
         pending.append(PendingStroke(live: live, geometry: geometry, deadline: deadline,
                                      revisionBefore: revisionBefore, revisionAfter: document.inkVersion))
         schedulePendingCommit()
@@ -1457,7 +1463,7 @@ final class RenderCoordinator {
                                         drawn.append((key, fill.tile))
                                     }
                                 }
-                                guard let ctx = CommittedRenderer.makeBitmap(pixelSize: pixels, scale: scale) else {
+                                guard let ctx = TileBitmap.viewBitmap(pixelSize: pixels, scale: scale) else {
                                     return (nil, drawn)
                                 }
                                 TileBitmap.compose(tiles, at: t, in: ctx)

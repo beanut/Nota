@@ -140,7 +140,7 @@ struct TileTests {
         let bounds = CGRect(origin: .zero, size: Self.pageSize)
         let reference = try #require(PageRenderer.image(strokes: strokes, objects: [], region: bounds, scale: 2))
         let keys = TileKey.keys(covering: bounds, page: page, level: Self.level)
-        let ctx = try #require(CommittedRenderer.makeBitmap(pixelSize: reference.size, scale: 1))
+        let ctx = try #require(TileBitmap.viewBitmap(pixelSize: reference.size, scale: 1))
         let tiles = keys.compactMap { key in
             RenderCoordinator.draw(key, from: ink, revision: 1, filler: CoreGraphicsTileFiller()).image.map { (key, $0) }
         }
@@ -149,6 +149,32 @@ struct TileTests {
         let diff = try #require(differences(assembled, reference))
         let fraction = Double(diff.count) / Double(reference.width * reference.height)
         #expect(fraction < 0.002, "\(kind): \(fraction * 100)% of pixels differ from the page renderer")
+    }
+
+    /// Grain tiles filled on several threads at once, at several levels, are the bytes of the tile filled
+    /// alone. Core Graphics caches a pattern image's rasterization, so threads sharing one pattern at
+    /// different scales used to leave each other a few pixels (NOT-112): each thread keeps its own patterns.
+    @Test(arguments: [TileInk.grain, .scaledGrain])
+    func grainFillsOnManyThreadsAreAFillAlone(_ kind: TileInk) {
+        let ink = snapshot(strokePage(of: kind))
+        let levels = [TileLevel(pixelsPerPoint: 2), TileLevel(pixelsPerPoint: 2.37), TileLevel(pixelsPerPoint: 3.1),
+                      TileLevel(pixelsPerPoint: 5.5)]
+        let key = TileKey(page: page, level: levels[1], col: 0, row: 3)
+        let alone = RenderCoordinator.draw(key, from: ink, revision: 0, filler: CoreGraphicsTileFiller()).image
+        let expected = alone?.dataProvider?.data as Data?
+        #expect(expected != nil)
+        let lock = NSLock()
+        var differing = 0
+        DispatchQueue.concurrentPerform(iterations: 200) { i in
+            let level = levels[i % levels.count]
+            let tile = level == key.level ? key : TileKey(page: page, level: level, col: i % 3, row: i % 5)
+            let data = RenderCoordinator.draw(tile, from: ink, revision: 0, filler: CoreGraphicsTileFiller())
+                .image?.dataProvider?.data as Data?
+            if tile == key, data != expected {
+                lock.withLock { differing += 1 }
+            }
+        }
+        #expect(differing == 0, "\(kind): \(differing) of 50 fills differ from the tile filled alone")
     }
 
     /// A tile drawn twice from scratch is the same bytes, and a stroke drawn on top of a cached tile (a

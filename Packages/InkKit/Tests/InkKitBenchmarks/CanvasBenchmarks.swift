@@ -128,7 +128,7 @@ final class CanvasBenchmarks: XCTestCase {
                 lock.withLock { tiles.append((keys[i], image)) }
             }
         }
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
+        let ctx = try XCTUnwrap(TileBitmap.viewBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
         TileBitmap.compose(tiles, at: canvas.viewTransform, in: ctx)
         let reference = try XCTUnwrap(ctx.makeImage())
         return Self.differingFraction(shown, reference)
@@ -440,8 +440,11 @@ final class CanvasBenchmarks: XCTestCase {
     /// file and swapped for the mapped file as `DocumentStore` does (NOT-106).
     ///
     /// 1. **Memory** (`memory.continuous_20_pages_mb`): scrolled from the first page to the last a page at
-    ///    a time, each page's ink drawn for the first time: the peak footprint added over the note itself
-    ///    (its strokes in memory, `model_mb`), from a settled baseline.
+    ///    a time, each page's ink drawn for the first time: the peak footprint over a settled baseline taken
+    ///    before the note was made, less the note itself (its strokes in memory, `model_mb`). The note is
+    ///    counted as the heap it holds, not as the footprint it added: making it reuses whatever memory
+    ///    malloc kept from the benchmarks before, so its footprint (and with it a footprint-only split)
+    ///    swings by 70 MB from run to run while the peak doesn't (NOT-112).
     /// 2. **A fling** (`scroll.fling_20_pages.*`, NOT-107) back to the top and down to the bottom again at
     ///    6,000 points a second (50 a frame at 120 Hz), every page seen before: main-thread work per
     ///    frame, and the frames on which a page on screen showed paper where its ink belongs (a tile in view
@@ -449,12 +452,14 @@ final class CanvasBenchmarks: XCTestCase {
     ///    too: the pool should make none.
     func testMemoryContinuous20Pages() throws {
         let start = Bench.settledFootprint()
+        let heapStart = Bench.heapInUse()
         let pages = (0 ..< 20).map { _ in
             CanvasDocument(file: InkPageFile(pageID: UUID(), strokes: corpus.page(strokes: 5000)),
                            pageSize: corpus.pageSize)
         }
         let notebook = InkNotebook(pages: pages, defaultPageSize: corpus.pageSize)
         let kept = try KeptTiles(pages: pages)
+        let model = Bench.heapInUse().subtractingClamped(heapStart)
         let before = Bench.settledFootprint()
         var peak = before
 
@@ -480,9 +485,9 @@ final class CanvasBenchmarks: XCTestCase {
             }
         }
         let mb = { (bytes: UInt64) in Double(bytes) / 1_048_576 }
-        let added = mb(peak.subtractingClamped(before))
+        let added = mb(peak.subtractingClamped(start).subtractingClamped(model))
         BenchResults.record("memory.continuous_20_pages_mb", added, unit: "MB", budget: Self.continuousMemoryBudgetMB)
-        BenchResults.record("memory.continuous_20_pages.model_mb", mb(before.subtractingClamped(start)), unit: "MB")
+        BenchResults.record("memory.continuous_20_pages.model_mb", mb(model), unit: "MB")
         check(added, under: Self.continuousMemoryBudgetMB, "Scrolling a 20-page note (MB over the note)")
 
         // The fling: up to the top, then down to the bottom, every page seen before.
@@ -520,7 +525,8 @@ final class CanvasBenchmarks: XCTestCase {
         BenchResults.record("scroll.fling_20_pages.blank_tiles", Double(blankTiles), unit: "tiles")
         BenchResults.record("scroll.fling_20_pages.canvases_made", Double(view.canvasesMade - madeGoingUp),
                             unit: "canvases")
-        BenchResults.record("scroll.fling_20_pages.peak_mb", mb(maxPeak.subtractingClamped(before)), unit: "MB")
+        BenchResults.record("scroll.fling_20_pages.peak_mb", mb(maxPeak.subtractingClamped(start).subtractingClamped(model)),
+                            unit: "MB")
         check(f.p95, under: Self.gestureFrameBudgetMs, "Fling through 20 pages: main-thread work per frame (ms, p95)")
         XCTAssertEqual(view.canvasesMade, madeGoingUp, "the fling made canvases instead of reusing them")
         withExtendedLifetime((view, notebook, window, kept)) {}

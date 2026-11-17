@@ -121,10 +121,10 @@ struct VectorTileLayerTests {
         try await settle()
         let t = canvas.viewTransform
         let pixels = RenderCoordinator.pixelSize(of: Self.bounds.size, scale: 2)
-        let shownCtx = try #require(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: 2))
+        let shownCtx = try #require(TileBitmap.viewBitmap(pixelSize: pixels, scale: 2))
         TileBitmap.compose(canvas.objectTiles.shownImages, at: t, in: shownCtx)
         let shown = try #require(shownCtx.makeImage())
-        let wholeCtx = try #require(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: 2))
+        let wholeCtx = try #require(TileBitmap.viewBitmap(pixelSize: pixels, scale: 2))
         let content = try #require(canvas.objectTiles.content)
         wholeCtx.concatenate(t.affine)
         let visible = t.toCanvas(Self.bounds).intersection(document.pageBounds)

@@ -13,8 +13,8 @@ they are, so work towards a budget shows from run to run. A missing baseline rep
 so the first run of a new environment can be recorded.
 
 Single-frame worsts (`*_max_ms`, e.g. the canvas benchmarks' `zoom.pinch_1x_6x.frame_max_ms`) swing with
-one scheduler hiccup, so a regression on them is reported (`noisy`) but doesn't fail the run; their budgets
-still count. `--only zoom. pan.` compares just the metrics with those prefixes, for a partial run
+one scheduler hiccup (5 to 50 ms between two runs of the same code on a busy Mac), so a regression or a missed
+budget on them is reported (`noisy`) but doesn't fail the run. `--only zoom. pan.` compares just the metrics with those prefixes, for a partial run
 (`-only-testing:InkKitBenchmarks/CanvasBenchmarks`).
 """
 
@@ -85,7 +85,9 @@ def compare(results, baseline, threshold, only=None):
             met = value < budget
             budget_cell = f"{'✅' if met else '❌'} < {fmt(budget, unit)}{over_budget(value, budget)}"
             if not met:
-                if reference is not None and reference < budget:
+                if name.endswith(NOISY_SUFFIXES):
+                    status = "over budget (noisy)"
+                elif reference is not None and reference < budget:
                     status = "OVER BUDGET"
                     failures.append(f"{name}: {fmt(value, unit)} misses its {fmt(budget, unit)} budget, "
                                     f"which the baseline met")

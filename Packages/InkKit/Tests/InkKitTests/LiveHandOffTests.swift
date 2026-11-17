@@ -66,6 +66,10 @@ struct LiveHandOffTests {
         canvas = CanvasView(frame: Self.bounds, document: document)
         canvas.traitOverrides.displayScale = 2
         canvas.layoutIfNeeded()
+        // Under a full parallel test run the main queue can stay busy past the 0.25 s a finished stroke
+        // waits for the crayon's wax, and the stroke would be filled instead (correct, but not what's
+        // tested here).
+        canvas.coordinator.pendingWait = 5
     }
 
     private var coordinator: RenderCoordinator {
@@ -108,12 +112,8 @@ struct LiveHandOffTests {
 
     /// The page drawn from scratch at the canvas's transform.
     private func reference() throws -> CGImage {
-        let items = document.strokes.map {
-            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0)
-        }
-        let ctx = try #require(CommittedRenderer.makeBitmap(pixelSize: coordinator.pixelSize, scale: 2))
-        CommittedRenderer.render(items, into: ctx, bounds: Self.bounds, transform: canvas.viewTransform)
-        return try #require(ctx.makeImage())
+        try #require(wholePageImage(of: document.strokes, bounds: Self.bounds, transform: canvas.viewTransform,
+                                    scale: 2))
     }
 
     /// Each cached tile at the displayed level against the same tile filled from scratch.
@@ -160,7 +160,7 @@ struct LiveHandOffTests {
             #expect(stats.finishedStrokeFills > before.finishedStrokeFills)
         }
         try expectTilesMatchFills(Comment(rawValue: brush.name))
-        // Grain drawn over the whole page at once (`CommittedRenderer`) differs from tiles by more than this
+        // Grain drawn over the whole page at once (`wholePageImage`) differs from tiles by more than this
         // whoever draws them; the tiles are held to fills above.
         if !brush.usesPattern {
             let whole = try difference(#require(coordinator.composedImage()), reference())

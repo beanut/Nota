@@ -130,7 +130,7 @@ final class FloatingObjectsLayer {
         let width = max(1, Int((rect.width * pixels).rounded(.up))), height = max(1, Int((rect.height * pixels).rounded(.up)))
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: space, bitmapInfo: CommittedRenderer.bitmapInfo)
+                                  space: space, bitmapInfo: TileBitmap.bitmapInfo)
         else { return }
         ctx.translateBy(x: 0, y: CGFloat(height))
         ctx.scaleBy(x: 1, y: -1)
