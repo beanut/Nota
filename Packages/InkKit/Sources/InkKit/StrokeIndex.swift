@@ -154,6 +154,8 @@ struct SpatialGrid: Sendable {
     private var orders: [Double] = []
     private var cells: [Int64: [Int32]] = [:]
     private var large: [Int32] = []
+    /// Slots held by all the cells together, for guessing what a query would gather.
+    private var entryCount = 0
 
     init() {}
 
@@ -175,30 +177,32 @@ struct SpatialGrid: Sendable {
     /// Positions of the items whose rectangles intersect `rect`, in increasing order.
     func query(_ rect: CGRect) -> [Int] {
         guard !positions.isEmpty, !rect.isNull else { return [] }
-        // A rect covering more cells than there are items is faster to answer by walking the items.
-        guard let range = Self.cellRange(of: rect), range.cellCount <= max(positions.count, 64) else {
+        // A rect whose cells hold about as many entries as there are items (most of the page: the whole
+        // screen at the fitted zoom) is faster to answer by walking the items, which come out in order.
+        guard let range = Self.cellRange(of: rect), range.cellCount <= max(positions.count, 64),
+              cells.isEmpty || entryCount * min(range.cellCount, cells.count) / cells.count <= positions.count / 2
+        else {
             return scan(rect)
         }
-        var found: [Int32] = []
-        range.forEachKey { key in
-            guard let cell = cells[key] else { return }
-            for s in cell where slots[Int(s)].bounds.intersects(rect) {
-                found.append(s)
+        var found: [Double] = []
+        for y in range.y0 ... range.y1 {
+            for x in range.x0 ... range.x1 {
+                guard let cell = cells[Self.key(x, y)] else { continue }
+                for s in cell {
+                    let slot = slots[Int(s)]
+                    // An item in several of the rect's cells counts in the first of them (its top-left
+                    // one within the rect) only, so nothing needs removing as a duplicate afterwards.
+                    guard case let .cells(own) = slot.placement, x == max(own.x0, range.x0),
+                          y == max(own.y0, range.y0), slot.bounds.intersects(rect) else { continue }
+                    found.append(slot.order)
+                }
             }
         }
         for s in large where slots[Int(s)].bounds.intersects(rect) {
-            found.append(s)
+            found.append(slots[Int(s)].order)
         }
-        guard !found.isEmpty else { return [] }
-        found.sort { slots[Int($0)].order < slots[Int($1)].order }
-        var result: [Int] = []
-        result.reserveCapacity(found.count)
-        var last: Int32 = -1
-        for s in found where s != last {
-            last = s
-            result.append(position(ofOrder: slots[Int(s)].order))
-        }
-        return result
+        found.sort()
+        return found.map(position(ofOrder:))
     }
 
     private func scan(_ rect: CGRect) -> [Int] {
@@ -318,6 +322,7 @@ struct SpatialGrid: Sendable {
             return
         }
         slots[Int(s)].placement = .cells(range)
+        entryCount += range.cellCount
         range.forEachKey { key in
             cells[key, default: []].append(s)
         }
@@ -333,6 +338,7 @@ struct SpatialGrid: Sendable {
                 large.removeLast()
             }
         case let .cells(range):
+            entryCount -= range.cellCount
             range.forEachKey { key in
                 guard var cell = cells.removeValue(forKey: key) else { return }
                 if let i = cell.firstIndex(of: s) {

@@ -815,7 +815,8 @@ lasso and tap selection, and circle-to-select. Tiles (NOT-102) query it per tile
 - **Z-order.** Results are positions in the page's arrays, bottom first. Each item has a slot with an order key
   that increases with its position (fractional, renumbered in the rare case a gap runs out), so inserting or
   removing a stroke moves no cell contents, only two position-ordered arrays the size of the page's own.
-  Queries sort what the cells give by order key and binary-search each back to its position.
+  A query takes each item from the first of the rect's cells it's in (so there are no duplicates to drop),
+  sorts by order key and binary-searches each back to its position.
 - **Kept in step.** Every change to `CanvasDocument`'s strokes and objects goes through helpers that update the
   index too: commands and their undo and redo, live erasing (`remove`, `replace`), transform previews and late
   estimate updates. Whole-array changes (an undo of an erase, restyle, arrange, paste) refile only what lies
@@ -824,8 +825,8 @@ lasso and tap selection, and circle-to-select. Tiles (NOT-102) query it per tile
 - **Built off the main actor.** `DocumentStore` calls `InkPageFile.prepareIndex()` where it decodes a page, and
   `CanvasDocument(file:)` takes the index from the file (a page built without one builds its own). A 20k-stroke
   page builds in a few milliseconds (`index.build_20k_ms`). Items covering more than 1024 cells (a huge stroke
-  or a page-sized object) are kept aside and checked on every query; a query covering more cells than the page
-  has items walks the items instead.
+  or a page-sized object) are kept aside and checked on every query; a query whose cells hold about as many
+  entries as the page has items (the whole screen at the fitted zoom) walks the items instead.
 
 ### Stroke geometry
 

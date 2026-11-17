@@ -455,17 +455,20 @@ final class InkBenchmarks: XCTestCase {
         let tiles = stride(from: 0, to: size.height, by: 128).flatMap { y in
             stride(from: 0, to: size.width, by: 128).map { x in CGRect(x: x, y: y, width: 128, height: 128) }
         }
+        // Timed by hand: `measure` can run only once per test, and this times three things.
         func perQuery(_ body: (CGRect) -> Int) -> Double {
-            var found = 0
-            let times = timed {
+            var found = 0, times: [Double] = []
+            for _ in 0 ..< Bench.iterations + 1 {
+                let start = Bench.now()
                 for _ in 0 ..< 10 {
                     for tile in tiles {
                         found &+= body(tile)
                     }
                 }
+                times.append(Bench.milliseconds(since: start))
             }
             XCTAssertGreaterThan(found, 0)
-            return Stats(times).median * 1000 / Double(10 * tiles.count)
+            return Stats(Array(times.dropFirst())).median * 1000 / Double(10 * tiles.count)
         }
         let index5k = StrokeIndex(strokes: near), index20k = StrokeIndex(strokes: near + far)
         let reaches20k = (near + far).map(StrokeIndex.reach(of:))
@@ -474,6 +477,9 @@ final class InkBenchmarks: XCTestCase {
         BenchResults.record("index.scan_tile_20k_us", perQuery { tile in
             reaches20k.reduce(0) { $0 + ($1.intersects(tile) ? 1 : 0) }
         }, unit: "us")
+        // The whole page (a fitted full render's query), which walks the strokes instead of the cells.
+        let page = size.bounds
+        BenchResults.record("index.query_page_5k_us", perQuery { _ in index5k.strokes(in: page).count }, unit: "us")
     }
 
     // MARK: Memory
