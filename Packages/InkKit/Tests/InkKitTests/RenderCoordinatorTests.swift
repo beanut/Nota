@@ -101,7 +101,7 @@ struct RenderCoordinatorTests {
         try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         let live = finishedStroke(y: 200)
         let geometry = live.geometry()
-        let before = document.revision
+        let before = document.inkVersion
         document.add(live.stroke)
         coordinator.strokeCommitted(live, geometry: geometry, revisionBefore: before)
         #expect(!coordinator.isSettled) // waiting to be drawn

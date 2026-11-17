@@ -67,14 +67,14 @@ struct TileKey: Hashable, Sendable {
     }
 }
 
-/// A tile's pixels and the page revision they show.
+/// A tile's pixels and the version of the page's ink they show.
 struct Tile: @unchecked Sendable { // CGImage is immutable
     /// Nil when no ink reaches the tile: an empty tile keeps no bitmap.
     let image: CGImage?
-    /// The `CanvasDocument.revision` whose ink the tile shows exactly, or a negative label when it shows
-    /// something no revision describes (strokes mid-erase or mid-drag: the coordinator's edit labels; or
-    /// `Tile.unknownRevision`). A tile whose revision isn't
-    /// the page's is stale: still shown, until its refill lands, so nothing flashes blank.
+    /// The `CanvasDocument.inkVersion` whose ink the tile shows exactly (it moves on mid-gesture too, so
+    /// an erase or a lasso drag under way has one), or `Tile.unknownRevision` when the tile shows something
+    /// no version describes. A tile whose version isn't the page's is stale: still shown, until its refill
+    /// lands, so nothing flashes blank; the page's `inkChanges` say where it's stale (NOT-104).
     let revision: Int
 
     static let unknownRevision = -1
@@ -179,7 +179,7 @@ final class TileCache: @unchecked Sendable { // every stored property is guarded
     /// Keeps `tile` unless the cache already holds a newer revision of the key (a refill that lost a race).
     func storeIfNewer(_ tile: Tile, for key: TileKey) {
         lock.withLock {
-            // Tiles drawn mid-edit (negative labels) always land: they show the latest change.
+            // Tiles of no known version always land.
             if let held = entries[key]?.tile, held.revision > tile.revision, tile.revision >= 0 {
                 return
             }
@@ -219,9 +219,20 @@ final class TileCache: @unchecked Sendable { // every stored property is guarded
         }
     }
 
-    /// The ink of `page` in `rect` (page points; nil: anywhere) changed without its revision moving on
-    /// (strokes changed mid-gesture, then put back): the tiles there, at every level, no longer show
-    /// the revision they say. They keep their pixels, to show until their refills land.
+    /// Each tile of `tiles` still at the revision it says shows `revision` just as well (no change since
+    /// reached it): it's labelled so, keeping its pixels.
+    func relabel(_ tiles: [(key: TileKey, from: Int)], to revision: Int) {
+        lock.withLock {
+            for (key, from) in tiles {
+                guard let entry = entries[key], entry.tile.revision == from else { continue }
+                entries[key]?.tile = Tile(image: entry.tile.image, revision: revision)
+            }
+        }
+    }
+
+    /// The ink of `page` in `rect` (page points; nil: anywhere) isn't what the tiles' versions say, though
+    /// the document logged no change there: the tiles there, at every level, are marked as showing no
+    /// known version and are filled again whole. They keep their pixels, to show until their refills land.
     func invalidate(page: UUID, rect: CGRect? = nil) {
         lock.withLock {
             for key in pages[page] ?? [] {

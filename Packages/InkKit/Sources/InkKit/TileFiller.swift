@@ -32,26 +32,48 @@ extension TileFiller {
 /// Fills tiles with Core Graphics, through `StrokeRenderer.draw`: the same `.copy` run rule, multiply
 /// highlighter, pixel eraser, grain and wax as the live layer, so live and committed pixels match.
 struct CoreGraphicsTileFiller: TileFiller {
+    /// How far past a region its scratch bitmap is clipped, in pixels: the clip's own anti-aliased edge
+    /// stays out of the pixels copied back.
+    static let regionMargin: CGFloat = 4
+
+    /// With a `region` (NOT-104's dirty rects), only the strokes that reach it are drawn, into a blank tile
+    /// clipped to just around the region, and that tile's pixels in the region (grown to whole pixels)
+    /// replace `ctx`'s: the tile is what filling it again would give, at the cost of the region.
+    ///
+    /// Not byte for byte: a clip moves Core Graphics' coverage by a level in a few pixels (about 20 of
+    /// the half-million in the dirty-rect tests, never more than one level), so the tests hold refilled
+    /// tiles to that. It doesn't build up over edits, as a region's pixels are drawn again from nothing
+    /// each time. A stroke drawn through a transparency layer with a grain pattern (several runs of a
+    /// textured brush) isn't clipped: its pattern would be laid from the clipped layer's corner, so its
+    /// grain would shift inside the region.
     @discardableResult
     func fill(_ key: TileKey, region: CGRect?, strokes: [TileStroke], into ctx: CGContext,
               isCancelled: () -> Bool) -> Int {
-        draw(rect: key.rect, level: key.level, region: region, strokes: strokes, into: ctx, isCancelled: isCancelled)
+        guard let region else {
+            return draw(rect: key.rect, level: key.level, strokes: strokes, into: ctx, isCancelled: isCancelled)
+        }
+        let pixels = TileBitmap.pixelAligned(region, in: key)
+        guard !pixels.isNull else { return 0 }
+        let query = TileBitmap.strokeQuery(for: pixels, level: key.level)
+        let reaching = strokes.filter { $0.geometry.bounds.insetBy(dx: -2, dy: -2).intersects(query) }
+        guard let scratch = TileBitmap.context(for: key) else { return 0 }
+        let margin = Self.regionMargin / key.level.pixelsPerPoint
+        let drawn = draw(rect: key.rect, level: key.level, strokes: reaching, into: scratch,
+                         clippedTo: pixels.insetBy(dx: -margin, dy: -margin), isCancelled: isCancelled)
+        TileBitmap.copyPixels(of: pixels, in: key, from: scratch, to: ctx)
+        return drawn
     }
 
     /// `fill` for any part of the page: `rect` (page points) is what `ctx` covers at `level`. Drawing the
-    /// whole page this way gives what its tiles show, assembled (the tile tests compare the two).
+    /// whole page this way gives what its tiles show, assembled (the tile tests compare the two). With
+    /// `clippedTo`, each stroke is clipped to it too (`fill`'s region refills), but for the grain layers.
     @discardableResult
-    func draw(rect pageRect: CGRect, level: TileLevel, region: CGRect? = nil, strokes: [TileStroke],
-              into ctx: CGContext, isCancelled: () -> Bool = { false }) -> Int {
-        let rect = region.map { $0.intersection(pageRect) } ?? pageRect
-        guard !rect.isNull, !rect.isEmpty else { return 0 }
+    func draw(rect pageRect: CGRect, level: TileLevel, strokes: [TileStroke],
+              into ctx: CGContext, clippedTo region: CGRect? = nil, isCancelled: () -> Bool = { false }) -> Int {
+        guard !pageRect.isNull, !pageRect.isEmpty else { return 0 }
         // Two pixels of anti-aliasing at this level, in page points.
-        let reach = rect.insetBy(dx: -2 / level.pixelsPerPoint, dy: -2 / level.pixelsPerPoint)
+        let reach = pageRect.insetBy(dx: -2 / level.pixelsPerPoint, dy: -2 / level.pixelsPerPoint)
         ctx.saveGState()
-        if region != nil {
-            ctx.clip(to: rect)
-            ctx.clear(rect)
-        }
         var drawn = 0
         for stroke in strokes {
             if isCancelled() {
@@ -59,17 +81,72 @@ struct CoreGraphicsTileFiller: TileFiller {
             }
             let clip = stroke.geometry.bounds.insetBy(dx: -2, dy: -2)
             guard clip.intersects(reach) else { continue }
+            let region = region.flatMap { Self.drawsGrainLayer(stroke) ? nil : $0 }
+            if let region {
+                ctx.saveGState()
+                ctx.clip(to: region)
+            }
             StrokeRenderer.draw(runs: stroke.geometry.runs, clip: clip.intersection(reach), brush: stroke.brush,
                                 color: stroke.color, in: ctx)
+            if region != nil {
+                ctx.restoreGState()
+            }
             drawn += 1
         }
         ctx.restoreGState()
         return drawn
     }
+
+    /// Whether `stroke` fills a grain pattern through a transparency layer (`StrokeRenderer.fillPaths`:
+    /// several runs, not all opaque), whose pattern a clip would shift.
+    private static func drawsGrainLayer(_ stroke: TileStroke) -> Bool {
+        let runs = stroke.geometry.runs
+        return stroke.brush.usesPattern && runs.count > 1 && !runs.allSatisfy { $0.alpha >= 0.999 }
+    }
 }
 
 /// Tile bitmaps: premultiplied BGRA like `CommittedRenderer.makeBitmap`, addressed in page points.
 enum TileBitmap {
+    /// `rect` (page points) grown to whole pixels of `key`'s tile and cut to the tile: a region whose
+    /// edges fall between pixels, so refilling it leaves the pixels around it exactly as they were.
+    /// `.null` if it misses the tile; `key.rect` itself if it covers it.
+    static func pixelAligned(_ rect: CGRect, in key: TileKey) -> CGRect {
+        let ppp = key.level.pixelsPerPoint, tile = key.pixelRect
+        let minX = max(tile.minX, (rect.minX * ppp + 1e-6).rounded(.down))
+        let minY = max(tile.minY, (rect.minY * ppp + 1e-6).rounded(.down))
+        let maxX = min(tile.maxX, (rect.maxX * ppp - 1e-6).rounded(.up))
+        let maxY = min(tile.maxY, (rect.maxY * ppp - 1e-6).rounded(.up))
+        guard minX < maxX, minY < maxY else { return .null }
+        if minX == tile.minX, minY == tile.minY, maxX == tile.maxX, maxY == tile.maxY {
+            return key.rect
+        }
+        return CGRect(x: minX / ppp, y: minY / ppp, width: (maxX - minX) / ppp, height: (maxY - minY) / ppp)
+    }
+
+    /// Copies the pixels of `region` (page points on whole pixels of `key`'s tile, `pixelAligned`) from one
+    /// tile bitmap of `key` (`context(for:)`) to another, byte for byte.
+    static func copyPixels(of region: CGRect, in key: TileKey, from source: CGContext, to target: CGContext) {
+        let ppp = key.level.pixelsPerPoint, tile = key.pixelRect
+        let side = TileKey.side
+        let x0 = max(0, Int((region.minX * ppp - tile.minX).rounded())), x1 = min(side, Int((region.maxX * ppp - tile.minX).rounded()))
+        let y0 = max(0, Int((region.minY * ppp - tile.minY).rounded())), y1 = min(side, Int((region.maxY * ppp - tile.minY).rounded()))
+        guard x0 < x1, y0 < y1, let from = source.data, let to = target.data, source.width == side, target.width == side,
+              source.height == side, target.height == side, source.bitsPerPixel == 32, target.bitsPerPixel == 32
+        else { return }
+        // Row 0 of a tile bitmap's memory is the tile's top row (page y grows down it).
+        let length = (x1 - x0) * 4
+        for row in y0 ..< y1 {
+            memcpy(to + row * target.bytesPerRow + x0 * 4, from + row * source.bytesPerRow + x0 * 4, length)
+        }
+    }
+
+    /// The page rect to find the strokes that can put a pixel in `region` at `level` with: a stroke is
+    /// drawn within its clip (`CoreGraphicsTileFiller`), and a pixel it touches can stick out a pixel more.
+    static func strokeQuery(for region: CGRect, level: TileLevel) -> CGRect {
+        let pad = 2 / level.pixelsPerPoint
+        return region.insetBy(dx: -pad, dy: -pad)
+    }
+
     /// A blank bitmap for `key`, or one starting from `image` (the tile's pixels so far).
     static func context(for key: TileKey, startingFrom image: CGImage? = nil) -> CGContext? {
         context(pixelRect: key.pixelRect, level: key.level, startingFrom: image)
@@ -258,10 +335,10 @@ final class GeometryStore: @unchecked Sendable { // guarded by `condition`
 
 /// A page's tiles at one level, compressed, so reopening the page puts the same pixels back instead of
 /// filling every stroke again (page open under 150 ms). Kept by the document while the page is closed
-/// and only good for the revision it was taken at; any edit drops it. Lossless (LZFSE), about 5 MB for a
+/// and only good for the ink version it was taken at; any edit drops it. Lossless (LZFSE), about 5 MB for a
 /// fitted 5k-stroke page. NOT-106 makes it the persisted cache and keeps it across edits.
 struct TileRaster: @unchecked Sendable { // immutable
-    /// The page's `CanvasDocument.revision` that the pixels show.
+    /// The page's `CanvasDocument.inkVersion` that the pixels show.
     let revision: Int
     let level: TileLevel
     /// The tiles taken: those covering the page at `level`.

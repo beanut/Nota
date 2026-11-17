@@ -16,6 +16,7 @@ public final class CanvasDocument: Identifiable {
     public var pageSize: PageSize {
         didSet {
             if pageSize != oldValue {
+                noteInkChange(nil)
                 revision += 1
                 for observer in liveObservers() {
                     observer.onPageSizeChange()
@@ -102,14 +103,49 @@ public final class CanvasDocument: Identifiable {
     /// of the page is current while its revision matches.
     public private(set) var revision = 0 {
         didSet {
-            if tileRaster?.revision != revision {
+            logInkChange()
+        }
+    }
+
+    /// Goes up whenever the page's strokes change, mid-gesture too (each step of an erase or a lasso drag,
+    /// which `revision` only counts once the gesture is recorded), and when its size does. What the
+    /// committed tiles are labelled with: a tile at this version shows the ink as it is.
+    private(set) var inkVersion = 0 {
+        didSet {
+            if tileRaster?.revision != inkVersion {
                 tileRaster = nil
             }
         }
     }
 
+    /// Where each recent change of `inkVersion` touched the ink (NOT-104), so tiles are refilled only there.
+    private(set) var inkChanges = InkChangeLog()
+    /// What the strokes' changes since `inkVersion` last moved touched; nil: anything.
+    private var unloggedChange: CGRect? = .null
+    private var hasUnloggedChange = false
+
+    /// The ink in `rect` (nil: anywhere) is changing; `logInkChange()` makes it a version.
+    private func noteInkChange(_ rect: CGRect?) {
+        if hasUnloggedChange {
+            unloggedChange = rect.flatMap { rect in unloggedChange.map { $0.union(rect) } }
+        } else {
+            unloggedChange = rect
+            hasUnloggedChange = true
+        }
+    }
+
+    /// Moves `inkVersion` on if the strokes changed since it last did, logging where.
+    private func logInkChange() {
+        guard hasUnloggedChange else { return }
+        inkVersion += 1
+        inkChanges.append(version: inkVersion, rect: unloggedChange)
+        unloggedChange = .null
+        hasUnloggedChange = false
+    }
+
     /// The page's fitted-level committed tiles, compressed, as the canvas left them when the page closed,
-    /// for reopening it without filling every stroke again. Dropped as soon as the page changes.
+    /// for reopening it without filling every stroke again. Labelled with the `inkVersion` they show, and
+    /// dropped as soon as the ink changes.
     var tileRaster: TileRaster?
 
     /// Names this page in the shared `TileCache`. Not the page's `id`: a page read from its file again is
@@ -323,13 +359,15 @@ public final class CanvasDocument: Identifiable {
         for i in strokes.indices.reversed() where ids.contains(strokes[i].id) {
             removed.append(Removal(index: i, stroke: removeStroke(at: i)))
         }
+        logInkChange()
         return removed
     }
 
     /// Removes the strokes at these positions immediately, like `remove(ids:)`, without looking at the
     /// others: for a caller that found them with `strokeIndices(in:)`.
     func remove(at positions: some Collection<Int>) -> [Removal] {
-        Set(positions).sorted(by: >).map { Removal(index: $0, stroke: removeStroke(at: $0)) }
+        defer { logInkChange() }
+        return Set(positions).sorted(by: >).map { Removal(index: $0, stroke: removeStroke(at: $0)) }
     }
 
     func recordErase(_ removals: [Removal], objects objectRemovals: [ObjectRemoval] = []) {
@@ -386,12 +424,14 @@ public final class CanvasDocument: Identifiable {
     func replace(id: UUID, with pieces: [Stroke]) {
         guard let i = strokes.firstIndex(where: { $0.id == id }) else { return }
         replaceStrokes(i ..< i + 1, with: pieces)
+        logInkChange()
     }
 
     /// `replace(id:with:)` for the stroke at `position`, for a caller that found it with `strokeIndices(in:)`.
     /// Positions after it shift by `pieces.count - 1`.
     func replace(at position: Int, with pieces: [Stroke]) {
         replaceStrokes(position ..< position + 1, with: pieces)
+        logInkChange()
     }
 
     /// Records the standard-erase gesture that changed `before` into the current strokes, as one command.
@@ -425,6 +465,7 @@ public final class CanvasDocument: Identifiable {
     /// without recording a command or telling observers: the view doing the drag redraws them itself.
     func previewTransform(_ session: TransformSession, by t: CGAffineTransform) {
         place(session.strokes.map { $0.applying(t) }, session.objects.map { $0.applying(t) })
+        logInkChange()
     }
 
     /// Ends the session with `t` applied, as one undoable edit (none if `t` is the identity).
@@ -441,6 +482,7 @@ public final class CanvasDocument: Identifiable {
     /// Ends the session with everything back where it was.
     func cancelTransform(_ session: TransformSession) {
         place(session.strokes, session.objects)
+        logInkChange()
     }
 
     /// Transforms strokes and objects by `t` as one undoable edit.
@@ -588,10 +630,12 @@ public final class CanvasDocument: Identifiable {
         guard let s = strokes.lastIndex(where: { $0.id == strokeID }),
               strokes[s].points.indices.contains(index) else { return false }
         let location = strokes[s].points[index].location
+        let reachBefore = strokeIndex.strokeBounds(at: s)
         body(&strokes[s].points[index])
         if strokes[s].points[index].location != location {
             strokeIndex.updateStroke(at: s, to: strokes[s])
         }
+        noteInkChange(reachBefore.union(strokeIndex.strokeBounds(at: s)))
         revision += 1
         lastReshapedIDs = [strokeID]
         notify(.refined)
@@ -753,6 +797,8 @@ public final class CanvasDocument: Identifiable {
         page.objects = objects
         page.strokeIndex = strokeIndex
         page.revision = revision
+        page.inkVersion = inkVersion
+        page.inkChanges = InkChangeLog(version: inkVersion)
         page.objectsRevision = objectsRevision
         page.tileRaster = tileRaster
         return page
@@ -773,6 +819,7 @@ public final class CanvasDocument: Identifiable {
             objects[i] = objects[i].applying(t)
         }
         strokeIndex = StrokeIndex(strokes: strokes, objects: objects)
+        noteInkChange(nil)
         undoStack.removeAll()
         redoStack.removeAll()
         undoGroups.removeAll()
@@ -807,8 +854,13 @@ public final class CanvasDocument: Identifiable {
     // MARK: Changing strokes and objects (with the index in step)
 
     private func replaceStrokes(_ range: Range<Int>, with new: some Collection<Stroke>) {
+        var changed = range.reduce(CGRect.null) { $0.union(strokeIndex.strokeBounds(at: $1)) }
         strokes.replaceSubrange(range, with: new)
         strokeIndex.replaceStrokes(range, with: new)
+        for position in range.lowerBound ..< range.lowerBound + new.count {
+            changed = changed.union(strokeIndex.strokeBounds(at: position))
+        }
+        noteInkChange(changed)
     }
 
     private func insertStroke(_ stroke: Stroke, at position: Int) {
@@ -823,10 +875,13 @@ public final class CanvasDocument: Identifiable {
 
     private func setStroke(_ stroke: Stroke, at position: Int) {
         let old = strokes[position]
+        guard old != stroke else { return }
+        let reachBefore = strokeIndex.strokeBounds(at: position)
         strokes[position] = stroke
         if !Self.sameReach(old, stroke) {
             strokeIndex.updateStroke(at: position, to: stroke)
         }
+        noteInkChange(reachBefore.union(strokeIndex.strokeBounds(at: position)))
     }
 
     /// Replaces every stroke, refiling only those between the unchanged start and end of the page, so
@@ -842,6 +897,7 @@ public final class CanvasDocument: Identifiable {
         while suffix < shared - prefix, Self.sameReach(old[old.count - 1 - suffix], new[new.count - 1 - suffix]) {
             suffix += 1
         }
+        noteInkChange(InkChangeLog.changedReach(from: old, to: new))
         strokes = new
         strokeIndex.replaceStrokes(prefix ..< old.count - suffix, with: new[prefix ..< new.count - suffix])
     }

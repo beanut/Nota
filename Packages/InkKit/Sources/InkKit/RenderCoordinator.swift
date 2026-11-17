@@ -18,8 +18,7 @@ protocol RenderCoordinatorHost: AnyObject {
     var restingScale: CGFloat { get }
     /// True while a pinch, pan or scroll is moving the view: nothing is filled at a scale still changing.
     var isMoving: Bool { get }
-    /// True while the page's strokes are mid-edit (an erase or a lasso drag): a render then shows no
-    /// revision of the document.
+    /// True while the page's strokes are mid-edit (an erase or a lasso drag): no page raster is left then.
     var isEditingInk: Bool { get }
     /// Where the Pencil is writing, in page points (nil when no stroke is being drawn): tiles there fill first.
     var pencilLocation: CGPoint? { get }
@@ -63,6 +62,8 @@ struct FillStats: Equatable {
     var jobs = 0
     var tilesFilled = 0
     var tilesRestored = 0
+    /// Tiles brought up to date by refilling only the part an edit changed (NOT-104); also in `tilesFilled`.
+    var tilesRefilledInPart = 0
     /// Wall time during which any of the coordinator's tile fills was running, in milliseconds.
     var milliseconds = 0.0
 }
@@ -165,13 +166,11 @@ final class RenderCoordinator {
     private(set) var fillStats = FillStats()
     /// When the fills counted in `fillStats` were running, merged: their wall time.
     private var busy = BusyIntervals()
-    /// The page's revision at the last `invalidate`: one with the same revision changed ink the revision
-    /// doesn't account for.
-    private var lastInvalidatedRevision = -1
-    /// What tiles filled mid-edit (an erase or a lasso drag under way, which change strokes without moving
-    /// the revision on) are labelled: a new one at every change, so the tiles in view are known to show the
-    /// latest change, while no revision describes them.
-    private var editLabel = Tile.unknownRevision - 1
+    /// The page's ink version at the last `invalidate`: one at the same version changed nothing the
+    /// document knows of.
+    private var lastInvalidatedVersion = -1
+    /// The last of the page's ink changes whose rect cached tiles outside it have been moved past.
+    private var syncedVersion = 0
     /// The tiles on screen (both levels), which the cache mustn't evict.
     private var shownKeys = Set<TileKey>()
     /// Goes up whenever the cached tiles this view could show may have changed (a job landed, an edit), so
@@ -200,7 +199,7 @@ final class RenderCoordinator {
             rect = rect.insetBy(dx: -pad, dy: -pad)
         }
         let range = TileKey.range(covering: rect.intersection(document.pageBounds), level: level)
-        return LayoutKey(version: contentVersion, revision: document.revision &* 31 &+ editLabel, shown: displayedLevel,
+        return LayoutKey(version: contentVersion, revision: document.inkVersion, shown: displayedLevel,
                          want: want ?? level, cols: range?.cols, rows: range?.rows,
                          moving: host?.isMoving ?? false)
     }
@@ -294,14 +293,12 @@ final class RenderCoordinator {
         guard pending.isEmpty, pixelSize != .zero else { return false }
         let t = transform, want = level(for: t)
         guard displayedLevel == want, displayedTransform == t else { return false }
-        let editing = host?.isEditingInk ?? false
         let keys = visibleKeys(at: t, level: want)
         if !fills.isEmpty, keys.contains(where: { fills[$0] != nil }) {
             return false
         }
-        return cache.tiles(for: keys).allSatisfy {
-            $0?.revision == document.revision || (editing && $0?.revision == editLabel)
-        }
+        let version = document.inkVersion
+        return cache.tiles(for: keys).allSatisfy { $0?.revision == version }
     }
 
     /// The part of the page the committed surface shows at `transform`, in page (canvas) points.
@@ -572,29 +569,41 @@ final class RenderCoordinator {
 
     // MARK: - Render requests
 
-    /// The ink in `rect` (page points) changed. A change that moved the page's revision on leaves every
-    /// tile at an older one stale (refilled when it's needed; NOT-104 keeps those outside `rect`); one that
-    /// didn't (strokes removed or moved mid-gesture) marks the tiles under `rect` stale.
+    /// The ink in `rect` (page points) changed: brings the tiles in view up to date. The document logs
+    /// where each change of its ink version touched (`CanvasDocument.inkChanges`), so only the part of a
+    /// tile some change since its version reaches is refilled (NOT-104), and tiles nothing reached move on
+    /// as they are. `rect` only counts when the ink version didn't move: pixels the document doesn't know
+    /// are wrong, which are then refilled whole.
     func invalidate(rect: CGRect) {
-        invalidate(rect as CGRect?)
-    }
-
-    /// The page's ink changed in ways no rect describes (an undo, a clear, another view's edit). Stale
-    /// tiles stay on screen until their refills land.
-    func invalidateAll() {
-        invalidate(nil)
-    }
-
-    private func invalidate(_ rect: CGRect?) {
         contentChanged()
-        if host?.isEditingInk ?? false {
-            editLabel -= 1
-        }
-        if document.revision == lastInvalidatedRevision {
+        if document.inkVersion == lastInvalidatedVersion {
             cache.invalidate(page: page, rect: rect)
         }
-        lastInvalidatedRevision = document.revision
+        lastInvalidatedVersion = document.inkVersion
         requestRender()
+    }
+
+    /// The page's ink changed (an undo, a clear, an erase step, another view's edit): `invalidate(rect:)`
+    /// for wherever the document says. Stale tiles stay on screen until their refills land.
+    func invalidateAll() {
+        contentChanged()
+        lastInvalidatedVersion = document.inkVersion
+        requestRender()
+    }
+
+    /// Moves every cached tile of the page that the ink's changes since the last call don't reach on to
+    /// their version, at every level, so they're current without a look at the log.
+    private func syncChanges() {
+        let log = document.inkChanges
+        guard log.version != syncedVersion else { return }
+        var from = max(syncedVersion, log.base)
+        while from < log.version {
+            if let rects = log.changes(from: from, to: from + 1) {
+                cache.advance(page: page, from: from, to: from + 1, outside: rects.reduce(CGRect.null) { $0.union($1) })
+            }
+            from += 1
+        }
+        syncedVersion = log.version
     }
 
     /// Asks for the committed ink sharp at the host's current transform: lays out what's cached and fills
@@ -624,16 +633,13 @@ final class RenderCoordinator {
     /// waiting to be drawn (the job leaves them out, as the live layer shows them), the revision before
     /// the first of them, if nothing else changed since.
     private func fillRevision(skipping waiting: [PendingStroke]) -> Int {
-        if host?.isEditingInk ?? false {
-            return editLabel
-        }
-        guard let first = waiting.first else { return document.revision }
+        guard let first = waiting.first else { return document.inkVersion }
         var revision = first.revisionBefore
         for stroke in waiting {
             guard stroke.revisionBefore == revision, stroke.revisionAfter >= 0 else { return Tile.unknownRevision }
             revision = stroke.revisionAfter
         }
-        return revision == document.revision ? first.revisionBefore : Tile.unknownRevision
+        return revision == document.inkVersion ? first.revisionBefore : Tile.unknownRevision
     }
 
     /// Works out the tiles to fill for the current transform and submits a job for each one not already on
@@ -647,6 +653,7 @@ final class RenderCoordinator {
             return
         }
         lastFillRequest = request
+        syncChanges()
         let resting = restingLevel
         // Nothing is filled at a scale still changing: the last level is shown scaled.
         if host?.isMoving ?? false, let shown = displayedLevel, shown != want {
@@ -660,15 +667,8 @@ final class RenderCoordinator {
         let margin = revision < 0 ? [] : marginKeys(at: t, level: want, inside: visible)
         let wanted = visible + margin
         cache.setInterest(ObjectIdentifier(self), page: page, visible: shownKeys.union(wanted), resting: resting)
-        let current = document.revision
-        let stale = zip(wanted, cache.tiles(for: wanted)).compactMap { key, tile -> TileKey? in
-            guard let tile else { return key }
-            if tile.revision == current || (revision != Tile.unknownRevision && tile.revision == revision) {
-                return nil
-            }
-            return key
-        }
-        let staleSet = Set(stale)
+        let plans = fillPlans(for: wanted, revision: revision)
+        let staleSet = Set(plans.map(\.key))
         // Fills of tiles no longer wanted are dropped, running or not. Queued fills of an older revision are
         // dropped and submitted again; a running one finishes, since its pixels are newer than those on
         // screen (a dense fitted tile takes 100–250 ms, and an erase changes the page faster than that),
@@ -676,7 +676,7 @@ final class RenderCoordinator {
         cancelFills { key, ticket in
             !staleSet.contains(key) || (ticket.revision != revision && !scheduler.hasStarted(ticket.job))
         }
-        guard !stale.isEmpty else { return }
+        guard !plans.isEmpty else { return }
 
         let inView = Set(visible)
         let pencil = host?.pencilLocation
@@ -694,7 +694,8 @@ final class RenderCoordinator {
         let source = FillSource(ink: snapshot, store: store, revision: revision, raster: document.tileRaster,
                                 filler: filler)
         var jobs: [RenderJob] = []
-        for (rank, key) in stale.enumerated() {
+        for (rank, plan) in plans.enumerated() {
+            let key = plan.key
             let priority: RenderPriority = pencil.map { key.rect.insetBy(dx: -8, dy: -8).contains($0) } == true
                 ? .underPencil : inView.contains(key) ? .visible : .margin
             if let ticket = fills[key] {
@@ -703,10 +704,58 @@ final class RenderCoordinator {
                 }
                 continue
             }
-            let job = fillJob(key, from: source, priority: priority, rank: Double(rank))
+            let job = fillJob(plan, from: source, priority: priority, rank: Double(rank))
             jobs.append(job)
         }
         scheduler.submit(jobs)
+    }
+
+    /// How a tile is brought to the revision a fill draws: drawn whole, or only `region` refilled over
+    /// `base` (the tile at an older version, which the changes since reach only there).
+    struct FillPlan {
+        let key: TileKey
+        let region: CGRect?
+        let base: Tile?
+
+        static func whole(_ key: TileKey) -> FillPlan {
+            FillPlan(key: key, region: nil, base: nil)
+        }
+    }
+
+    /// What `keys` need to show `revision`, in order, leaving out the tiles that already do. A tile at an
+    /// older version that no change since reaches moves on to `revision` here, unfilled; one that some
+    /// change does reach is refilled there only (`FillPlan.region`), when the document still knows where
+    /// its changes went; anything else is filled whole.
+    private func fillPlans(for keys: [TileKey], revision: Int) -> [FillPlan] {
+        let current = document.inkVersion, log = document.inkChanges
+        var plans: [FillPlan] = []
+        var moved: [(key: TileKey, from: Int)] = []
+        for (key, tile) in zip(keys, cache.tiles(for: keys)) {
+            guard let tile else {
+                plans.append(.whole(key))
+                continue
+            }
+            if tile.revision == current || (revision != Tile.unknownRevision && tile.revision == revision) {
+                continue
+            }
+            guard revision >= 0, tile.revision >= 0,
+                  let dirty = log.dirtyRect(in: key.rect, from: tile.revision, to: revision)
+            else {
+                plans.append(.whole(key))
+                continue
+            }
+            if dirty.isNull || dirty.isEmpty {
+                moved.append((key, tile.revision))
+                continue
+            }
+            let region = TileBitmap.pixelAligned(dirty, in: key)
+            plans.append(region == key.rect ? .whole(key) : FillPlan(key: key, region: region, base: tile))
+        }
+        if !moved.isEmpty {
+            cache.relabel(moved, to: revision)
+            contentChanged()
+        }
+        return plans
     }
 
     /// Cancels the fills `drop` picks.
@@ -721,6 +770,7 @@ final class RenderCoordinator {
     private struct FillOutput {
         let tile: Tile
         let restored: Bool
+        let partial: Bool
         let span: ClosedRange<UInt64>
     }
 
@@ -736,11 +786,12 @@ final class RenderCoordinator {
 
     /// A job filling `key` from `source` (or restoring it from the page's raster), and publishing it into the
     /// cache unless it was cancelled.
-    private func fillJob(_ key: TileKey, from source: FillSource, priority: RenderPriority, rank: Double) -> RenderJob {
+    private func fillJob(_ plan: FillPlan, from source: FillSource, priority: RenderPriority, rank: Double) -> RenderJob {
         nextTicket += 1
         let serial = nextTicket
+        let key = plan.key
         let job = RenderJob(priority: priority, rank: rank, cancellation: cancellation, work: { job in
-            Self.fill(key, from: source, isCancelled: { job.isCancelled })
+            Self.fill(plan, from: source, isCancelled: { job.isCancelled })
         }, publish: { [weak self] (output: FillOutput?) in
             self?.fillDidLand(key, serial: serial, output: output, store: source.store)
         })
@@ -748,15 +799,27 @@ final class RenderCoordinator {
         return job
     }
 
-    /// Fills (or restores) one tile. A worker thread; nil if cancelled part way.
-    private nonisolated static func fill(_ key: TileKey, from source: FillSource,
+    /// Fills (or restores) one tile, or refills the region of it its plan says. A worker thread; nil if
+    /// cancelled part way.
+    private nonisolated static func fill(_ plan: FillPlan, from source: FillSource,
                                          isCancelled: () -> Bool) -> FillOutput? {
         let ink = source.ink, store = source.store, revision = source.revision, raster = source.raster
-        let filler = source.filler
+        let filler = source.filler, key = plan.key
         let start = DispatchTime.now().uptimeNanoseconds
         var restored = false
         let tile: Tile
-        if let raster, raster.holds(key, revision: revision), let held = raster.restore(key) {
+        if let region = plan.region, let base = plan.base {
+            let reach = TileBitmap.strokeQuery(for: region, level: key.level)
+            guard let strokes = ink.drawable(in: reach, store: store, isCancelled: isCancelled) else { return nil }
+            if strokes.isEmpty, base.image == nil {
+                tile = Tile(image: nil, revision: revision)
+            } else {
+                guard let ctx = TileBitmap.context(for: key, startingFrom: base.image) else { return nil }
+                filler.fill(key, region: region, strokes: strokes, into: ctx, isCancelled: isCancelled)
+                guard !isCancelled() else { return nil }
+                tile = Tile(image: ctx.makeImage(), revision: revision)
+            }
+        } else if let raster, raster.holds(key, revision: revision), let held = raster.restore(key) {
             tile = held
             restored = true
         } else {
@@ -770,7 +833,8 @@ final class RenderCoordinator {
                 tile = Tile(image: ctx.makeImage(), revision: revision)
             }
         }
-        return FillOutput(tile: tile, restored: restored, span: start ... DispatchTime.now().uptimeNanoseconds)
+        return FillOutput(tile: tile, restored: restored, partial: plan.region != nil,
+                          span: start ... DispatchTime.now().uptimeNanoseconds)
     }
 
     /// `key`'s tile drawn from scratch: the strokes the index finds reaching it, in page order (their
@@ -793,7 +857,7 @@ final class RenderCoordinator {
         if let output {
             let revision = advanced(output.tile.revision, for: key)
             cache.storeIfNewer(Tile(image: output.tile.image, revision: revision), for: key)
-            if revision != document.revision, revision != editLabel {
+            if revision != document.inkVersion {
                 needsRefill = true
             }
             busy.add(output.span)
@@ -803,6 +867,9 @@ final class RenderCoordinator {
                 needsWarmGeometry = true
             } else {
                 fillStats.tilesFilled += 1
+                if output.partial {
+                    fillStats.tilesRefilledInPart += 1
+                }
             }
             fillStats.milliseconds = busy.milliseconds
         }
@@ -841,7 +908,7 @@ final class RenderCoordinator {
         if refill {
             // A fill that kept running after the page moved on landed: fill its tile again.
             requestRender()
-        } else if fills.isEmpty, !pending.contains(where: { !$0.submitted }), !(host?.isEditingInk ?? false) {
+        } else if fills.isEmpty, !pending.contains(where: { !$0.submitted }) {
             // A fill that lost a race with a finished stroke shows no revision: draw it again.
             requestRender()
         }
@@ -854,7 +921,7 @@ final class RenderCoordinator {
     func strokeCommitted(_ live: LiveStroke, geometry: StrokeGeometry, revisionBefore: Int) {
         let deadline = CACurrentMediaTime() + 0.25
         pending.append(PendingStroke(live: live, geometry: geometry, deadline: deadline,
-                                     revisionBefore: revisionBefore, revisionAfter: document.revision))
+                                     revisionBefore: revisionBefore, revisionAfter: document.inkVersion))
         schedulePendingCommit()
     }
 
@@ -1020,7 +1087,7 @@ final class RenderCoordinator {
         drawSubmittedStrokes()
         // Tiles filled while the strokes waited, after something else changed too, show no revision: draw
         // them again now that nothing is left out.
-        if !isSettled, drawing.isEmpty, !pending.contains(where: { !$0.submitted }), !(host?.isEditingInk ?? false) {
+        if !isSettled, drawing.isEmpty, !pending.contains(where: { !$0.submitted }) {
             requestRender()
         }
     }
@@ -1058,7 +1125,7 @@ final class RenderCoordinator {
     /// revision are used; any others are drawn in the background.
     func saveTileRaster() {
         guard !isEmbedded, let host, !host.isEditingInk, pixelSize != .zero else { return }
-        let revision = document.revision, level = restingLevel, document = document
+        let revision = document.inkVersion, level = restingLevel, document = document
         guard document.tileRaster?.revision != revision || document.tileRaster?.level != level,
               document.strokes.contains(where: { !$0.brush.erases })
         else { return }
@@ -1077,7 +1144,7 @@ final class RenderCoordinator {
                     tiles.append((key, tile.image))
                     continue
                 }
-                guard let fill = Self.fill(key, from: source, isCancelled: { job.isCancelled })
+                guard let fill = Self.fill(.whole(key), from: source, isCancelled: { job.isCancelled })
                 else { return nil }
                 drawn.append((key, fill.tile))
                 tiles.append((key, fill.tile.image))
@@ -1088,7 +1155,7 @@ final class RenderCoordinator {
             for (key, tile) in drawn {
                 cache.storeIfNewer(tile, for: key)
             }
-            if document.revision == raster.revision {
+            if document.inkVersion == raster.revision {
                 document.tileRaster = raster
             }
         }))
@@ -1109,24 +1176,27 @@ final class RenderCoordinator {
         let pixels = Self.pixelSize(of: bounds.size, scale: scale)
         let keys = TileKey.keys(covering: t.toCanvas(bounds).intersection(document.pageBounds), page: page, level: level)
         cache.setInterest(ObjectIdentifier(panelInterest), page: page, visible: Set(keys), resting: nil)
-        let revision = (host?.isEditingInk ?? false) ? Tile.unknownRevision : document.revision
+        let revision = document.inkVersion
         // The panel shows every stroke at once, waiting ones too; tiles like that aren't the canvas's to keep.
-        let keeps = revision != Tile.unknownRevision && !pending.contains { !$0.submitted }
+        let keeps = !pending.contains { !$0.submitted }
+        // Tiles an edit since didn't reach are kept as they are, and those it did are refilled where it did.
+        syncChanges()
+        let plans = Dictionary(fillPlans(for: keys, revision: revision).map { ($0.key, $0) }, uniquingKeysWith: { $1 })
+        let held = cache.tiles(for: keys)
         let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:], skipped: [])
         let store = GeometryStore(geometry: geometryCache, generation: geometryGeneration)
         let source = FillSource(ink: snapshot, store: store, revision: revision, raster: nil, filler: filler)
         let cache = cache
         let job = RenderJob(priority: .visible, coalescingKey: ObjectIdentifier(panelInterest), cancellation: lifetime,
                             work: { job -> (CGImage?, [(TileKey, Tile)])? in
-                                let held = cache.tiles(for: keys)
                                 var tiles: [(key: TileKey, image: CGImage)] = []
                                 var drawn: [(TileKey, Tile)] = []
                                 for (key, tile) in zip(keys, held) {
-                                    if let tile, tile.revision == revision, keeps {
-                                        tile.image.map { tiles.append((key, $0)) }
+                                    guard let plan = plans[key] else {
+                                        tile?.image.map { tiles.append((key, $0)) }
                                         continue
                                     }
-                                    guard let fill = Self.fill(key, from: source, isCancelled: { job.isCancelled })
+                                    guard let fill = Self.fill(plan, from: source, isCancelled: { job.isCancelled })
                                     else { return nil }
                                     fill.tile.image.map { tiles.append((key, $0)) }
                                     if keeps {

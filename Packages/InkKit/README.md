@@ -30,7 +30,8 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView+Embedded.swift` | A canvas as one page among several: placed by the host, transparent around its page, taking touches only on it |
 | `PageSidebar.swift` | The page sidebar: thumbnails (rendered in the background, cached), jump, reorder, select, duplicate, rotate, delete, copy or move to another note (`PageDestination`, `PageSender`) |
 | `LassoOverlayView.swift` | Draws the lasso path and the selection outline over the canvas |
-| `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects, each command optionally in a gesture's group (`editGroup`, for strokes across pages) (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave. Keeps the page's `StrokeIndex` in step with every change to its strokes and objects |
+| `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects, each command optionally in a gesture's group (`editGroup`, for strokes across pages) (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave. Keeps the page's `StrokeIndex` in step with every change to its strokes and objects, and its `inkVersion` and `inkChanges` (where each change of the ink went, mid-gesture ones too) |
+| `InkChanges.swift` | `InkChangeLog`: the rect each recent change of a page's ink version touched (the reach of the strokes it added, removed or changed), so tiles are refilled only there (NOT-104) |
 | `StrokeIndex.swift` | Where a page's strokes and objects are: a uniform grid of 32 pt cells (`SpatialGrid`) answering "what may reach this rect?" in page (z) order, without walking the page. Used by culling, the erasers, lasso and tap selection and circle-to-select; tiles query it per tile |
 | `TestingSupport.swift` | `@_spi(Testing)` hooks for other packages' tests to put ink on a page (`drawTestStroke(through:)`, `undoForTesting()`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
@@ -654,11 +655,27 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
      **resting level** (the fitted page; continuous scrolling's column at zoom 1) where it has no tiles, masked
      away wherever it has. When the gesture ends, the new level's tiles in view are filled, centre-out, and
      swapped in together once they're all there (NOT-105 adds progressive levels).
-   - **Revisions, not invalidation lists.** Each tile records the page revision it shows; a tile at any other
-     revision is stale, stays on screen until its refill lands (nothing flashes blank) and is refilled when
-     it's in view. A change that doesn't move the revision (strokes removed or moved mid-gesture) marks the
-     tiles under it stale (`TileCache.invalidate(page:rect:)`). Edits still refill every tile in view
-     (`invalidate(rect:)` is where NOT-104's change rects come in).
+   - **Versions and dirty rects (NOT-104).** Each tile records the version of the page's ink it shows
+     (`CanvasDocument.inkVersion`, which moves on with every change to the strokes: each command, undo and
+     redo, and each step of an erase or a lasso drag, which `revision` only counts once recorded). The page
+     logs where each change went (`inkChanges`, an `InkChangeLog` of the last 256): the reach of every stroke
+     it added, removed or changed, before and after, padded a point. A recolour or a reorder counts only the
+     strokes that differ; a standard erase, the strokes cut and their pieces. So a tile at an older version
+     is brought up to date by what the changes since reach of it:
+     - nothing: it's relabelled, unfilled (cached tiles at every level are moved on as changes arrive,
+       `TileCache.advance`, and the rest when looked at);
+     - part of it: only that part is refilled (`FillPlan.region`, a region job): the strokes the index finds
+       there are drawn into a blank tile clipped to just around it, and its pixels there replace the old
+       tile's, which stay on screen until the job lands;
+     - all of it, or changes too old for the log, or the page resized: the tile is filled whole.
+
+     A refilled region is the tile filled again to within one level in a few pixels (a clip moves Core
+     Graphics' coverage that much; it never builds up, since a region is drawn from nothing each time). A
+     grain stroke drawn through a transparency layer isn't clipped, as its pattern would shift. Every canvas
+     and the zoom panel read the same log, so a second window's tiles catch up the same way. On the 5k
+     benchmark page at the fitted zoom an undo of one stroke is ~45 ms (from ~1.4 s), and a stroke erase of
+     ~90 strokes ~0.5 s (a 550 × 180 pt band of the densest page, so ~1,000 strokes to draw again); at 6× the
+     tiles hold few strokes each. Closing that needs a cheaper fill per stroke (see the decision below).
    - **A finished stroke** is drawn into every cached tile it reaches, at every level, by an `underPencil` job
      (strokes sent meanwhile go in the next one, in order), so it never blinks; the tiles it doesn't reach move
      on to the new revision as they are (`TileCache.advance`). Fills run beside it and leave strokes still
@@ -722,8 +739,9 @@ the presentation mirror, page thumbnails, geometry warm-up after a raster restor
   tile in view and no finished stroke on its way, and every tile in view at the page's revision"; the margin's
   fills may still be running (`RenderCoordinator.isFilling`), as they change nothing on screen. So
   time-to-sharp no longer waits for the margin; benchmarks and tests that count fills wait for those too.
-- **Seams for later issues.** NOT-104's dirty-rect refills are tile jobs with a region (`TileFiller.fill`'s
-  `region`); NOT-105's progressive levels are `visible` jobs swapped in as each batch lands, with stale levels'
+- **Region jobs.** NOT-104's dirty-rect refills are tile jobs like any other, with a region
+  (`TileFiller.fill`'s `region`) and the tile they start from. **Seam for later issues:** NOT-105's
+  progressive levels are `visible` jobs swapped in as each batch lands, with stale levels'
   jobs cancelled (`startRender` already cancels fills of levels passed through during a pinch).
 
 #### Decision: tiled committed layer (NOT-99)
@@ -828,7 +846,7 @@ differ in 0.002%. So:
 | `TileFiller` | NOT-102 (landed) | `fill(_ key:, region:, strokes: [TileStroke], into:)`: draws the given strokes (from `InkSnapshot.drawable(in:)`, which asks the `StrokeIndex`) into a tile, or only `region` of it (cleared first; NOT-104's dirty rects). `CoreGraphicsTileFiller` is the only one in M1.5 |
 | `StrokeGeometry` pieces | not done | Each run's strips and stamps with their bounds, so a filler draws only the pieces reaching its tile. Left out of NOT-102: a copy of every stroke's pieces would roughly double the geometry cache (NOT-108 bounds it), and the spike's gain was at 6× only (7.9 → 5.6 ms a tile) |
 | `RenderScheduler`, `RenderJob` | NOT-103 (landed) | Jobs carry a priority (`.underPencil`, `.visible`, `.margin`, `.otherLevel`, `.background`), a rank and a cancellation token; the coordinator tracks each tile's fill and its revision. Dropped before they start when stale or off screen, checked between strokes while running; results published in one batch per frame. See Render scheduler above |
-| `CanvasDocument` change rects | NOT-104 | Every command reports the page rect it changed; `TileCache.invalidate(page:rect:)` and a region refill per tile |
+| `CanvasDocument` change rects | NOT-104 (landed) | `inkVersion` moves on with every change to the strokes, mid-gesture too, and `inkChanges` (`InkChangeLog`) keeps the rect each touched; the coordinator relabels tiles no change reached and refills the rest by region (`FillPlan`, `TileFiller.fill(_:region:…)`). The rects travel in the document rather than with `invalidate(rect:)`, so every canvas and level showing the page uses them, whichever view made the change |
 
 **Order of the follow-ups**: NOT-100 (split `CanvasView`, no behaviour change) → NOT-101 (index: tiles query it
 per tile, and a linear scan per tile over 5k strokes would cost more than small fills) → NOT-102 (tiles, levels,
@@ -1132,7 +1150,12 @@ one is dropped), the worker limits in and out of a gesture and for low prioritie
 finish together and at most one batch a frame. `RenderJobOrderingTests` checks the coordinator's jobs: under
 the Pencil, then in view centre-out, then the margin; a discarded fill never reaching the cache; fills
 overtaken by an edit dropped or refilled, ending with tiles identical to ones drawn from scratch; and fewer
-workers during a gesture.
+workers during a gesture. `DirtyRectTests` checks NOT-104's dirty rects: the change log (what it knows, its
+capacity, unknown changes), the reach a change counts (recolour, reorder, cut into pieces), that every kind of
+change moves the ink version (live erasing and lasso drags too, objects not), a region refill against the tile
+drawn from scratch for every kind of ink at two levels, and on a coordinator: an undo refilling only regions
+of the tiles it reached, live erasing refilling as it goes, and the tiles after random sequences of every
+edit, undo and redo, at two levels, against tiles drawn from scratch.
 
 `StrokeIndexTests` checks the spatial index: grid queries against a scan (z-order, huge, empty and off-page
 rects, renumbering), that a stroke's reach holds its ink for every bundled brush, and the page's index against

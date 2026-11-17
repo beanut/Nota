@@ -171,17 +171,17 @@ struct RenderJobOrderingTests {
         let workers = 2
         let coordinator = coordinator(filler: filler, workers: workers)
         coordinator.resize(to: host.renderBounds, scale: 2)
-        let first = document.revision
+        let first = document.inkVersion
         // Another stroke before any fill lands: the queued jobs drawing `first` are dropped; the ones
         // already running finish, and their tiles are filled again.
         document.add(stroke(y: 500))
         coordinator.invalidateAll()
-        #expect(document.revision != first)
+        #expect(document.inkVersion != first)
         filler.setOpen(true)
         try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         let level = coordinator.level(for: host.renderTransform)
         let keys = coordinator.visibleKeys(at: host.renderTransform, level: level)
-        #expect(cache.tiles(for: keys).allSatisfy { $0?.revision == document.revision })
+        #expect(cache.tiles(for: keys).allSatisfy { $0?.revision == document.inkVersion })
         // One fill per tile for the new revision, plus at most the ones that were running for the old.
         let tiles = cache.tiles(page: document.cacheID).count
         #expect(coordinator.fillStats.tilesFilled >= tiles)
