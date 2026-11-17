@@ -643,6 +643,157 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
    - A raster brush (the crayon) bakes its wax field on the GPU instead and gets its pixels back asynchronously (see Brushes › Raster brushes).
 3. **During pinch/pan** the cached bitmap is transformed. If a full re-render takes under 5 ms it is re-rendered live instead, and it is always re-rendered crisply when the gesture ends.
 
+The list above is the engine as it is today. The canvas revamp (milestone M1.5) replaces the committed layer
+with the tiles described next; NOT-102 rewrites this section once they land.
+
+#### Decision: tiled committed layer (NOT-99)
+
+**Core Graphics fills page-space tiles; Core Animation composites them (option 3, "hybrid"). Metal fill is
+deferred out of M1.5**, kept possible by the `TileFiller` interface below. The spike prototyped all three
+options on the 5k-stroke benchmark page (`Tests/InkKitBenchmarks/RenderSpike.swift`, not part of the
+benchmark run; `-only-testing:InkKitBenchmarks/RenderSpike` in Release prints `[inkbench] spike.*`). Numbers
+are from the iPad Pro 13-inch (M5) simulator on an M1 Pro (10 cores), so the GPU is the Mac's:
+
+| | Today (one bitmap, bands) | CG tiles, 256 px, pieces culled | Metal, stencil-then-cover, 4× MSAA |
+| --- | ---: | ---: | ---: |
+| One tile at the fitted zoom (p50 / p95) | – | 100 / 232 ms | – |
+| One tile at 6× (p50 / p95) | – | 5.6 / 7.1 ms | 2–4.5 ms (512 px) |
+| Whole page at the fitted zoom, every core | 1,817 ms | 1,408 ms (80 tiles) | 36–44 ms |
+| Screen at 6×, every core | 150 ms | 102 ms (99 tiles) | 7–15 ms |
+| Undo of one word-sized stroke, fitted zoom | 1,886 ms (`edit.undo_5k_ms`) | 220 ms whole tiles; **31 ms** dirty rect only | – |
+| Same undo, only the tiles on screen at 6× | – | 9.4 ms | – |
+| Memory | 22 MB bitmap | 256 KB a tile: 20 MB fitted page, 25 MB screen at 6× | 203 MB of vertices, 217 MB of MSAA targets |
+| Pixels differing from today's (> 2 of 255) | – | 0.13% (0.06% at 512 px) | 35% at 1×, 14% at 6× |
+
+What decided it:
+
+- **Core Graphics is slow per stroke, not per pixel.** In a fitted-zoom tile a plain stroke costs 0.39 ms, a
+  stroke with tilt-varying alpha (two or more runs, drawn through a transparency layer) 1.48 ms, a grain
+  stroke 0.57 ms, whatever share of the tile it covers. So tiles don't make a full page cheaper (1.4 s), and a
+  fitted-zoom tile on this page (up to 281 strokes) is 100–250 ms. What tiles buy is **not filling**: a pan
+  over cached tiles fills nothing, an edit refills only its rect, and at 6× a tile holds few strokes.
+- **Culling to pieces** (a tile fills only the strips and stamps of each stroke that reach it) takes a 6× tile
+  from 7.9 to 5.6 ms (p50) and the 6× screen from 157 to 102 ms; it does nothing at the fitted zoom, where most
+  of a stroke reaches the tile anyway.
+- **Dirty rects, not dirty tiles.** Refilling whole tiles for an undo is 220 ms at the fitted zoom (10 tiles of
+  ~100 ms); clearing and refilling only the stroke's padded bounds inside each tile is 31 ms, with 253 strokes
+  under that rect on this page. That's still 2× the 16 ms edit budget on the benchmark page (a pile of corpus
+  copies far denser than real notes); at 6× the visible part is 9.4 ms.
+- **Tile size 256 px.** 512 px tiles take 26 ms each at 6× and 1024 px 128 ms: too coarse for a scheduler to
+  cancel, prioritise and publish within a frame, and an undo refills 4–16× the pixels. 256 px costs the same
+  memory at the fitted zoom (20 MB) and less at 6× (25 vs 30 MB), at up to ~100 layers on screen.
+- **Metal is ~30× faster for a whole page (7–15× for the 6× screen), but isn't the same picture.** The prototype has no grain, no `.copy`
+  between runs, an approximate multiply, and MSAA coverage instead of Core Graphics' analytic coverage: 35% of
+  pixels differ at the fitted zoom. Closing that means porting the grain and the run rule to shaders and
+  accepting that Core Graphics (PDF export, thumbnails, the goldens, the live layer) and Metal never match
+  exactly. Its naive tessellation is 203 MB of vertices for 5k strokes (twice the 109 MB geometry cache) and
+  0.6–1.9 s of CPU to build. That's a milestone of its own, not a step of this one.
+- **Hand-off is cheap.** Snapshotting a tile bitmap as a `CGImage` for `CALayer.contents` is 0.03 ms
+  (copy-on-write); uploading 512 px into an `MTLTexture` by hand is 1.1 ms. So tiles go to layers as images and
+  Core Animation uploads them.
+
+**Tiles.**
+
+- A tile is **256 × 256 device pixels** of one page at one **level** (pixels per page point). Tile (col, row)
+  covers page pixels [col × 256, (col + 1) × 256) × [row × 256, (row + 1) × 256) at that level, so its page
+  rect is that divided by the level. Tiles are in page space: the same tile serves the paged canvas, embedded
+  canvases in continuous scrolling and the zoom window's panel at the same level, wherever they're placed.
+- A tile with no ink is stored as "empty" (no bitmap). A tile bitmap is premultiplied BGRA from
+  `CommittedRenderer.makeBitmap`, 256 KB.
+- Each tile remembers the page revision it shows. An edit marks tiles **stale** but keeps their pixels on
+  screen until the refill lands, so nothing flashes blank.
+
+**Zoom levels.**
+
+- **Settled, a canvas shows tiles at exactly its scale.** The level is `viewTransform.scale × displayScale`,
+  and when a gesture ends the transform's offset is snapped to whole device pixels so the tile grid lands on
+  the screen's pixel grid. Then a tile's pixels are what drawing the page whole at that transform gives (to the
+  0.13% above), the live layer is unchanged and still matches, and `CanvasBenchmarks`' pixel check keeps
+  meaning "correct at the current transform".
+- **Levels are reused, not quantised.** When a pinch ends within 2% of a level already cached for the page (the
+  fitted level, the last zoom), the transform's scale snaps to that level exactly, so double-tapping back to fit
+  or returning to a zoom refills nothing. Otherwise the new scale is a new level.
+- **During a gesture nothing is filled at the moving scale.** The layers of the last settled level are
+  transformed (as the bitmap is today), over the fitted level's tiles as a fallback where they're missing. When
+  the gesture ends, the visible tiles of the new level are filled centre-out and swapped in as they land.
+- The **fitted level** of each layout (paged; continuous) is kept for every open page; other levels go first
+  under the byte budget. A fitted 5k-stroke page is 20 MB of tiles.
+
+**Live and committed pixels stay matched** the way they do today: the committed tiles use the same
+`StrokeRenderer.draw` (the `.copy` run rule, `WaxRenderer` for raster brushes) at the same scale, on a pixel
+grid aligned with the live layer's. The pencil grain's pattern phase comes from the tile's page-pixel origin
+(the pattern is anchored at a bitmap's bottom-left corner in device pixels), so grain is pinned to the page
+across tiles. Committing a stroke draws it into the cached tiles it reaches at the current level (as it's
+drawn onto the bitmap today, so it never blinks) and marks it stale at other levels.
+
+**Golden snapshots don't change.** They're drawn by `PageRenderer` (whole page, one bitmap), which stays as it
+is for thumbnails, PDF and the goldens. Tiles differ from a whole-page draw in 0.13% of pixels: not at the seams
+(0.012% within 2 px of a tile edge) but inside, where Core Graphics' coverage of a path cut by a different clip
+differs by a few levels (up to 50 for plain ink, 158 for grain). Today's bands, which only cut horizontally,
+differ in 0.002%. So:
+
+- Tile tests compare tiles with the **same tiles drawn from scratch** (exact), and tiles assembled into a page
+  with `PageRenderer`'s whole page within a tolerance (0.2% of pixels by more than 2 levels).
+- `CanvasBenchmarks.mismatch(of:)` draws its reference through the tile path from scratch (or relaxes its
+  0.1% threshold to 0.2%); NOT-102 decides and updates it with `liveView.underlay`, which tiles replace.
+
+**Types the follow-up issues build** (names are the proposal; adjust in review, then keep this list current):
+
+| Type | Issue | Role |
+| --- | --- | --- |
+| `RenderCoordinator` | NOT-100 | The committed side pulled out of `CanvasView`: geometry cache, pending strokes, revision tracking, render requests. `CanvasView`, embedded canvases and the zoom panel talk to it; it owns no touches. Its first version wraps today's bitmap, so NOT-102 swaps the inside |
+| `StrokeIndex` | NOT-101 | Per page, owned by `CanvasDocument`, updated by every command. `strokes(in: CGRect) -> [Int]` in page (z) order, `objects(in:)`, `nearest(to:limit:)`. A uniform grid (32 pt cells in the spike) is enough |
+| `TileLevel`, `TileKey` | NOT-102 | `TileLevel(pixelsPerPoint:)`; `TileKey(page: UUID, level: TileLevel, col: Int, row: Int)`, `TileKey.side = 256`, `rect` in page points, `keys(covering: CGRect, level:)` |
+| `TileCache` | NOT-102 | One per notebook, shared by every canvas showing a page. Thread-safe. `tile(for: TileKey) -> Tile?` (`image`, `revision`, `isStale`), `store(_:for:)`, `invalidate(page:rect:)` (marks stale at every level), LRU eviction under a byte budget, off-screen tiles first |
+| `TileFiller` | NOT-102 | `fill(_ key: TileKey, region: CGRect?, strokes: [Int], geometry:, into: CGContext)`: draws the given strokes (from `StrokeIndex`) into a tile, or only `region` of it (cleared first). `CoreGraphicsTileFiller` is the only one in M1.5; a `MetalTileFiller` would slot in later |
+| `StrokeGeometry` pieces | NOT-102 | Each run's strips and stamps with their bounds, so a filler draws only the pieces reaching its tile or region |
+| `RenderScheduler`, `RenderJob` | NOT-103 | Jobs carry a key, a page revision and a priority (`.underPencil`, `.visible`, `.margin`, `.otherLevel`, `.background`); dropped before they start when stale or off screen, checked between strokes while running; results published in one batch per frame |
+| `CanvasDocument` change rects | NOT-104 | Every command reports the page rect it changed; `TileCache.invalidate(page:rect:)` and a region refill per tile |
+
+**Order of the follow-ups**: NOT-100 (split `CanvasView`, no behaviour change) → NOT-101 (index: tiles query it
+per tile, and a linear scan per tile over 5k strokes would cost more than small fills) → NOT-102 (tiles, levels,
+piece culling; pans and zoom levels reuse pixels) → NOT-103 (scheduler: cancellation and priorities make
+time-to-sharp and pan margins work; leaves two performance cores free during gestures) → NOT-104 (dirty-rect
+edits). What to expect against the NOT-98 budgets on the 5k page:
+
+- `pan.6x_dense.*`: met after NOT-102/103 (cached tiles fill nothing; a new column of eleven 6× tiles every
+  ~13 frames at 10 pt a frame is ~60 ms of background fill).
+- `zoom.pinch_1x_6x.time_to_sharp_ms`: ~100 ms of fill on every core for the 6× screen, so about the 150 ms
+  budget once the scheduler holds two cores back; centre-out order gets the middle sharp first.
+- `edit.*`: ~31 ms at the fitted zoom after NOT-104, so still about 2× over on this page; 9 ms at 6×. Closing
+  it needs cheaper strokes: the multi-run transparency layer is 4× a plain fill. Proposed as a follow-up
+  (see below) rather than more scope for NOT-104.
+- A **new zoom level near the fitted zoom** refills most of the page: ~1.4 s on this page, progressively,
+  centre-out, over the scaled tiles. That's the case Metal fill would fix.
+- `scroll.page_enter_5k_ms` (50 ms) needs the page's fitted-level tiles restored rather than drawn:
+  `CommittedRaster` becomes per-tile and per-level (paged and continuous each have a fitted level), which is
+  NOT-102's to replace.
+
+**Metal fill: deferred.** Revisit after M1.5 if zoom-level refills or dense-page edits stay over budget on
+device. A Metal `TileFiller` would need: the grain as a shader (as the wax tooth is), the `.copy` run rule
+inside a stroke (stencil per run, later runs masking earlier), exact multiply (programmable blending reads the
+destination on Apple GPUs), indexed tessellation built lazily per stroke rather than fans for the whole page,
+and an answer for matching Core Graphics: either the live layer fills with Metal too and the goldens are
+re-recorded, or a tolerance everywhere the two meet.
+
+**What the crayon's `WaxRenderer` taught** (NOT-93/NOT-96), the first Metal on the ink path:
+
+- **Make every pixel a function of its own inputs** and splitting the work can't show. The wax field is
+  max-blended and its tooth comes from the page position of the device pixel, so tiles, bands and the live
+  layer's dirty rects all give the same pixels, and a test checks it. Source-over ink isn't order-free like
+  max, so a GPU filler for ordinary ink must keep page order within each tile.
+- **Never wait for the GPU on a touch.** Waiting per live tile cost 0.3–1.5 ms on the simulator, several times
+  an event; it now commits and gets pixels back on the main queue (0.5 ms p50, 0.85 ms p95). The committed path
+  still waits, one GPU pass per stroke and band (`full_redraw.crayon_500_ms` 159 ms for 500 crayon strokes):
+  batch strokes per tile in one pass instead.
+- **Reading back is cheap if nothing is copied**: output lands in a shared `MTLBuffer` wrapped as a `CGImage`
+  and composited by Core Graphics or Core Animation, so the GPU's output fits the same tile cache.
+- **Shaders compile from source at runtime** (`makeLibrary(source:)`, since the package has no Metal build
+  step), so the first use is slow: prewarm off the main thread. Keep a Core Graphics fallback (no Metal device,
+  regions over 8192²), and the fallback is what PDF export and old builds see.
+- **Simulator GPU numbers are the Mac's GPU.** None of this, wax or spike, has run on an iPad; on-device
+  Instruments is the check before Metal goes further.
+
 ### Stroke geometry
 
 - Samples are smoothed with **centripetal Catmull-Rom**, which avoids cusps and overshoot when samples are unevenly spaced.
@@ -793,6 +944,10 @@ misses, so they only gate a run once a change meets them. It's the per-metric be
 M1 Pro that wasn't idle, so a single run on a busy Mac can read worse than it with no code change; rerun before
 believing a regression, and compare against your base branch on the same machine as well. `*_max_ms` regressions are reported but don't fail a
 run (one scheduler hiccup moves them); their budgets still count.
+
+`RenderSpike` (NOT-99) sits beside them but isn't run by `scripts/run-benchmarks.sh` and has no baseline: it's
+the throwaway prototypes of the render architectures behind Architecture › Rendering pipeline › Decision.
+Run it with `-only-testing:InkKitBenchmarks/RenderSpike` when revisiting that decision.
 
 ### Recorded input
 
