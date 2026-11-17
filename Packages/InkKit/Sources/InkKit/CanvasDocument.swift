@@ -109,14 +109,9 @@ public final class CanvasDocument: Identifiable {
 
     /// Goes up whenever the page's strokes change, mid-gesture too (each step of an erase or a lasso drag,
     /// which `revision` only counts once the gesture is recorded), and when its size does. What the
-    /// committed tiles are labelled with: a tile at this version shows the ink as it is.
-    private(set) var inkVersion = 0 {
-        didSet {
-            if tileRaster?.revision != inkVersion {
-                tileRaster = nil
-            }
-        }
-    }
+    /// committed tiles are labelled with: a tile at this version shows the ink as it is. A page read from
+    /// its file starts at 0.
+    public private(set) var inkVersion = 0
 
     /// Where each recent change of `inkVersion` touched the ink (NOT-104), so tiles are refilled only there.
     private(set) var inkChanges = InkChangeLog()
@@ -143,10 +138,20 @@ public final class CanvasDocument: Identifiable {
         hasUnloggedChange = false
     }
 
-    /// The page's fitted-level committed tiles, compressed, as the canvas left them when the page closed,
-    /// for reopening it without filling every stroke again. Labelled with the `inkVersion` they show, and
-    /// dropped as soon as the ink changes.
-    var tileRaster: TileRaster?
+    /// The page's resting-level committed tiles, compressed, as the last canvas showing the page left them
+    /// (or as the app restored them from its cache), for showing the page again without filling every
+    /// stroke (NOT-106). Labelled with the `inkVersion` they show; edits since are caught up from
+    /// `inkChanges` tile by tile, so it outlives them. See `TileRaster`.
+    var tileRaster: TileRaster? {
+        didSet {
+            tileRasterGeneration += 1
+        }
+    }
+
+    /// Goes up each time `tileRaster` is replaced.
+    var tileRasterGeneration = 0
+    /// Who hears when `tileRaster` is captured (`observeCommittedTiles`).
+    var tileObservers: [(owner: () -> AnyObject?, onCapture: () -> Void)] = []
 
     /// Names this page in the shared `TileCache`. Not the page's `id`: a page read from its file again is
     /// a new document, starting again at revision 0, so the tiles of the old one must not pass for its.

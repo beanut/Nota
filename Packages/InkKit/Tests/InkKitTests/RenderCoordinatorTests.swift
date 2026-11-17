@@ -343,7 +343,7 @@ struct RenderCoordinatorTests {
             document.add(finishedStroke(y: CGFloat(y), brush: .pencil).stroke)
         }
         try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
-        coordinator.saveTileRaster()
+        coordinator.captureTileRaster()
         // Compressed in the background at utility priority: slow while other tests fill every core.
         try await waitUntil(timeout: 60) { document.tileRaster != nil }
         let shown = try #require(coordinator.composedImage())

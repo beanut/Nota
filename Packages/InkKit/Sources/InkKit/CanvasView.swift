@@ -223,6 +223,8 @@ final class CanvasView: UIView {
         })
         applyPaper()
         refreshObjects()
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground),
+                                               name: UIApplication.didEnterBackgroundNotification, object: nil)
     }
 
     @available(*, unavailable)
@@ -241,14 +243,18 @@ final class CanvasView: UIView {
 
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
-        // Before leaving the window, while the fitted transform still sees the real safe area.
-        // Embedded pages come and go as they scroll by, at whatever transform they were at: no raster.
+        // Before leaving the window, while the fitted transform still sees the real safe area. Embedded
+        // pages too, as they scroll away: they leave their tiles at the column's zoom 1 (NOT-106).
         if newWindow == nil, window != nil {
             endEditingText()
+            coordinator.captureTileRaster()
         }
-        if newWindow == nil, window != nil, !isEmbedded {
-            coordinator.saveTileRaster()
-        }
+    }
+
+    /// The app may be ended in the background: leaves the page's tiles for it to keep (NOT-106).
+    @objc func appDidEnterBackground() {
+        guard window != nil else { return }
+        coordinator.captureTileRaster()
     }
 
     override func didMoveToWindow() {

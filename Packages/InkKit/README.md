@@ -49,7 +49,9 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `RenderCoordinator.swift` | The committed side: which tiles the view needs, filling missing and stale ones off the main thread, showing them (the current level over the level before it and the resting level while it fills in), drawing finished strokes (`PendingStroke`) into the tiles they reach, the geometry cache, revision tracking, the settled state, the page's `TileRaster` and the zoom panel's renders. Knows nothing of touches |
 | `RenderScheduler.swift` | `RenderScheduler` (`.shared`), `RenderJob`, `RenderPriority`, `RenderCancellation`: the one place render work runs (tiles, finished strokes, the zoom panel, the presentation mirror, thumbnails, geometry warm-up, page rasters), by priority, cancellable, on a bounded number of workers, published in batches on the main thread at most once a frame |
 | `TileCache.swift` | `TileLevel`, `TileKey` (256-pixel page-space tiles), `Tile` (pixels and the page revision they show) and `TileCache`, every page's tiles shared by every canvas and zoom panel, evicted least recently used under a byte budget |
-| `TileFiller.swift` | `TileFiller` and `CoreGraphicsTileFiller` (drawing strokes into a tile), `TileBitmap` (tile contexts in page points with the grain pinned to the page; assembling tiles into an image), `InkSnapshot` (the ink a render job draws from), `GeometryStore` (stroke geometry the jobs of one fill share and build), `TileRaster` (a page's fitted tiles, compressed, for reopening it) |
+| `TileFiller.swift` | `TileFiller` and `CoreGraphicsTileFiller` (drawing strokes into a tile), `TileBitmap` (tile contexts in page points with the grain pinned to the page; assembling tiles into an image), `InkSnapshot` (the ink a render job draws from), `GeometryStore` (stroke geometry the jobs of one fill share and build) |
+| `TileRaster.swift` | `TileRaster`: a page's resting-level tiles, compressed, in a versioned format an app can keep between launches (NOT-106) |
+| `CanvasDocument+Tiles.swift` | `PageTiles`, `committedTiles`, `restoreCommittedTiles(_:)`, `observeCommittedTiles`: a page's kept tiles for the app to store and restore |
 | `TileLayers.swift` | `TileLayerGrid`: one level's tiles on screen as `CGImage` layer contents, placed by one transform |
 | `PencilSettings.swift` | `PencilSettings` (double-tap and squeeze actions, finger drawing, palm rejection, handedness, scribble toggles) and their persistence, quick-palette placement, and `PalmRejector` |
 | `PencilSettingsView.swift` | The More menu's Apple Pencil settings |
@@ -716,11 +718,25 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
      the tiles they had) and the zoom window's panel share them. The cache keeps 192 MB, evicting least
      recently used tiles that no view shows first, then resting-level ones, never one on screen. Empty tiles
      keep no bitmap.
-   - **Reopening a page.** With its tiles still cached, a page opens with no fill at all. When the paged canvas
-     leaves a page it also hands the document a `TileRaster`: its fitted-level tiles, LZFSE-compressed (about
-     5 MB for 5k strokes; any not cached at the page's revision are drawn in the background first), which a
-     fill restores tile by tile instead of drawing once the cache has let them go. Any edit drops the raster;
-     embedded canvases don't leave one (NOT-106 persists the tiles and keeps them across edits).
+   - **Reopening a page (NOT-106).** With its tiles still cached, a page opens with no fill at all. When any
+     canvas leaves a page (it leaves the window, or the app goes to the background), it hands the document a
+     `TileRaster`: its resting-level tiles (the fitted page, or the column at zoom 1 in continuous
+     scrolling), LZFSE-compressed, about 5 MB for 5k strokes. A paged canvas fills any it doesn't have
+     cached in the background first; an embedded one leaves only the tiles it had. A fill restores a tile
+     from it instead of drawing it once the cache has let it go (`FillPlan.restore`).
+   - **The raster outlives edits.** It's labelled with the `inkVersion` it shows, and a tile is caught up from
+     `inkChanges` like a cached one: restored as it is where no change since reaches it, restored and
+     refilled only in the region one does, filled whole when the log no longer knows (more than 256
+     changes since, or a resize). Leaving the page again carries the tiles no change reached into the new
+     raster still compressed, so only tiles that changed are compressed again.
+   - **Kept between launches.** `raster.data` is a self-describing format (`TileRaster`: magic,
+     `formatVersion`, `rendererVersion`, tile side, level, page size, a table of tiles, then their LZFSE
+     bytes), handed out as `CanvasDocument.committedTiles` and taken back by `restoreCommittedTiles(_:)`,
+     which refuses another format, renderer or page size. InkKit doesn't know where it's kept: Nota's
+     `PageTileCache` (NotaCore) stores it keyed by the hash of the page's saved ink file. **Bump
+     `TileRaster.rendererVersion` whenever a fill's pixels change for the same strokes** (the renderer, a
+     built-in brush, grain, wax, colour handling), or kept tiles will show the old look. A tile whose bytes
+     don't decode is filled.
    - `PageRenderer` (thumbnails, PDF, the golden snapshots) still draws the page whole; tiles differ from it in
      well under 0.2% of pixels (Core Graphics' coverage of a path cut by a different clip), and the tile tests
      hold them to that.
@@ -895,9 +911,10 @@ edits). What to expect against the NOT-98 budgets on the 5k page:
   (see below) rather than more scope for NOT-104.
 - A **new zoom level near the fitted zoom** refills most of the page: ~1.4 s on this page, progressively,
   centre-out, over the scaled tiles. That's the case Metal fill would fix.
-- `scroll.page_enter_5k_ms` (50 ms) needs the page's fitted-level tiles restored rather than drawn:
-  NOT-102 replaced `CommittedRaster` with the paged canvas's `TileRaster` (and a page whose tiles are still
-  cached enters with no fill at all); keeping fitted tiles for continuous pages and across edits is NOT-106.
+- `scroll.page_enter_5k_ms` (50 ms) is met for a page seen before, in this launch or (with the app's tile
+  cache) an earlier one: its kept tiles are restored, not drawn (NOT-106). The first time a page is ever
+  shown, its tiles in view are filled (`scroll.page_enter_first_5k_ms`, about 2 s on this page): nothing
+  but a cheaper fill helps there.
 
 **Metal fill: deferred.** Revisit after M1.5 if zoom-level refills or dense-page edits stay over budget on
 device. A Metal `TileFiller` would need: the grain as a shader (as the wax tooth is), the `.copy` run rule
@@ -981,7 +998,7 @@ More › Zoom Window shows a writing panel at the bottom of the canvas that magn
 
 More › Scroll Direction › Vertical (`PageLayoutMode.continuous`, the default) shows every page in one column, like one long sheet. `ContinuousPageLayout` fits the widest page to the width and stacks the pages with a 6-point gap, all at one scale; finding the pages in view and the current page (the one at the middle of the view) are binary searches, so the column's length doesn't matter.
 
-- **Only the pages in or near the view are real.** A `UIScrollView` scrolls and zooms an empty stand-in for the column. Each page in view, and each page within half a screen of it, gets an embedded `CanvasView`, transparent outside its page; the canvas's own pan and pinch are off. A page scrolled away loses its canvas, so views follow what's on screen (at most 6 canvases), not the note's length; its tiles stay in the shared cache (its column-at-zoom-1 level kept over others) until the cache needs the room, so scrolling back fills nothing. Embedded canvases leave no `TileRaster` behind (NOT-106).
+- **Only the pages in or near the view are real.** A `UIScrollView` scrolls and zooms an empty stand-in for the column. Each page in view, and each page within half a screen of it, gets an embedded `CanvasView`, transparent outside its page; the canvas's own pan and pinch are off. A page scrolled away loses its canvas, so views follow what's on screen (at most 6 canvases), not the note's length; its tiles stay in the shared cache (its column-at-zoom-1 level kept over others) until the cache needs the room, so scrolling back fills nothing. An embedded canvas leaving the window leaves the page the tiles it had at that level as its `TileRaster` (NOT-106), so a page scrolled back to after the cache let it go, or after a relaunch, is restored rather than filled.
 - **Scrolling doesn't re-render ink.** Each canvas sits in the scroll content over its *render window* (`ContinuousPageLayout.renderWindow`): the viewport plus half a screen above and below and a quarter to each side, cut to the page. At zoom 1 that's the whole page. The scroll view moves the canvas, and its already-rendered ink, with the paper, so a page only fills tiles when it gets its canvas (before it scrolls into view) and they aren't cached, when the zoom changes (at the new level, once the pinch ends), and, when zoomed in, for the tiles a re-centred window uncovers. During a pinch the window keeps its size and the last level is scaled. The host places each page with `place(_:settled:)`.
 - **Touches.** A canvas takes touches only on its page (`point(inside:with:)`); the gaps belong to the scroll view, whose pan and pinch accept only fingers (two when one draws) and won't begin while a page is taking ink. Writing on a page makes it the current one, and the tools, undo and selection act on it.
 - **Paged and continuous share the page bar and sidebar:** choosing a page scrolls to it, and reordering keeps the page being read where it was on screen. Writing in the bottom 15% of the last page adds a page like it.
@@ -1060,7 +1077,7 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `stroke_geometry.*` | Building every corpus stroke's outline (spline, nib hulls, runs) from scratch | – |
 | `live_event.p50/p95/p99_ms` | One touch event of a replayed stroke: appending its coalesced samples, finalizing segments, rebuilding the predicted tail, applying estimate updates, and drawing the dirty live-layer tiles | p95 < 2 ms |
 | `live_event.long_stroke.*` | The same for the longest stroke (a 4 s tilted shading scribble), first quarter vs last quarter: work mustn't grow with length | last-quarter p95 < 2 ms |
-| `page_open.5k_ms` | Reopening a 5k-stroke page whose tiles the cache let go: its fitted-level tiles restored from the page's `TileRaster` (with them still cached, opening fills nothing) | < 150 ms |
+| `page_open.5k_ms` | Reopening a 5k-stroke page whose tiles the cache let go (or after a relaunch): its kept tiles read from their file (mapped) and restored tile by tile from the `TileRaster` (with them still cached, opening fills nothing) | < 150 ms |
 | `page_open_cold.{1,5,20}k_ms` | Opening a page with no raster (first time shown at this size): a fresh committed bitmap, every stroke's geometry built, the page drawn | – |
 | `page_raster.*` | Compressing a 5k-stroke page's committed layer when the page closes (in the background), and its size | – |
 | `full_redraw.5k_ms` | Re-rendering a 5k-stroke page with geometry cached (undo, erase, end of zoom) | – |
@@ -1104,7 +1121,8 @@ simulator's GPU isn't an iPad's. An on-device Instruments profile is the check o
 | `pan.6x_dense.frame_p50/p95/max_ms` | Main-thread work per frame of a half-second pan (10 pt a frame) at 6× over a 5k-stroke page | p95 and max < 8 ms |
 | `pan.6x_dense.time_to_sharp_ms` | From the pan ending to sharp ink | < 150 ms |
 | `pan.6x_dense.step_render_ms` | The tile fills the pans at 6× set off (what they uncovered and a tile's margin ahead), per frame, off the main thread. `tiles_filled` counts them; `cached_tiles_filled` counts fills in an untimed pan back over the last pass's cached tiles, which must be 0 | < 8 ms |
-| `scroll.page_enter_5k_ms` | A 5k-stroke page entering view in continuous scrolling for the first time: its embedded canvas made, placed, laid out and its tiles in view filled (nothing cached or restored: NOT-106) | < 50 ms |
+| `scroll.page_enter_5k_ms` | A 5k-stroke page seen before entering view in continuous scrolling: read from its file again (nothing in the tile cache), its kept tiles read from their file (mapped), its embedded canvas made, placed and laid out, its tiles in view restored (NOT-106) | < 50 ms |
+| `scroll.page_enter_first_5k_ms` | The same page entering view for the first time ever: its tiles in view filled | – |
 | `memory.continuous_20_pages_mb` | Peak footprint scrolling a 20-page note of 5k-stroke pages page by page, each page drawn, over the note's own strokes (`memory.continuous_20_pages.model_mb`) | < 300 MB |
 
 The budgets are where the canvas revamp (milestone M1.5) is headed; today's engine misses most of them, and
@@ -1173,10 +1191,14 @@ outline import and `LinkHistory`.
 
 `TileTests` checks the committed tiles: tiles assembled against the page drawn whole (seams and inside) for
 plain, multi-run, grain, scaled-grain, multiply, pixel-eraser and crayon ink; against `PageRenderer` within 0.2%;
-a stroke drawn into a cached tile against the tile filled again; `TileRaster` round trips; and the cache's
+a stroke drawn into a cached tile against the tile filled again; `TileRaster` round trips (through its bytes
+too, and refusing damaged, foreign or other-renderer bytes); and the cache's
 eviction order, revision rules and `advance`. `RenderCoordinatorTests` checks settling, committed strokes,
 invalidation, that a pan over cached tiles and a pinch fill nothing (until the pinch ends), the 2% snap, and a
-reopened page restoring its raster instead of filling. `RenderSchedulerTests` checks the scheduler: priority,
+reopened page restoring its raster instead of filling. `TileRasterTests` checks kept tiles on a coordinator:
+restored instead of filled; after an edit, restored and refilled only where it reached (and carried over when
+the page is left again); filled whole once the log has forgotten; damaged tiles filled; a page read from its
+file again with its tiles' bytes restored with nothing filled; embedded canvases leaving only their tiles. `RenderSchedulerTests` checks the scheduler: priority,
 rank and submission order, `reprioritise`, cancellation before a job starts, while it runs and after it's done
 but before its batch (none publishes), cancellation tokens, coalescing (an older job finishing after a newer
 one is dropped), the worker limits in and out of a gesture and for low priorities, one batch for jobs that

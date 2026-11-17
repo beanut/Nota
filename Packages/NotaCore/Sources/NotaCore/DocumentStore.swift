@@ -30,6 +30,12 @@ import SwiftData
 /// registers its `assets/` files, so pictures are read from the package only when they're drawn. Pictures
 /// no page uses any more are removed when the note is next opened (when it has no undo history that could
 /// bring them back), unless one of its objects files couldn't be read.
+///
+/// **Tiles.** With a `PageTileCache`, each page's committed-ink tiles are kept between launches (NOT-106),
+/// outside the package: when a canvas leaves a page's tiles (`CanvasDocument.committedTiles`) for ink
+/// that's on disk, they're stored keyed by the hash of that ink file, and opening the note again restores
+/// them onto pages whose ink file still hashes the same. Tiles for ink not saved yet wait for the save that
+/// writes it. Opening a note never depends on them.
 @Observable
 @MainActor
 public final class DocumentStore {
@@ -58,6 +64,8 @@ public final class DocumentStore {
     @ObservationIgnored private var pendingPages: [UUID: UUID] = [:]
     /// Custom template backgrounds read or saved this session, by background id.
     @ObservationIgnored private var artworks: [UUID: TemplateArtwork] = [:]
+    /// Where pages' tiles are kept between launches; nil keeps none.
+    @ObservationIgnored private let tileCache: PageTileCache?
 
     @ObservationIgnored private var dirty: Set<UUID> = []
     @ObservationIgnored private var lastChange = ContinuousClock.now
@@ -74,6 +82,10 @@ public final class DocumentStore {
         var editors = 0
         /// Set when a save failed, so the next one writes every page.
         var needsFullSave = false
+        /// Each page's ink as last read or written: its `inkVersion` then, and the hash of the file.
+        var savedInk: [UUID: (version: Int, hash: Data)] = [:]
+        /// Pages whose canvas left tiles that aren't kept yet (their ink isn't saved yet).
+        var unkeptTiles: Set<UUID> = []
         var pagesObservation: AnyCancellable?
         var outlineObservation: AnyCancellable?
 
@@ -90,12 +102,13 @@ public final class DocumentStore {
     }
 
     public init(library: URL = NotePackage.libraryURL, capacity: Int = 8, autosaveDelay: Duration = .seconds(1),
-                files: PackageFiles = PackageFiles(), assets: ImageAssets = .shared) {
+                files: PackageFiles = PackageFiles(), assets: ImageAssets = .shared, tileCache: PageTileCache? = nil) {
         self.library = library
         self.capacity = max(1, capacity)
         self.autosaveDelay = autosaveDelay
         self.files = files
         self.assets = assets
+        self.tileCache = tileCache
     }
 
     // MARK: Opening notes
@@ -251,6 +264,7 @@ public final class DocumentStore {
         }
         manifests[noteID] = nil
         tombstones.insert(noteID)
+        tileCache?.removeNote(noteID)
         let url = NotePackage.url(for: noteID, in: library), files = files
         queue.enqueue {
             try? files.remove(url)
@@ -330,13 +344,13 @@ public final class DocumentStore {
 
     private func load(_ note: Note) async -> InkNotebook {
         let id = note.id
-        let library = library, files = files, assets = assets
+        let library = library, files = files, assets = assets, tileCache = tileCache
         let cached = manifests[id]
         let fallback = Self.fallbackManifest(for: note)
         let knownArtworks = Set(artworks.keys)
         let package = await queue.perform {
             Self.readPackage(noteID: id, cachedManifest: cached, fallback: fallback, knownArtworks: knownArtworks,
-                             in: library, files: files, assets: assets)
+                             in: library, files: files, assets: assets, tileCache: tileCache)
         }
         for (backgroundID, data) in package.artworks {
             guard let background = package.manifest.backgrounds.first(where: { $0.id == backgroundID }),
@@ -350,6 +364,9 @@ public final class DocumentStore {
             let document = CanvasDocument(file: package.ink[page.id] ?? InkPageFile(pageID: page.id),
                                           objects: package.objects[page.id], pageSize: page.size)
             document.setTemplate(page.template, artwork: page.template.background.flatMap { artworks[$0.id] })
+            if let tiles = package.tiles[page.id], !document.restoreCommittedTiles(tiles) {
+                tileCache?.removePage(page.id, note: id) // another InkKit's, or damaged: filled instead
+            }
             return document
         }
         var defaultTemplate = manifest.coverTemplate
@@ -368,6 +385,11 @@ public final class DocumentStore {
             manifests[id] = manifest
         }
         let entry = OpenNote(note: note, notebook: notebook)
+        for page in pages {
+            if let hash = package.inkHashes[page.id] {
+                entry.savedInk[page.id] = (page.inkVersion, hash)
+            }
+        }
         open[id] = entry
         if let page = pendingPages.removeValue(forKey: id), let index = notebook.index(of: page) {
             notebook.goToPage(index)
@@ -416,6 +438,10 @@ public final class DocumentStore {
     private func observe(_ pages: [CanvasDocument], of noteID: UUID) {
         for page in pages {
             page.observeChanges(self) { [weak self] in self?.changed(noteID) }
+            if tileCache != nil {
+                let pageID = page.id
+                page.observeCommittedTiles(self) { [weak self] in self?.tilesLeft(on: pageID, of: noteID) }
+            }
         }
     }
 
@@ -424,6 +450,7 @@ public final class DocumentStore {
         entry.outlineObservation = nil
         for page in entry.notebook.pages {
             page.stopObservingChanges(self)
+            page.stopObservingCommittedTiles(self)
         }
     }
 
@@ -473,11 +500,13 @@ public final class DocumentStore {
         new.outline = notebook.outline.pruned(keeping: new.pages.map(\.id)).nonEmpty
 
         var pageFiles: [InkPageFile] = []
+        var inkVersions: [UUID: Int] = [:]
         for page in notebook.pages {
             let saved = entry.savedRevisions[page.id]
             let changed = entry.needsFullSave || (saved.map { $0 != page.revision } ?? (page.strokeCount > 0))
             if changed {
                 pageFiles.append(page.inkFile)
+                inkVersions[page.id] = page.inkVersion
             }
         }
         var objectFiles: [PageObjectsFile] = []
@@ -507,26 +536,76 @@ public final class DocumentStore {
         entry.savedRevisions = OpenNote.revisions(of: notebook, \.revision)
         entry.savedObjectRevisions = OpenNote.revisions(of: notebook, \.objectsRevision)
         entry.needsFullSave = false
-        store(new, for: note, pageFiles: pageFiles, objectFiles: objectFiles, assetIDs: assetIDs)
+        store(new, for: note, pageFiles: pageFiles, inkVersions: inkVersions, objectFiles: objectFiles,
+              assetIDs: assetIDs)
     }
 
     private func store(_ manifest: NoteManifest, for note: Note, pageFiles: [InkPageFile] = [],
-                       objectFiles: [PageObjectsFile] = [], assetIDs: Set<ImageAssetID> = []) {
+                       inkVersions: [UUID: Int] = [:], objectFiles: [PageObjectsFile] = [],
+                       assetIDs: Set<ImageAssetID> = []) {
         var manifest = manifest
         manifest.formatVersion = NoteManifest.currentFormatVersion
         manifests[note.id] = manifest
         mirror(manifest, onto: note)
         let job = SaveJob(noteID: note.id, manifest: manifest, pageFiles: pageFiles, objectFiles: objectFiles,
-                          artworks: artworkData(for: manifest), assetIDs: assetIDs, assets: assets)
+                          artworks: artworkData(for: manifest), assetIDs: assetIDs, assets: assets,
+                          hashesInk: tileCache != nil)
         let library = library, files = files, tombstones = tombstones
         let failedSaves = failedSaves
-        queue.enqueue {
+        let noteID = note.id
+        queue.enqueue { [weak self] in
             do {
-                try Self.perform(job, in: library, files: files, tombstones: tombstones)
+                let hashes = try Self.perform(job, in: library, files: files, tombstones: tombstones)
+                if !hashes.isEmpty {
+                    Task { @MainActor in self?.inkSaved(hashes, versions: inkVersions, of: noteID) }
+                }
             } catch {
                 // The disk may hold some of the save and not the rest; the next save writes it all again.
                 Logger.documents.error("Saving note \(job.noteID, privacy: .public) failed: \(String(describing: error), privacy: .public)")
                 failedSaves.insert(job.noteID)
+            }
+        }
+    }
+
+    // MARK: Tiles
+
+    /// A canvas left tiles on the page: they're kept if its ink as they show it is on disk, or once it is.
+    private func tilesLeft(on pageID: UUID, of noteID: UUID) {
+        guard let entry = open[noteID] else { return }
+        entry.unkeptTiles.insert(pageID)
+        keepTiles(of: entry)
+    }
+
+    /// Pages' ink was written: `hashes` of their files, at `versions` of their ink.
+    private func inkSaved(_ hashes: [UUID: Data], versions: [UUID: Int], of noteID: UUID) {
+        guard let entry = open[noteID] else { return }
+        for (pageID, hash) in hashes {
+            guard let version = versions[pageID] else { continue }
+            if let saved = entry.savedInk[pageID], saved.version > version {
+                continue
+            }
+            entry.savedInk[pageID] = (version, hash)
+        }
+        keepTiles(of: entry)
+    }
+
+    /// Stores the tiles waiting whose ink is the page's ink on disk. Those of ink since saved over are
+    /// dropped; those of ink not saved yet keep waiting.
+    private func keepTiles(of entry: OpenNote) {
+        guard let tileCache else { return }
+        let noteID = entry.note.id
+        for page in entry.notebook.pages where entry.unkeptTiles.contains(page.id) {
+            guard let tiles = page.committedTiles else {
+                entry.unkeptTiles.remove(page.id)
+                continue
+            }
+            guard let saved = entry.savedInk[page.id], saved.version >= tiles.inkVersion else { continue }
+            entry.unkeptTiles.remove(page.id)
+            guard saved.version == tiles.inkVersion else { continue }
+            tileCache.store(tiles.data, ofPage: page.id, note: noteID, inkHash: saved.hash) { [weak page] stored in
+                guard let stored else { return }
+                // The bytes kept, mapped, in place of the copy in memory.
+                Task { @MainActor in page?.adoptPersistedTiles(stored, for: tiles) }
             }
         }
     }
@@ -593,6 +672,10 @@ extension DocumentStore {
         var objects: [UUID: PageObjectsFile]
         /// Bytes of backgrounds that weren't in memory yet.
         var artworks: [UUID: Data]
+        /// The hash of each page's ink file, when tiles are kept (`PageTileCache.inkHash(of:)`).
+        var inkHashes: [UUID: Data] = [:]
+        /// Each page's kept tiles, for the ink it was read with.
+        var tiles: [UUID: Data] = [:]
     }
 
     struct SaveJob: Sendable {
@@ -607,6 +690,8 @@ extension DocumentStore {
         /// Pictures the changed objects use, written to `assets/` if they aren't there yet.
         let assetIDs: Set<ImageAssetID>
         let assets: ImageAssets
+        /// Whether to hash each page file written (`PageTileCache.inkHash(of:)`), for keeping tiles.
+        var hashesInk = false
     }
 
     struct CopyJob: Sendable {
@@ -633,12 +718,14 @@ extension DocumentStore {
 
     nonisolated static func readPackage(noteID: UUID, cachedManifest: NoteManifest?, fallback: NoteManifest,
                                         knownArtworks: Set<UUID>, in library: URL, files: PackageFiles,
-                                        assets: ImageAssets) -> LoadedPackage {
+                                        assets: ImageAssets, tileCache: PageTileCache? = nil) -> LoadedPackage {
         let manifest = cachedManifest
             ?? readManifest(at: NotePackage.manifestURL(for: noteID, in: library), files: files)
             ?? fallback
         var ink: [UUID: InkPageFile] = [:]
         var objects: [UUID: PageObjectsFile] = [:]
+        var inkHashes: [UUID: Data] = [:]
+        var tiles: [UUID: Data] = [:]
         var objectsComplete = true
         for page in manifest.pages {
             let objectsURL = NotePackage.objectsURL(for: page.id, noteID: noteID, in: library)
@@ -663,6 +750,11 @@ extension DocumentStore {
                 file.pageID = page.id
                 file.prepareIndex() // here, off the main actor, rather than when the page is built
                 ink[page.id] = file
+                if let tileCache {
+                    let hash = PageTileCache.inkHash(of: data)
+                    inkHashes[page.id] = hash
+                    tiles[page.id] = tileCache.tiles(ofPage: page.id, note: noteID, inkHash: hash)
+                }
             } catch {
                 Logger.documents
                     .error(
@@ -678,7 +770,9 @@ extension DocumentStore {
         }
         let used = objects.values.reduce(into: Set<ImageAssetID>()) { $0.formUnion($1.imageAssetIDs) }
         registerAssets(of: noteID, in: library, used: objectsComplete ? used : nil, files: files, assets: assets)
-        return LoadedPackage(manifest: manifest, ink: ink, objects: objects, artworks: artworks)
+        tileCache?.noteOpened(noteID, pages: Set(manifest.pages.map(\.id)))
+        return LoadedPackage(manifest: manifest, ink: ink, objects: objects, artworks: artworks, inkHashes: inkHashes,
+                             tiles: tiles)
     }
 
     /// Tells `assets` about the pictures in the note's `assets/` folder. With `used` (every picture the note's
@@ -716,14 +810,22 @@ extension DocumentStore {
     }
 
     /// Writes changed pages (ink, then missing pictures, then objects), then missing backgrounds, then the
-    /// manifest, then removes what it no longer lists.
-    nonisolated static func perform(_ job: SaveJob, in library: URL, files: PackageFiles, tombstones: NoteIDSet) throws {
-        guard !tombstones.contains(job.noteID) else { return }
+    /// manifest, then removes what it no longer lists. Returns the hash of each page file written, when the
+    /// job asks for them.
+    @discardableResult
+    nonisolated static func perform(_ job: SaveJob, in library: URL, files: PackageFiles,
+                                    tombstones: NoteIDSet) throws -> [UUID: Data] {
+        guard !tombstones.contains(job.noteID) else { return [:] }
         let id = job.noteID
         removeTemporaryFiles(of: id, in: library, files: files)
         try writeAssets(job.assetIDs, of: id, in: library, files: files, assets: job.assets)
+        var hashes: [UUID: Data] = [:]
         for file in job.pageFiles {
-            try files.write(file.encoded(), to: NotePackage.pageURL(for: file.pageID, noteID: id, in: library))
+            let data = file.encoded()
+            try files.write(data, to: NotePackage.pageURL(for: file.pageID, noteID: id, in: library))
+            if job.hashesInk {
+                hashes[file.pageID] = PageTileCache.inkHash(of: data)
+            }
         }
         for file in job.objectFiles {
             let url = NotePackage.objectsURL(for: file.pageID, noteID: id, in: library)
@@ -740,6 +842,7 @@ extension DocumentStore {
         }
         try files.write(job.manifest.encoded(), to: NotePackage.manifestURL(for: id, in: library))
         try removeUnlisted(by: job.manifest, noteID: id, in: library, files: files)
+        return hashes
     }
 
     /// Copies the original's page files and backgrounds into the copy's package, then writes its manifest.

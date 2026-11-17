@@ -176,39 +176,121 @@ struct TileTests {
         }
     }
 
-    @Test func aRasterRestoresTheSameTiles() throws {
+    /// A raster of the `.grain` page's tiles at `revision`, and the tiles.
+    private func raster(revision: Int = 4) throws -> (TileRaster, [(key: TileKey, image: CGImage?)]) {
         let ink = snapshot(strokePage(of: .grain))
         let keys = TileKey.keys(covering: CGRect(origin: .zero, size: Self.pageSize), page: page, level: Self.level)
         let tiles: [(key: TileKey, image: CGImage?)] = keys.map { key in
-            (key, RenderCoordinator.draw(key, from: ink, revision: 4, filler: CoreGraphicsTileFiller()).image)
+            (key, RenderCoordinator.draw(key, from: ink, revision: revision, filler: CoreGraphicsTileFiller()).image)
         }
-        let raster = try #require(TileRaster(tiles: tiles, revision: 4, level: Self.level))
+        return try (#require(TileRaster(tiles: tiles, revision: revision, level: Self.level, pageSize: Self.pageSize)), tiles)
+    }
+
+    @Test func aRasterRestoresTheSameTiles() throws {
+        let (raster, tiles) = try raster()
         let inked = tiles.filter { $0.image != nil }.count
         #expect(inked > 0)
         #expect(raster.byteCount < inked * 256 * 1024 / 2)
+        #expect(raster.tileCount == tiles.count)
         for (key, image) in tiles {
-            #expect(raster.holds(key, revision: 4))
-            #expect(!raster.holds(key, revision: 5))
+            #expect(raster.holds(key))
             let restored = try #require(raster.restore(key))
             #expect(restored.revision == 4)
             #expect(restored.image?.dataProvider?.data == image?.dataProvider?.data)
         }
         let elsewhere = TileKey(page: page, level: TileLevel(pixelsPerPoint: 3), col: 0, row: 0)
-        #expect(!raster.holds(elsewhere, revision: 4))
+        #expect(!raster.holds(elsewhere))
         #expect(raster.restore(TileKey(page: page, level: Self.level, col: 40, row: 0)) == nil)
     }
 
+    /// The bytes an app keeps between launches read back as the same raster, at the revision given.
+    @Test func aRasterReadFromItsBytesIsTheSameRaster() throws {
+        let (raster, tiles) = try raster()
+        let read = try #require(TileRaster(data: raster.data, revision: 0))
+        #expect(read.revision == 0)
+        #expect(read.level == Self.level)
+        #expect(read.pageSize == Self.pageSize)
+        #expect(read.tileCount == raster.tileCount)
+        for (key, image) in tiles {
+            #expect(read.restore(key)?.image?.dataProvider?.data == image?.dataProvider?.data)
+        }
+        // From a slice (as an app's own file header would leave it).
+        let framed = Data([1, 2, 3]) + raster.data
+        let slice = framed[framed.startIndex + 3 ..< framed.endIndex]
+        let fromSlice = try #require(TileRaster(data: slice, revision: 2))
+        let key = try #require(tiles.first { $0.image != nil }).key
+        #expect(fromSlice.restore(key)?.image?.dataProvider?.data == read.restore(key)?.image?.dataProvider?.data)
+        // Carried into a new raster still compressed, the same tiles.
+        let entries = tiles.compactMap { tile in raster.blob(for: tile.key).map { TileRaster.Entry(
+            col: tile.key.col,
+            row: tile.key.row,
+            blob: $0
+        ) } }
+        let carried = try #require(TileRaster(entries: entries, revision: 5, level: Self.level, pageSize: Self.pageSize))
+        #expect(carried.restore(key)?.image?.dataProvider?.data == read.restore(key)?.image?.dataProvider?.data)
+    }
+
+    /// Bytes that aren't a raster this InkKit can show are refused, so the page is filled instead.
+    @Test func damagedOrForeignBytesAreNotARaster() throws {
+        let (raster, tiles) = try raster()
+        let data = raster.data
+        #expect(TileRaster(data: Data(), revision: 0) == nil)
+        #expect(TileRaster(data: data.prefix(30), revision: 0) == nil) // cut in the header
+        #expect(TileRaster(data: data.prefix(60), revision: 0) == nil) // cut in the entries
+        var magic = data
+        magic[0] ^= 0xFF
+        #expect(TileRaster(data: magic, revision: 0) == nil)
+        var renderer = data
+        renderer[8] &+= 1 // an older or newer renderer drew these pixels
+        #expect(TileRaster(data: renderer, revision: 0) == nil)
+        var format = data
+        format[4] &+= 1
+        #expect(TileRaster(data: format, revision: 0) == nil)
+        // A tile whose pixels are damaged doesn't restore (its fill draws it), while the others do.
+        let inked = try #require(tiles.first { $0.image != nil }).key
+        let blobStart = 44 + 20 * raster.tileCount
+        var pixels = data
+        for i in blobStart ..< data.count {
+            pixels[i] = 0x5A
+        }
+        let damaged = try #require(TileRaster(data: pixels, revision: 0))
+        #expect(damaged.restore(inked) == nil)
+        // Cut short: entries past the end are refused.
+        #expect(TileRaster(data: data.prefix(data.count - 1), revision: 0) == nil)
+    }
+
     @MainActor
-    @Test func aDocumentDropsItsRasterWhenThePageChanges() {
+    @Test func aDocumentKeepsItsRasterThroughEdits() {
         let doc = CanvasDocument()
         doc.add(makeStroke(at: CGPoint(x: 10, y: 10)))
         let key = TileKey(page: doc.cacheID, level: Self.level, col: 0, row: 0)
         let ink = snapshot(doc.strokes)
         let tile = RenderCoordinator.draw(key, from: ink, revision: doc.inkVersion, filler: CoreGraphicsTileFiller())
-        doc.tileRaster = TileRaster(tiles: [(key, tile.image)], revision: doc.inkVersion, level: Self.level)
-        #expect(doc.tileRaster != nil)
+        let version = doc.inkVersion
+        doc.tileRaster = TileRaster(tiles: [(key, tile.image)], revision: version, level: Self.level,
+                                    pageSize: doc.pageBounds.size)
         doc.undo()
-        #expect(doc.tileRaster == nil)
+        // Labelled with the version it shows; the log says what changed since.
+        #expect(doc.tileRaster?.revision == version)
+        #expect(doc.inkChanges.changes(from: version, to: doc.inkVersion)?.isEmpty == false)
+    }
+
+    /// Filling happens before the main actor is entered: canvases in other suites need it.
+    @Test func aDocumentTakesKeptTilesOnlyForItsSizeOfPage() async throws {
+        let (raster, _) = try raster()
+        try await expectOnlyItsSizeOfPageTakes(raster)
+    }
+
+    @MainActor
+    private func expectOnlyItsSizeOfPageTakes(_ raster: TileRaster) throws {
+        let doc = CanvasDocument(pageSize: PageSize(width: Self.pageSize.width, height: Self.pageSize.height))
+        #expect(doc.restoreCommittedTiles(raster.data))
+        #expect(doc.tileRaster?.revision == doc.inkVersion)
+        #expect(doc.committedTiles?.data == raster.data)
+        let other = CanvasDocument(pageSize: .letter)
+        #expect(!other.restoreCommittedTiles(raster.data))
+        #expect(!other.restoreCommittedTiles(Data("not tiles".utf8)))
+        #expect(other.tileRaster == nil)
     }
 }
 

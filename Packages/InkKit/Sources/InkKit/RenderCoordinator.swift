@@ -112,7 +112,7 @@ struct BusyIntervals {
 @MainActor
 final class RenderCoordinator {
     let document: CanvasDocument
-    /// True for one page among several in continuous scrolling: no page raster is kept.
+    /// True for one page among several in continuous scrolling: its raster keeps only the tiles it had.
     let isEmbedded: Bool
     weak var host: RenderCoordinatorHost?
     let cache: TileCache
@@ -738,7 +738,8 @@ final class RenderCoordinator {
         let moving = host?.isMoving ?? false
         if moving, let shown = displayedLevel, shown != want {
             let blank = shown == resting ? [] : visibleKeys(at: t, level: resting, centreOut: true)
-            var plans = zip(blank, cache.tiles(for: blank)).filter { $0.1 == nil }.map { FillPlan.whole($0.0) }
+            var plans = zip(blank, cache.tiles(for: blank)).filter { $0.1 == nil }
+                .map { plan(uncached: $0.0, revision: revision) }
             var interest = Set(blank)
             if let held = steadyLevel(for: want), held != shown, held != resting {
                 let keys = visibleKeys(at: t, level: held, centreOut: true)
@@ -844,15 +845,33 @@ final class RenderCoordinator {
     }
 
     /// How a tile is brought to the revision a fill draws: drawn whole, or only `region` refilled over
-    /// `base` (the tile at an older version, which the changes since reach only there).
+    /// `base` (the tile at an older version, which the changes since reach only there). With `restore`,
+    /// the base is the page's `TileRaster`'s tile (NOT-106), restored as it is when there's no `region`.
     struct FillPlan {
         let key: TileKey
         let region: CGRect?
         let base: Tile?
+        var restore = false
 
         static func whole(_ key: TileKey) -> FillPlan {
             FillPlan(key: key, region: nil, base: nil)
         }
+    }
+
+    /// How `key`, which the cache doesn't hold, comes to show `revision`: from the page's raster if it holds
+    /// the tile, as it is when no change since the raster's version reaches it, refilled where one does
+    /// (as a cached tile would be); otherwise, or when the log no longer knows, filled whole.
+    private func plan(uncached key: TileKey, revision: Int) -> FillPlan {
+        guard revision >= 0, let raster = document.tileRaster, raster.revision <= revision, raster.holds(key),
+              raster.pageSize == document.pageBounds.size,
+              let dirty = raster.revision == revision
+              ? CGRect.null : document.inkChanges.dirtyRect(in: key.rect, from: raster.revision, to: revision)
+        else { return .whole(key) }
+        if dirty.isNull || dirty.isEmpty {
+            return FillPlan(key: key, region: nil, base: nil, restore: true)
+        }
+        let region = TileBitmap.pixelAligned(dirty, in: key)
+        return region == key.rect ? .whole(key) : FillPlan(key: key, region: region, base: nil, restore: true)
     }
 
     /// What `keys` need to show `revision`, in order, leaving out the tiles that already do. A tile at an
@@ -865,7 +884,7 @@ final class RenderCoordinator {
         var moved: [(key: TileKey, from: Int)] = []
         for (key, tile) in zip(keys, cache.tiles(for: keys)) {
             guard let tile else {
-                plans.append(.whole(key))
+                plans.append(plan(uncached: key, revision: revision))
                 continue
             }
             if tile.revision == current || (revision != Tile.unknownRevision && tile.revision == revision) {
@@ -941,7 +960,12 @@ final class RenderCoordinator {
         let start = DispatchTime.now().uptimeNanoseconds
         var restored = false
         let tile: Tile
-        if let region = plan.region, let base = plan.base {
+        // A tile the raster holds that doesn't decode is filled whole.
+        let held = plan.restore ? raster?.restore(key) : nil
+        if plan.region == nil, let held {
+            tile = Tile(image: held.image, revision: revision)
+            restored = true
+        } else if let region = plan.region, let base = plan.base ?? held {
             let reach = TileBitmap.strokeQuery(for: region, level: key.level)
             guard let strokes = ink.drawable(in: reach, store: store, isCancelled: isCancelled) else { return nil }
             if strokes.isEmpty, base.image == nil {
@@ -952,9 +976,6 @@ final class RenderCoordinator {
                 guard !isCancelled() else { return nil }
                 tile = Tile(image: ctx.makeImage(), revision: revision)
             }
-        } else if let raster, raster.holds(key, revision: revision), let held = raster.restore(key) {
-            tile = held
-            restored = true
         } else {
             guard let strokes = ink.drawable(in: key.rect, store: store, isCancelled: isCancelled) else { return nil }
             if strokes.isEmpty {
@@ -1254,44 +1275,83 @@ final class RenderCoordinator {
         }
     }
 
-    /// The page is going away: leaves its resting-level tiles with the document as a `TileRaster`, for
-    /// the next time it opens (should the cache have let them go by then). The cached tiles at the page's
-    /// revision are used; any others are drawn in the background.
-    func saveTileRaster() {
-        guard !isEmbedded, let host, !host.isEditingInk, pixelSize != .zero else { return }
-        let revision = document.inkVersion, level = restingLevel, document = document
-        guard document.tileRaster?.revision != revision || document.tileRaster?.level != level,
-              document.strokes.contains(where: { !$0.brush.erases })
-        else { return }
+    /// The page is going away (its canvas leaves the window, or the app goes to the background): leaves its
+    /// resting-level tiles with the document as its `TileRaster` (NOT-106), for the next time it's shown,
+    /// should the cache have let them go by then, and for the app to keep between launches.
+    ///
+    /// Tiles of the raster the page already had that no change since reaches are carried over as they are,
+    /// still compressed; the rest come from the cached tiles at the page's version, compressed in the
+    /// background. A paged canvas also fills the tiles neither has, so the whole page comes back; an embedded
+    /// one (a page among several in continuous scrolling, which come and go as they scroll by) leaves only
+    /// what it has.
+    func captureTileRaster() {
+        guard let host, !host.isEditingInk, pixelSize != .zero else { return }
+        let document = document, revision = document.inkVersion, level = restingLevel
+        let pageSize = document.pageBounds.size
+        guard document.strokes.contains(where: { !$0.brush.erases }) else { return }
         let keys = TileKey.keys(covering: document.pageBounds, page: page, level: level)
+        let old = document.tileRaster.flatMap { $0.level == level && $0.pageSize == pageSize ? $0 : nil }
+        if let old, old.revision == revision, old.holdsAll(keys) {
+            return
+        }
+        // The old raster's tiles that still show the page.
+        var kept: [TileKey: TileRaster.Blob] = [:]
+        if let old, old.revision <= revision {
+            let log = document.inkChanges
+            for key in keys where old.holds(key) {
+                guard let dirty = old.revision == revision ? CGRect.null
+                    : log.dirtyRect(in: key.rect, from: old.revision, to: revision),
+                    dirty.isNull || dirty.isEmpty
+                else { continue }
+                kept[key] = old.blob(for: key)
+            }
+        }
+        if let old, kept.count == keys.count, old.revision < revision {
+            document.captured(old.relabeled(revision)) // nothing changed where it has tiles
+            return
+        }
+        let fillsMissing = !isEmbedded, carried = kept
         let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:], skipped: [])
         let source = FillSource(ink: snapshot, store: GeometryStore(geometry: geometryCache), revision: revision,
                                 raster: nil, filler: filler)
         let cache = cache
         // Not cancelled with the canvas: the page raster outlives it.
         scheduler.submit(RenderJob(priority: .otherLevel, work: { job -> (TileRaster, [(TileKey, Tile)])? in
-            let held = cache.tiles(for: keys)
+            let missing = keys.filter { carried[$0] == nil }
+            var entries: [TileRaster.Entry] = []
             var drawn: [(TileKey, Tile)] = []
-            var tiles: [(key: TileKey, image: CGImage?)] = []
-            for (key, tile) in zip(keys, held) {
+            for (key, tile) in zip(missing, cache.tiles(for: missing)) {
+                guard !job.isCancelled else { return nil }
+                let image: CGImage?
                 if let tile, tile.revision == revision {
-                    tiles.append((key, tile.image))
+                    image = tile.image
+                } else if fillsMissing {
+                    guard let fill = Self.fill(.whole(key), from: source, isCancelled: { job.isCancelled })
+                    else { return nil }
+                    drawn.append((key, fill.tile))
+                    image = fill.tile.image
+                } else {
                     continue
                 }
-                guard let fill = Self.fill(.whole(key), from: source, isCancelled: { job.isCancelled })
-                else { return nil }
-                drawn.append((key, fill.tile))
-                tiles.append((key, fill.tile.image))
+                guard let blob = TileRaster.compress(image) else { continue }
+                entries.append(TileRaster.Entry(col: key.col, row: key.row, blob: blob))
             }
-            return TileRaster(tiles: tiles, revision: revision, level: level).map { ($0, drawn) }
+            // Nothing the old raster didn't already have.
+            if entries.isEmpty, old?.revision == revision {
+                return nil
+            }
+            entries += keys.compactMap { key in carried[key].map { TileRaster.Entry(col: key.col, row: key.row, blob: $0) } }
+            return TileRaster(entries: entries, revision: revision, level: level, pageSize: pageSize).map { ($0, drawn) }
         }, publish: { (output: (TileRaster, [(TileKey, Tile)])?) in
             guard let (raster, drawn) = output else { return }
             for (key, tile) in drawn {
                 cache.storeIfNewer(tile, for: key)
             }
-            if document.inkVersion == raster.revision {
-                document.tileRaster = raster
+            // A newer raster left meanwhile (by another canvas) is kept.
+            if let held = document.tileRaster, held.revision > raster.revision {
+                return
             }
+            document.captured(raster)
         }))
     }
 

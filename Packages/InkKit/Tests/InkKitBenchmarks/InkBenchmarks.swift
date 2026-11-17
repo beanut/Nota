@@ -305,17 +305,23 @@ final class InkBenchmarks: XCTestCase {
 
     // MARK: Page open
 
-    /// Opening a page the canvas has shown before, once the tile cache has let its tiles go: the page's
-    /// `TileRaster` (its fitted-level tiles, compressed, left with the document when the page closed)
-    /// decompressed tile by tile, exactly as the canvas's render job does instead of filling them. This is
+    /// Opening a page the canvas has shown before, in this launch or an earlier one, once the tile cache
+    /// has let its tiles go (or never had them): the page's `TileRaster` (its fitted-level tiles,
+    /// compressed) read from the file an app keeps it in (mapped, as `DocumentStore` reads it), then
+    /// decompressed tile by tile, exactly as the canvas's render jobs do instead of filling them. This is
     /// the budgeted page open; with the tiles still cached, opening fills and restores nothing.
-    /// Ink isn't stored on disk yet; decoding it, and the raster with it, joins this measurement when it is.
     func testPageOpen5k() throws {
         let (tiles, level) = try fittedTiles(strokes: 5000)
-        let saved = try XCTUnwrap(TileRaster(tiles: tiles, revision: 1, level: level))
+        let saved = try XCTUnwrap(TileRaster(tiles: tiles, revision: 1, level: level, pageSize: corpus.pageSize.size))
+        let url = FileManager.default.temporaryDirectory.appending(path: "page-open-\(UUID().uuidString).tiles")
+        try saved.data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
         var restored: [Tile?] = []
         let times = timed {
-            restored = tiles.map { key, _ in saved.holds(key, revision: 1) ? saved.restore(key) : nil }
+            guard let data = try? Data(contentsOf: url, options: .alwaysMapped),
+                  let raster = TileRaster(data: data, revision: 0)
+            else { return XCTFail("The kept tiles didn't read back") }
+            restored = tiles.map { key, _ in raster.holds(key) ? raster.restore(key) : nil }
         }
         for ((_, image), tile) in zip(tiles, restored) {
             XCTAssertEqual(tile?.image?.dataProvider?.data as Data?, image?.dataProvider?.data as Data?,
@@ -327,12 +333,13 @@ final class InkBenchmarks: XCTestCase {
 
     /// Leaving a page: compressing the 5k-stroke page's fitted-level tiles into its `TileRaster`. Runs in
     /// the background after the page closes, so it has no budget, but it bounds how soon a page reopened
-    /// straight away (and evicted from the cache) can be restored rather than drawn.
+    /// straight away (and evicted from the cache) can be restored rather than drawn. Leaving it again after
+    /// an edit compresses only the tiles the edit reached; the rest are carried over.
     func testPageRasterCapture5k() throws {
         let (tiles, level) = try fittedTiles(strokes: 5000)
         var raster: TileRaster?
         let times = timed(iterations: 3) {
-            raster = TileRaster(tiles: tiles, revision: 1, level: level)
+            raster = TileRaster(tiles: tiles, revision: 1, level: level, pageSize: corpus.pageSize.size)
         }
         let saved = try XCTUnwrap(raster)
         BenchResults.record("page_raster.capture_5k_ms", Stats(times).median, unit: "ms")

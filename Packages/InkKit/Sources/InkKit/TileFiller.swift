@@ -1,4 +1,3 @@
-import Compression
 import CoreGraphics
 import Foundation
 
@@ -330,88 +329,5 @@ final class GeometryStore: @unchecked Sendable { // guarded by `condition`
             defer { built = [] }
             return built
         }
-    }
-}
-
-/// A page's tiles at one level, compressed, so reopening the page puts the same pixels back instead of
-/// filling every stroke again (page open under 150 ms). Kept by the document while the page is closed
-/// and only good for the ink version it was taken at; any edit drops it. Lossless (LZFSE), about 5 MB for a
-/// fitted 5k-stroke page. NOT-106 makes it the persisted cache and keeps it across edits.
-struct TileRaster: @unchecked Sendable { // immutable
-    /// The page's `CanvasDocument.inkVersion` that the pixels show.
-    let revision: Int
-    let level: TileLevel
-    /// The tiles taken: those covering the page at `level`.
-    let cols: ClosedRange<Int>
-    let rows: ClosedRange<Int>
-    /// Compressed pixels of the tiles with ink; a covered tile missing here is empty.
-    private let compressed: [Int: Data]
-
-    private static let bytesPerRow = TileKey.side * 4
-
-    /// Compresses `tiles` (every tile of the page at `level`, nil for empty ones). Slow (a few ms a
-    /// tile): run it off the main thread. Nil if a tile isn't laid out like a tile bitmap.
-    init?(tiles: [(key: TileKey, image: CGImage?)], revision: Int, level: TileLevel) {
-        guard let first = tiles.first else { return nil }
-        var cols = first.key.col ... first.key.col, rows = first.key.row ... first.key.row
-        var compressed: [Int: Data] = [:]
-        let length = Self.bytesPerRow * TileKey.side
-        let destination = UnsafeMutablePointer<UInt8>.allocate(capacity: length)
-        defer { destination.deallocate() }
-        for (key, image) in tiles {
-            guard key.level == level else { return nil }
-            cols = min(cols.lowerBound, key.col) ... max(cols.upperBound, key.col)
-            rows = min(rows.lowerBound, key.row) ... max(rows.upperBound, key.row)
-            guard let image else { continue }
-            guard image.width == TileKey.side, image.height == TileKey.side, image.bytesPerRow == Self.bytesPerRow,
-                  image.bitsPerPixel == 32, image.bitmapInfo.rawValue == CommittedRenderer.bitmapInfo,
-                  let bytes = image.dataProvider?.data, CFDataGetLength(bytes) >= length
-            else { return nil }
-            let size = compression_encode_buffer(destination, length, CFDataGetBytePtr(bytes), length, nil,
-                                                 COMPRESSION_LZFSE)
-            guard size > 0 else { return nil }
-            compressed[Self.slot(key.col, key.row)] = Data(bytes: destination, count: size)
-        }
-        guard tiles.count == cols.count * rows.count else { return nil }
-        self.revision = revision
-        self.level = level
-        self.cols = cols
-        self.rows = rows
-        self.compressed = compressed
-    }
-
-    private static func slot(_ col: Int, _ row: Int) -> Int {
-        row &* 1_000_003 &+ col
-    }
-
-    /// The compressed size.
-    var byteCount: Int {
-        compressed.values.reduce(0) { $0 + $1.count }
-    }
-
-    /// Whether this raster holds `key` as the page was at `revision`.
-    func holds(_ key: TileKey, revision: Int) -> Bool {
-        self.revision == revision && key.level == level && cols.contains(key.col) && rows.contains(key.row)
-    }
-
-    /// `key`'s tile, decompressed, or nil if this raster doesn't hold it or it doesn't decode.
-    func restore(_ key: TileKey) -> Tile? {
-        guard key.level == level, cols.contains(key.col), rows.contains(key.row) else { return nil }
-        guard let data = compressed[Self.slot(key.col, key.row)] else {
-            return Tile(image: nil, revision: revision)
-        }
-        let length = Self.bytesPerRow * TileKey.side
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-              let ctx = CGContext(data: nil, width: TileKey.side, height: TileKey.side, bitsPerComponent: 8,
-                                  bytesPerRow: Self.bytesPerRow, space: space, bitmapInfo: CommittedRenderer.bitmapInfo),
-              let target = ctx.data
-        else { return nil }
-        let decoded = data.withUnsafeBytes { source -> Int in
-            guard let base = source.bindMemory(to: UInt8.self).baseAddress else { return 0 }
-            return compression_decode_buffer(target.assumingMemoryBound(to: UInt8.self), length, base, source.count,
-                                             nil, COMPRESSION_LZFSE)
-        }
-        guard decoded == length, let image = ctx.makeImage() else { return nil }
-        return Tile(image: image, revision: revision)
     }
 }

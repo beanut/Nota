@@ -37,4 +37,19 @@ public extension CanvasDocument {
         let strokeIDs = includingInk ? Set(strokes.map(\.id)) : []
         self.transform(PageSelection(strokeIDs: strokeIDs, objectIDs: objectIDs), by: transform)
     }
+
+    /// Leaves the page's committed tiles (`committedTiles`), every one drawn at `pixelsPerPoint`, as a
+    /// canvas showing the page would when it goes away, and tells the observers.
+    func leaveTilesForTesting(pixelsPerPoint: CGFloat = 1) {
+        let level = TileLevel(pixelsPerPoint: pixelsPerPoint)
+        let geometry = Dictionary(strokes.map { ($0.id, StrokeRenderer.geometry(for: $0)) }, uniquingKeysWith: { $1 })
+        let ink = InkSnapshot(strokes: strokes, index: strokeIndex, geometry: geometry, skipped: [])
+        let tiles = TileKey.keys(covering: pageBounds, page: cacheID, level: level).map { key in
+            (key: key, image: RenderCoordinator.draw(key, from: ink, revision: inkVersion,
+                                                     filler: CoreGraphicsTileFiller()).image)
+        }
+        if let raster = TileRaster(tiles: tiles, revision: inkVersion, level: level, pageSize: pageBounds.size) {
+            captured(raster)
+        }
+    }
 }

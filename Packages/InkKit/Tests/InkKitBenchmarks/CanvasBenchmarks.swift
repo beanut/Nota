@@ -375,8 +375,11 @@ final class CanvasBenchmarks: XCTestCase {
 
     /// A 5k-stroke page scrolling into view in continuous mode: `ContinuousCanvasView` gives it a fresh
     /// embedded canvas, places it and lays it out (`makeCanvas`, `place(_:settled:)`, `layoutIfNeeded`);
-    /// timed until its ink is drawn. A page seen for the first time: nothing is cached or restored (an
-    /// embedded page keeps no raster until NOT-106), so its tiles in view are filled.
+    /// timed until its ink is drawn. The budgeted case (`scroll.page_enter_5k_ms`) is a page seen before,
+    /// in this launch or an earlier one (NOT-106): the page read from its file again (nothing of it in the
+    /// tile cache) and the tiles it left read back from the file an app keeps them in (mapped, as
+    /// `DocumentStore` reads them), then restored. The first time a page is ever shown, its tiles in view
+    /// are filled: `scroll.page_enter_first_5k_ms`, no budget.
     func testPageEnter5k() throws {
         let suite = "CanvasBenchmarks.\(UUID().uuidString)"
         let controller = try CanvasController(settingsStore: XCTUnwrap(UserDefaults(suiteName: suite)),
@@ -390,18 +393,40 @@ final class CanvasBenchmarks: XCTestCase {
         let window = ContinuousPageLayout.renderWindow(forPage: page, viewport: viewport, current: nil)
         let placement = ViewTransform(scale: layout.scale,
                                       offset: CGPoint(x: page.minX - window.minX, y: page.minY - window.minY))
-        var times: [Double] = []
-        for _ in 0 ..< 3 {
-            let file = InkPageFile(pageID: UUID(), strokes: corpus.page(strokes: 5000))
-            let document = CanvasDocument(file: file, pageSize: corpus.pageSize)
-            let start = Bench.now()
+        let file = InkPageFile(pageID: UUID(), strokes: corpus.page(strokes: 5000))
+        func enter(_ document: CanvasDocument) throws -> CanvasView {
             let canvas = CanvasView(frame: window, document: document, embedded: true)
             canvas.traitOverrides.displayScale = Bench.displayScale
             canvas.controller = controller
+            canvas.restingScaleOverride = layout.scale // as `ContinuousCanvasView` sets it
             canvas.place(placement, settled: true)
             canvas.layoutIfNeeded()
             try waitUntilSettled(canvas, timeout: 60)
+            return canvas
+        }
+
+        // First sight: filled. Then the page scrolls away, leaving its tiles, which the app keeps.
+        let first = CanvasDocument(file: file, pageSize: corpus.pageSize)
+        let start = Bench.now()
+        let shown = try enter(first)
+        BenchResults.record("scroll.page_enter_first_5k_ms", Bench.milliseconds(since: start), unit: "ms")
+        try waitUntilIdle(shown)
+        shown.coordinator.captureTileRaster()
+        try waitUntil(timeout: 60) { first.committedTiles != nil }
+        let tiles = try XCTUnwrap(first.committedTiles)
+        let url = FileManager.default.temporaryDirectory.appending(path: "page-enter-\(UUID().uuidString).tiles")
+        try tiles.data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        var times: [Double] = []
+        for _ in 0 ..< 3 {
+            let document = CanvasDocument(file: file, pageSize: corpus.pageSize)
+            let start = Bench.now()
+            let data = try Data(contentsOf: url, options: .alwaysMapped)
+            XCTAssertTrue(document.restoreCommittedTiles(data))
+            let canvas = try enter(document)
             times.append(Bench.milliseconds(since: start))
+            XCTAssertEqual(canvas.coordinator.fillStats.tilesFilled, 0, "a page seen before filled tiles")
         }
         let median = Stats(times).median
         BenchResults.record("scroll.page_enter_5k_ms", median, unit: "ms", budget: Self.pageEnterBudgetMs)
