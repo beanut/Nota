@@ -88,7 +88,7 @@ public struct TextObject: PageObject, Equatable {
     }
 
     public func draw(in ctx: CGContext) {
-        TextLayout.cached(text, width: frame.width).draw(at: frame.origin, in: ctx)
+        TextLayout.using(text, width: frame.width) { $0.draw(at: frame.origin, in: ctx) }
     }
 
     /// The checkboxes' touch targets in the box's own space, with the character index that starts each
@@ -359,9 +359,46 @@ final class TextLayout {
     }
 
     @MainActor private static var cache: [Key: TextLayout] = [:]
+    private static let pool = Pool()
 
-    /// A layout of `text` at `width`. On the main thread layouts are kept, since the object layer redraws
-    /// every box on every frame of a pan or zoom; elsewhere (thumbnails, PDFs) each call lays out afresh.
+    /// Layouts lent to other threads, one thread at a time each (a layout manager isn't safe to share): the
+    /// object layer's tiles (NOT-109) draw a box once per tile it reaches, off the main thread.
+    private final class Pool: @unchecked Sendable { // guarded by `lock`
+        private let lock = NSLock()
+        private var idle: [Key: [TextLayout]] = [:]
+        private var count = 0
+
+        func take(_ key: Key) -> TextLayout? {
+            lock.withLock {
+                guard let layout = idle[key]?.popLast() else { return nil }
+                count -= 1
+                return layout
+            }
+        }
+
+        func put(_ layout: TextLayout, for key: Key) {
+            lock.withLock {
+                if count >= 64 {
+                    idle.removeAll()
+                    count = 0
+                }
+                idle[key, default: []].append(layout)
+                count += 1
+            }
+        }
+    }
+
+    /// Runs `body` with a layout of `text` at `width`, kept for the next call on any thread.
+    static func using<T>(_ text: RichText, width: CGFloat, _ body: (TextLayout) -> T) -> T {
+        guard !Thread.isMainThread else { return body(cached(text, width: width)) }
+        let key = Key(text: text, width: width)
+        let layout = pool.take(key) ?? TextLayout(text, width: width)
+        defer { pool.put(layout, for: key) }
+        return body(layout)
+    }
+
+    /// A layout of `text` at `width`. On the main thread layouts are kept (text boxes are measured and hit
+    /// often while editing); elsewhere each call lays out afresh (`using` keeps them).
     static func cached(_ text: RichText, width: CGFloat) -> TextLayout {
         guard Thread.isMainThread else { return TextLayout(text, width: width) }
         return MainActor.assumeIsolated {

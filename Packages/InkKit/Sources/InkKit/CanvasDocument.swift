@@ -161,6 +161,11 @@ public final class CanvasDocument: Identifiable {
         TileCache.shared.removeAll(page: cacheID)
     }
 
+    /// What the page's objects under the ink, and its tape, last put in their tiles (NOT-109): kept with the
+    /// page so every canvas showing it, now or later, labels those tiles alike.
+    let objectTileHistory = ObjectTileHistory()
+    let tapeTileHistory = ObjectTileHistory()
+
     /// Goes up whenever the page's objects change (each edit, undo and redo that touches them). Separate
     /// from `revision`, which is the ink's: objects aren't in the committed ink layer, so changing one
     /// doesn't drop it.

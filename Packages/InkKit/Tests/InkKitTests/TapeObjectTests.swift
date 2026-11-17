@@ -207,8 +207,8 @@ struct CanvasTapeTests {
         #expect(tape.pattern == .grid)
         #expect(!tape.isRevealed)
         #expect(abs(tape.transform.b) < 1e-9) // a nearly level drag snaps level
-        #expect(canvas.tapeLayer.objects.count == 1)
-        #expect(canvas.objectLayer.objects.isEmpty) // tape is drawn over the ink, not under it
+        #expect(document.tapeTileHistory.objects.count == 1)
+        #expect(document.objectTileHistory.objects.isEmpty) // tape is drawn over the ink, not under it
 
         // A tap with the tape tool reveals it.
         canvas.beginToolGesture(at: CGPoint(x: 150, y: 100))

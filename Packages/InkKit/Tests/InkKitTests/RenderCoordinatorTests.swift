@@ -381,59 +381,6 @@ struct RenderCoordinatorTests {
     }
 }
 
-/// The template and object layers follow the ink's settle rule (NOT-105).
-@MainActor
-@Suite("Following vector view")
-struct FollowingVectorViewTests {
-    private final class Page: FollowingVectorView {
-        override var coveredPageRect: CGRect {
-            CGRect(x: 0, y: 0, width: 600, height: 800)
-        }
-    }
-
-    private func view() -> FollowingVectorView {
-        let view = Page()
-        view.fill(CGRect(x: 0, y: 0, width: 600, height: 800))
-        view.follow(ViewTransform(scale: 1, offset: .zero), moving: false)
-        return view
-    }
-
-    @Test func midGestureWhatWasDrawnIsScaledUntilItsTooBlurry() {
-        let view = view()
-        let drawn = view.drawnTransform
-        // Zooming in by 1.4× about the middle: still covers the page in view, so it's scaled.
-        let zoomed = ViewTransform(scale: 1.4, offset: CGPoint(x: -120, y: -160))
-        view.follow(zoomed, moving: true)
-        #expect(view.drawnTransform == drawn)
-        let shown = view.layer.affineTransform()
-        let centre = CGPoint(x: 300, y: 400)
-        // A page point lands where the transform puts it: (100, 100) at 1.4× is (20, -20).
-        let drawnPoint = drawn.toView(CGPoint(x: 100, y: 100))
-        let moved = CGPoint(x: centre.x + (drawnPoint.x - centre.x) * shown.a + shown.tx,
-                            y: centre.y + (drawnPoint.y - centre.y) * shown.d + shown.ty)
-        #expect(abs(moved.x - 20) < 1e-9 && abs(moved.y + 20) < 1e-9)
-        // Past 1.5×, drawn again.
-        view.follow(ViewTransform(scale: 1.6, offset: CGPoint(x: -180, y: -240)), moving: true)
-        #expect(view.drawnTransform.scale == 1.6)
-        #expect(view.layer.affineTransform().isIdentity)
-    }
-
-    @Test func zoomingOutPastWhatWasDrawnDrawsAgainAndSettlingDrawsSharp() {
-        let view = view()
-        view.follow(ViewTransform(scale: 2, offset: CGPoint(x: -300, y: -400)), moving: false)
-        view.follow(ViewTransform(scale: 2.2, offset: CGPoint(x: -360, y: -480)), moving: true)
-        #expect(view.drawnTransform.scale == 2) // scaled
-        // Out to where the page shows more than was drawn: drawn again at once.
-        view.follow(ViewTransform(scale: 1.2, offset: CGPoint(x: -60, y: -80)), moving: true)
-        #expect(view.drawnTransform.scale == 1.2)
-        view.follow(ViewTransform(scale: 1.3, offset: CGPoint(x: -90, y: -120)), moving: true)
-        #expect(view.drawnTransform.scale == 1.2)
-        view.follow(ViewTransform(scale: 1.3, offset: CGPoint(x: -90, y: -120)), moving: false)
-        #expect(view.drawnTransform.scale == 1.3)
-        #expect(view.layer.affineTransform().isIdentity)
-    }
-}
-
 @Suite("Canvas viewport")
 struct CanvasViewportTests {
     @Test func snappingPutsTheOffsetOnWholeDevicePixels() {

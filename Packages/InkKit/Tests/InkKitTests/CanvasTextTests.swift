@@ -113,7 +113,7 @@ struct CanvasTextTests {
         canvas.handleTextTap(at: CGPoint(x: 110, y: 105), endedEditing: false)
         let box = try #require(editor)
         #expect(box.original == original)
-        #expect(canvas.objectLayer.objects.isEmpty) // the text view shows it while it's edited
+        #expect(canvas.document.objectTileHistory.objects.isEmpty) // the text view shows it while it's edited
         box.textView.selectedRange = NSRange(location: 5, length: 0)
         type(" two")
         canvas.endEditingText()

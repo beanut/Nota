@@ -205,6 +205,7 @@ extension CanvasView {
         case let .transforming(drag)?:
             if commit {
                 editDocument { document.commitTransform(drag.session, by: drag.transform) }
+                refreshObjects() // the objects go back into their tiles, where they were put
                 // The box turns and stretches with what it holds.
                 selectionBox = drag.box.applying(drag.transform)
                 showSelectionMenu()

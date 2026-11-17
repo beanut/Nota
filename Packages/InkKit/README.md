@@ -39,8 +39,9 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `TemplateLayout.swift` | Each pattern's measurements, and `lineMetrics(on:)`: baselines, line spacing, writing area and regions for the handwriting layout engine |
 | `TemplateRenderer.swift` | Draws a template as Core Graphics vectors (canvas, thumbnails, PDF), skipping pattern outside the visible rect |
 | `TemplateArtwork.swift` | A custom background's bytes (a PDF page or an image), decoded once; PDF pages stay vector |
-| `TemplateView.swift` | The canvas layer that redraws the template at the current zoom, between the paper and the ink |
-| `FollowingVectorView.swift` | Base of the template and object layers: drawn sharp when the canvas settles, scaled in between (until it no longer covers the page in view or is magnified past 1.5×), like the committed ink (NOT-105) |
+| `VectorTileLayer.swift` | The canvas's template, object and tape layers (NOT-109): page-space vectors drawn into tiles through the same `TileCache` and `RenderScheduler` as the ink, at the same levels and settle rule; `VectorTileContent` (what's drawn, its version, and `VectorChangeLog`, which rect each version changed) |
+| `PageLayerContent.swift` | What those layers draw: `TemplatePaper` (a page's template and paper, one tile name per paper so pages on the same template share tiles), `ObjectTileHistory` (kept by the page: its objects' version and change rects) and `ObjectDiff` (an object's reach and what changed between two lists) |
+| `FloatingObjectsLayer.swift` | Objects lifted off their tiles while they move or are drawn (a selection dragged, a shape or tape being drawn): one image, moved with the drag, drawn again only when stretched too far |
 | `TemplateMenu.swift` | The page bar's template pill: built-ins, paper colour, PDF or image, use for all pages |
 | `ViewTransform.swift` | Canvas → view mapping, zoom limits and page-swipe detection |
 | `CanvasView.swift` | The canvas `UIView`: its layers, the gesture recognizers, `UIPencilInteraction`, hover, the HUD and the lasso overlay. Composes input, viewport and the render coordinator below; redraws from the document when another canvas on the same page changes it |
@@ -99,7 +100,6 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView+Shapes.swift` | The shape tool, draw-and-hold to snap (and sizing the snapped shape before lifting), dragging a selected shape's handles, restyling selected shapes |
 | `PageObjectsFile.swift` | `PageObjectsFile`, a page's objects as `pages/<page id>.json`: format version, reading, writing |
 | `Selection.swift` | `PageSelection`, `SelectionBox` and `SelectionGeometry`: lasso and tap selection of strokes and objects, the box's handles and the transforms they make; `Stroke.applying(_:)` |
-| `ObjectLayerView.swift` | The canvas layer that draws the page's objects between the template and the ink |
 | `CanvasView+Selection.swift` | The lasso on the canvas: selecting (with the ink / objects filter), dragging the box and its handles, deleting, adding the test object |
 | `CanvasView+SelectionActions.swift` | What the lasso does with a selection: cut, copy, paste, duplicate, recolour, thickness, bring to front / send to back, screenshot, drag out as an image; its menu (`UIEditMenuInteraction`) and ⌘X / ⌘C / ⌘V / ⌘D / Delete |
 | `SelectionClip.swift` | `SelectionClip`, a copied selection on the pasteboard (its format, fresh copies with new ids), and `PastePlacement`, where a paste lands |
@@ -294,10 +294,12 @@ let pdf = PageRenderer.pdf(of: notebook.pages.map { $0.snapshot() }) { theme.pal
 ```
 
 - **Vectors everywhere.** `TemplateRenderer` draws with Core Graphics paths and CoreText, so the same code
-  draws the canvas, thumbnails and PDF export. On the canvas a `TemplateView` between the page layer and the
-  ink redraws it at the current transform whenever the page pans or zooms (never while ink is written),
-  with a one-pixel minimum line width, so it's crisp at every zoom. Repeating patterns only build what's on
-  screen, so a zoomed-in corner of a 200-inch page stays cheap. PDF backgrounds are drawn as PDF.
+  draws the canvas, thumbnails and PDF export. On the canvas the template is drawn into page-space tiles at
+  the ink's levels (`templateTiles`, a `VectorTileLayer`, NOT-109), off the main thread, with a one-pixel
+  minimum line width, so it's crisp at every zoom and a pan at one zoom draws none of it. Pages on the same
+  template, paper, size and background share its tiles. Repeating patterns only build what a tile shows, so a
+  zoomed-in corner of a 200-inch page stays cheap. PDF backgrounds are drawn as PDF; as a PDF page is read whole
+  however little of it is drawn, the tiles in view of one are drawn by one job rather than one per block.
 - **Ink stays separate.** The committed ink bitmap is transparent over the paper, so changing a template
   doesn't re-render ink, doesn't touch `revision` and isn't an undoable edit. The live layer's backdrop for
   multiply (highlighter) previews draws the template too.
@@ -365,13 +367,25 @@ let file = page.objectsFile                         // → pages/<page id>.json;
 let reopened = CanvasDocument(file: ink, objects: try PageObjectsFile(data: json), pageSize: size)
 ```
 
-- **Layers**, bottom to top: background (paper and template), objects in `zIndex` order (`ObjectLayerView`,
-  vectors at the current transform; hidden on a page without objects), ink (committed tiles and live layer),
-  tape (`tapeLayer`, another `ObjectLayerView`: objects whose kind `drawsOverInk`), the laser (`LaserView`),
-  overlay (lasso and selection box), the ruler. Thumbnails, screenshots and PDFs draw tape after the ink too
-  (`PageRenderer.drawOverlays`). Objects are never in the committed ink tiles, so adding or moving one
-  doesn't re-render ink, and the pixel eraser never erases one. The live layer's multiply backdrop draws the
-  objects too, so a highlighter previews over an object as it will commit.
+- **Layers**, bottom to top: background (paper and template), objects in `zIndex` order (`objectTiles`, a
+  `VectorTileLayer`; nothing on a page without objects), ink (committed tiles and live layer), tape
+  (`tapeTiles`: objects whose kind `drawsOverInk`), the laser (`LaserView`), overlay (lasso and selection box),
+  the ruler. Thumbnails, screenshots and PDFs draw tape after the ink too (`PageRenderer.drawOverlays`), and
+  keep drawing vectors through `PageRenderer`. Objects are never in the committed ink tiles, so adding or
+  moving one doesn't re-render ink, and the pixel eraser never erases one. The live layer's multiply backdrop
+  draws the template and object tiles on screen (vectors where none are), so a highlighter previews over an
+  object as it will commit.
+- **Object tiles (NOT-109).** Objects are drawn into page-space tiles like the ink, through the same cache,
+  scheduler and levels, so a pan at one zoom draws no object. The page keeps what its object and tape tiles
+  last showed (`ObjectTileHistory`): each change of the objects (an edit, undo or redo, a picture finishing
+  decoding) is a new version with the rect it touched (`ObjectDiff`: the objects added, removed, changed or
+  restacked, by their *reach*, which for a shape includes its stroke and arrowhead), and a tile no change since
+  reached is still current; the rest are drawn again, a block of up to 4 × 4 tiles per job. Objects being moved
+  or drawn (a selection dragged, turned or resized; the shape or tape being drawn) are lifted off their tiles
+  onto a floating layer (`FloatingObjectsLayer`): drawn once into an image that moves with the drag, again only
+  when it's stretched past 1.5× or a text box is resized (it rewraps). Put down, they stay floating until their
+  tiles have them, so they never blink out. Lifted objects float over the other objects of their layer while
+  they move, whatever their `zIndex`.
 - **Revisions.** `objectsRevision` counts object changes, separately from `revision` (the ink's), so an
   object edit doesn't drop the page's tiles or `TileRaster`. Object-only edits notify `.objectsEdited`.
 - **One undo stack.** `addObject`, deleting a selection (`erase` with strokes and objects), `clear`,
@@ -682,8 +696,10 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
 
      The cache evicts tiles of levels nobody shows (one zoomed through) before the shown levels' off-screen
      tiles (the margin a pan uses next), and those before the resting level's (`TileCache.setInterest`'s
-     `shown`), all within its 192 MB. The template and objects follow the same settle rule
-     (`FollowingVectorView`), so paper, objects and ink sharpen together.
+     `shown`), all within its 192 MB. The template and objects are tiles too (`VectorTileLayer`, NOT-109) and
+     follow the same rule, more simply: mid-gesture the last level, scaled, over the resting level's tiles
+     (the whole page at the fitted level is kept for them); once the view settles, the new level's tiles in
+     view are drawn and swapped in together.
    - **Versions and dirty rects (NOT-104).** Each tile records the version of the page's ink it shows
      (`CanvasDocument.inkVersion`, which moves on with every change to the strokes: each command, undo and
      redo, and each step of an erase or a lasso drag, which `revision` only counts once recorded). The page
@@ -891,7 +907,7 @@ differ in 0.002%. So:
 | `StrokeGeometry` pieces | not done | Each run's strips and stamps with their bounds, so a filler draws only the pieces reaching its tile. Left out of NOT-102: a copy of every stroke's pieces would roughly double the geometry cache (NOT-108 bounds it), and the spike's gain was at 6× only (7.9 → 5.6 ms a tile) |
 | `RenderScheduler`, `RenderJob` | NOT-103 (landed) | Jobs carry a priority (`.underPencil`, `.visible`, `.margin`, `.otherLevel`, `.background`), a rank and a cancellation token; the coordinator tracks each tile's fill and its revision. Dropped before they start when stale or off screen, checked between strokes while running; results published in one batch per frame. See Render scheduler above |
 | `CanvasDocument` change rects | NOT-104 (landed) | `inkVersion` moves on with every change to the strokes, mid-gesture too, and `inkChanges` (`InkChangeLog`) keeps the rect each touched; the coordinator relabels tiles no change reached and refills the rest by region (`FillPlan`, `TileFiller.fill(_:region:…)`). The rects travel in the document rather than with `invalidate(rect:)`, so every canvas and level showing the page uses them, whichever view made the change |
-| Progressive levels | NOT-105 (landed) | `RenderCoordinator.displayedLevel` / `underLevel` over the resting level, each masked where the level above has tiles; the resting level's missing tiles and a held pinch's level filled mid-gesture (`steadyDelay`); `TileCache` evicts levels nobody shows first. `FollowingVectorView` gives the template and objects the same settle rule |
+| Progressive levels | NOT-105 (landed) | `RenderCoordinator.displayedLevel` / `underLevel` over the resting level, each masked where the level above has tiles; the resting level's missing tiles and a held pinch's level filled mid-gesture (`steadyDelay`); `TileCache` evicts levels nobody shows first. The template and objects follow it as tiles too (`VectorTileLayer`, NOT-109) |
 
 **Order of the follow-ups**: NOT-100 (split `CanvasView`, no behaviour change) → NOT-101 (index: tiles query it
 per tile, and a linear scan per tile over 5k strokes would cost more than small fills) → NOT-102 (tiles, levels,
@@ -1011,7 +1027,7 @@ More › Scroll Direction › Vertical (`PageLayoutMode.continuous`, the default
 - **Pooled canvases (NOT-107).** Views follow what's on screen (at most 6 canvases), not the note's length, and scrolling makes none: a page leaving view leaves its tiles, finishes what belonged to it (a text box, a crop, the selection), stops its coordinator (`CanvasView.leavePage()`) and its canvas waits, hidden, for the next page to enter view, which it's handed with its layers, gestures and interactions (`show(_:)`). The page gets a new `RenderCoordinator` over the old one's tile layers. A canvas taking ink is never handed on.
 - **Prefetch ahead of the scroll.** How far ahead pages get a canvas grows with the scroll's speed (`ContinuousPageLayout.prefetchRect`: half a screen either way, plus 0.4 s of the scroll ahead, at most two screens), so a fling's next pages have their canvas, and their tiles on their way, before they're on screen. A page not on screen yet fills behind every page that is (`CanvasView.isAhead`: its fills are `margin` priority). A page scrolled into view zoomed in gets its resting level in view first where that isn't cached (restored, or filled at a quarter of the tiles or fewer), shown blurred under the zoomed level until that lands, rather than paper.
 - **Pages that scroll past keep no geometry.** Every page keeps its strokes' geometry in the page's `PageGeometry`, in the app's one budgeted `GeometryCache` (see Stroke geometry › Keeping geometry), and none is built after restoring tiles. A page's first fills in continuous scrolling use what's kept (another canvas on the page may have built it) but add nothing; edits keep what they build. That's what brought `memory.continuous_20_pages_mb` from ~800 MB to under 300 (NOT-107, then with a `keepsGeometry` flag per coordinator; NOT-108 made it the shared cache's keep rule).
-- **Scrolling doesn't draw ink again.** Each canvas sits in the scroll content over its *render window* (`ContinuousPageLayout.renderWindow`): the viewport plus half a screen above and below and a quarter to each side, cut to the page. At zoom 1 that's the whole page. The scroll view moves the canvas, ink and all, with the paper. The window is kept even though the ink is page-space tiles (which never need it): it bounds the canvas's view-sized layers (template, objects, live ink, lasso), which are drawn as vectors for what the canvas covers, so they're drawn again only when the window re-centres, not every frame of a scroll. A page fills tiles only when it gets its canvas and they aren't cached, when the zoom changes (at the new level, once the pinch ends), and, when zoomed in, for the tiles a re-centred window uncovers. During a pinch the window keeps its size and the last level is scaled. The host places each page with `place(_:settled:)`, and an embedded canvas that's resized keeps that placement (a canvas resized mid-pinch past the smallest zoom used to draw its page fitted to its new size, over the page beside it).
+- **Scrolling doesn't draw ink again.** Each canvas sits in the scroll content over its *render window* (`ContinuousPageLayout.renderWindow`): the viewport plus half a screen above and below and a quarter to each side, cut to the page. At zoom 1 that's the whole page. The scroll view moves the canvas, ink and all, with the paper. The window is kept even though the ink, template and objects are page-space tiles (which never need it, NOT-109): it still bounds the canvas's view-sized layers (live ink, lasso), so they're drawn again only when the window re-centres, not every frame of a scroll. Letting the windows go waits on the live layer moving to page space (NOT-110). A page fills tiles only when it gets its canvas and they aren't cached, when the zoom changes (at the new level, once the pinch ends), and, when zoomed in, for the tiles a re-centred window uncovers. During a pinch the window keeps its size and the last level is scaled. The host places each page with `place(_:settled:)`, and an embedded canvas that's resized keeps that placement (a canvas resized mid-pinch past the smallest zoom used to draw its page fitted to its new size, over the page beside it).
 - **Paged and continuous share the page bar and sidebar:** choosing a page scrolls to it, and reordering keeps the page being read where it was on screen. Writing in the bottom 15% of the last page adds a page like it.
 - **Writing across pages** (`PageSeam`). Ink and the eraser (every mode) carry on from one page onto the next without lifting the Pencil. The touch keeps arriving at the page the stroke began on, which hands each event to `ContinuousCanvasView`; every page with a canvas takes part while the Pencil is within its *reach* above or below it, and runs a piece of the stroke of its own, in its own coordinates, through the same `LiveStroke` path as any stroke (`joinStroke`, `continueStroke`, `leaveStroke`). The reach is the brush's longest taper plus twice its nib radius plus 12 points (at most 160), so neighbouring pages' pieces overlap across the gap: the piece above runs on past its bottom edge and the piece below starts above its top. Each page clips its ink to the page, so what shows is the same ink from the same samples up to the edge, and the pieces' ends, tapers and the stabiliser settling in all fall off the page. Each piece is committed as an ordinary stroke of its page, so saving needs nothing new. A piece whose ink never reached its page is dropped; a joined piece is never a tap or a shape (the shape tool, the lasso and the gesture tools stay on their page, and holding still doesn't snap a stroke on two pages). The pages' pieces share one `CanvasDocument.editGroup`, and undo or redo on any of them takes back the others' (`InkNotebook.undoGroup(_:)`), unless a page was edited since. Refined force and tilt are forwarded to the pages that joined. While a stroke is under way, the pages taking part keep their canvases and stay put, the scroll view doesn't pan or zoom, and writing past the end of the last page adds the next page at once, so the stroke carries on onto it. The cost per event is a location check for each page with a canvas (at most six).
 - **Not yet:** the lasso works on one page at a time, so a selection can't span two pages or be dragged onto another; and the zoom window is offered only in paged mode.
@@ -1144,6 +1160,15 @@ misses, so they only gate a run once a change meets them. It's the per-metric be
 M1 Pro that wasn't idle, so a single run on a busy Mac can read worse than it with no code change; rerun before
 believing a regression, and compare against your base branch on the same machine as well. `*_max_ms` regressions are reported but don't fail a
 run (one scheduler hiccup moves them); their budgets still count.
+
+`ObjectLayerBenchmarks` (NOT-109) times what the template and objects cost on a page of them: a PDF template
+(3,000 vector paths and some text) ruled over, 20 text boxes and 10 pictures, no ink. The canvas is in a window,
+so layers drawn on display are drawn and counted.
+
+| Metric | What it times | Budget |
+| --- | --- | --- |
+| `objects.pan_ms` | Main-thread work per frame (p95) of three half-second pans (10 pt a frame) at 2× over the page; `pan.frame_max_ms` the worst frame, `pan.tiles_filled` the template and object tiles drawn meanwhile (the ground the first pass uncovered) | < 8 ms |
+| `objects.zoom_settle_ms` | From the fingers lifting after a pinch from the fitted page to 3× (at a level not drawn before) to the template and objects sharp; `zoom.frame_p95_ms` the pinch's frames, `zoom_settle.fill_cpu_ms` (and `template_fill_cpu_ms`) the tile drawing it waited for, added up | < 150 ms |
 
 `RenderSpike` (NOT-99) sits beside them but isn't run by `scripts/run-benchmarks.sh` and has no baseline: it's
 the throwaway prototypes of the render architectures behind Architecture › Rendering pipeline › Decision.

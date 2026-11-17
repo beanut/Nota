@@ -595,8 +595,8 @@ final class RenderCoordinator {
                           displayScale: scale)
         }
         underHost.isHidden = underKeys.isEmpty && rested.isEmpty
-        coveredRects = Self.merged(covered)
-        underCoveredRects = Self.merged(underKeys)
+        coveredRects = TileLayerGrid.merged(covered)
+        underCoveredRects = TileLayerGrid.merged(underKeys)
         placeUnder(at: t)
     }
 
@@ -624,44 +624,6 @@ final class RenderCoordinator {
             path.addRect(t.toView(rect).insetBy(dx: 1 / scale, dy: 1 / scale))
         }
         return path
-    }
-
-    /// `keys` (one level) as few page rects as possible: runs of columns in a row, then equal runs in
-    /// consecutive rows, so the mask has no edges between tiles.
-    private static func merged(_ keys: [TileKey]) -> [CGRect] {
-        struct Block {
-            var rows: ClosedRange<Int>
-            let cols: ClosedRange<Int>
-        }
-        var spans: [Block] = []
-        for (row, inRow) in Dictionary(grouping: keys, by: \.row).sorted(by: { $0.key < $1.key }) {
-            let cols = inRow.map(\.col).sorted()
-            var start = cols[0], end = cols[0]
-            for c in cols.dropFirst() {
-                if c == end + 1 {
-                    end = c
-                } else {
-                    spans.append(Block(rows: row ... row, cols: start ... end))
-                    start = c
-                    end = c
-                }
-            }
-            spans.append(Block(rows: row ... row, cols: start ... end))
-        }
-        var blocks: [Block] = []
-        for span in spans {
-            if let i = blocks.firstIndex(where: { $0.rows.upperBound == span.rows.lowerBound - 1 && $0.cols == span.cols }) {
-                blocks[i].rows = blocks[i].rows.lowerBound ... span.rows.upperBound
-            } else {
-                blocks.append(span)
-            }
-        }
-        guard let level = keys.first?.level else { return [] }
-        let s = CGFloat(TileKey.side) / level.pixelsPerPoint
-        return blocks.map {
-            CGRect(x: CGFloat($0.cols.lowerBound) * s, y: CGFloat($0.rows.lowerBound) * s,
-                   width: CGFloat($0.cols.count) * s, height: CGFloat($0.rows.count) * s)
-        }
     }
 
     /// The committed tiles on screen, in page space: what the live layer draws under multiply ink.
