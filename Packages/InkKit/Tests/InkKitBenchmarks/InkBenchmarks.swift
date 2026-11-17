@@ -432,6 +432,50 @@ final class InkBenchmarks: XCTestCase {
         BenchResults.record("full_redraw.5k_ms", Stats(times).median, unit: "ms")
     }
 
+    // MARK: Stroke index
+
+    /// Building a 20k-stroke page's `StrokeIndex` from scratch, as opening it does (off the main actor).
+    func testStrokeIndexBuild20k() {
+        let page = corpus.page(strokes: 20000)
+        var index: StrokeIndex?
+        let times = timed(iterations: 5) {
+            index = StrokeIndex(strokes: page)
+        }
+        XCTAssertEqual(index?.strokeCount, 20000)
+        BenchResults.record("index.build_20k_ms", Stats(times).median, unit: "ms")
+    }
+
+    /// A tile-sized query (128 pt, a 256-pixel tile at 2×) costs the same on a 5k-stroke page and on a
+    /// 20k-stroke one holding the same 5k strokes plus 15k elsewhere: it depends on what's near, not on the
+    /// page's size. A scan of every stroke's rect, what culling did before the index, is there to compare.
+    func testStrokeIndexTileQuery() {
+        let near = corpus.page(strokes: 5000)
+        let far = corpus.page(strokes: 15000).map { $0.applying(CGAffineTransform(translationX: 0, y: 5000)) }
+        let size = corpus.pageSize
+        let tiles = stride(from: 0, to: size.height, by: 128).flatMap { y in
+            stride(from: 0, to: size.width, by: 128).map { x in CGRect(x: x, y: y, width: 128, height: 128) }
+        }
+        func perQuery(_ body: (CGRect) -> Int) -> Double {
+            var found = 0
+            let times = timed {
+                for _ in 0 ..< 10 {
+                    for tile in tiles {
+                        found &+= body(tile)
+                    }
+                }
+            }
+            XCTAssertGreaterThan(found, 0)
+            return Stats(times).median * 1000 / Double(10 * tiles.count)
+        }
+        let index5k = StrokeIndex(strokes: near), index20k = StrokeIndex(strokes: near + far)
+        let reaches20k = (near + far).map(StrokeIndex.reach(of:))
+        BenchResults.record("index.query_tile_5k_us", perQuery { index5k.strokes(in: $0).count }, unit: "us")
+        BenchResults.record("index.query_tile_20k_us", perQuery { index20k.strokes(in: $0).count }, unit: "us")
+        BenchResults.record("index.scan_tile_20k_us", perQuery { tile in
+            reaches20k.reduce(0) { $0 + ($1.intersects(tile) ? 1 : 0) }
+        }, unit: "us")
+    }
+
     // MARK: Memory
 
     /// Memory with a 5k-stroke page open at 6× zoom (the maximum) while writing: the cached geometry of

@@ -661,6 +661,7 @@ extension DocumentStore {
             do {
                 var file = try InkPageFile(data: data)
                 file.pageID = page.id
+                file.prepareIndex() // here, off the main actor, rather than when the page is built
                 ink[page.id] = file
             } catch {
                 Logger.documents

@@ -318,6 +318,19 @@ final class CanvasView: UIView {
         updateLassoOverlay()
     }
 
+    /// `dropOrphanedPendingStrokes()` when the strokes that left the page are known (live erasing), so the
+    /// rest of the page isn't looked at.
+    func dropOrphanedPendingStrokes(removed: Set<UUID>) {
+        coordinator.dropPending(removed)
+        if !selection.strokeIDs.isDisjoint(with: removed) {
+            selection.strokeIDs.subtract(removed)
+            updateSelectionBox()
+        }
+        zoomHeld.removeAll { removed.contains($0.stroke.id) }
+        invalidateAllLive()
+        updateLassoOverlay()
+    }
+
     /// Drops strokes and objects that are no longer on the page from the selection.
     func pruneSelection(strokeIDs: Set<UUID>? = nil) {
         guard !selection.isEmpty else { return }

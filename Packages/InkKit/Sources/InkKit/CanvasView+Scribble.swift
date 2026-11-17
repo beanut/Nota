@@ -3,10 +3,10 @@ import UIKit
 // MARK: - Scribble gestures
 
 extension CanvasView {
-    /// Every finished ink stroke on the page as a gesture target. Pixel-eraser strokes are invisible,
-    /// so gestures never act on them.
-    private func scribbleCandidates(excluding excluded: UUID?) -> [Scribble.Candidate] {
-        document.strokes.compactMap { stroke in
+    /// Every finished ink stroke that may reach `region` as a gesture target. Pixel-eraser strokes are
+    /// invisible, so gestures never act on them.
+    private func scribbleCandidates(near region: CGRect, excluding excluded: UUID?) -> [Scribble.Candidate] {
+        document.strokes(in: region).compactMap { stroke in
             guard !stroke.brush.erases, stroke.id != excluded else { return nil }
             let points = stroke.points.map(\.location)
             return Scribble.Candidate(id: stroke.id, points: points, bounds: LassoGeometry.bounds(of: points))
@@ -48,7 +48,8 @@ extension CanvasView {
         let loop = live.stroke.points.map(\.location)
         let ids: Set<UUID> = controller.pencilSettings.circleToSelect && controller.tool != .shape
             && Scribble.isClosedLoop(loop, minSize: 24 / inputTransform.scale)
-            ? Scribble.loopSelection(loop, candidates: scribbleCandidates(excluding: live.stroke.id)) : []
+            ? Scribble.loopSelection(loop, candidates: scribbleCandidates(near: LassoGeometry.bounds(of: loop),
+                                                                          excluding: live.stroke.id)) : []
         guard !ids.isEmpty else {
             if snapsShapesOnHold(controller) {
                 snapToShape(live, holdingAt: inputTransform.toCanvas(last.location))

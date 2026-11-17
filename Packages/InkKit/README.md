@@ -30,7 +30,8 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `CanvasView+Embedded.swift` | A canvas as one page among several: placed by the host, transparent around its page, taking touches only on it |
 | `PageSidebar.swift` | The page sidebar: thumbnails (rendered in the background, cached), jump, reorder, select, duplicate, rotate, delete, copy or move to another note (`PageDestination`, `PageSender`) |
 | `LassoOverlayView.swift` | Draws the lasso path and the selection outline over the canvas |
-| `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects, each command optionally in a gesture's group (`editGroup`, for strokes across pages) (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave |
+| `CanvasDocument.swift` | One page's strokes, objects, size, template and one undo/redo command stack for ink and objects, each command optionally in a gesture's group (`editGroup`, for strokes across pages) (`add`, which carries any pixel-eraser splits, `erase` (strokes and objects), `replace` for a standard erase, `clear`, `transform` (move, scale, rotate strokes and objects), `addObject`), and the views observing it: a page can be on screen in several canvases at once (a note open in two windows), and each hears every change, whichever made it. Outside InkKit, `observeChanges(_:onChange:)` reports each committed change (never mid-stroke), for autosave. Keeps the page's `StrokeIndex` in step with every change to its strokes and objects |
+| `StrokeIndex.swift` | Where a page's strokes and objects are: a uniform grid of 32 pt cells (`SpatialGrid`) answering "what may reach this rect?" in page (z) order, without walking the page. Used by culling, the erasers, lasso and tap selection and circle-to-select; tiles query it per tile |
 | `TestingSupport.swift` | `@_spi(Testing)` hooks for other packages' tests to put ink on a page (`drawTestStroke(through:)`, `undoForTesting()`) |
 | `PageSize.swift` | Paper sizes in points: presets, custom sizes in in / mm / pt |
 | `PageTemplate.swift` | `PageTemplate` (pattern, spacing, margins, paper colour, custom background), the built-in presets, `PaperColor` / `PaperPalette` |
@@ -745,7 +746,7 @@ differ in 0.002%. So:
 | Type | Issue | Role |
 | --- | --- | --- |
 | `RenderCoordinator` | NOT-100 (landed) | The committed side pulled out of `CanvasView`: geometry cache, pending strokes, revision tracking, render requests. `CanvasView`, embedded canvases and the zoom panel talk to it; it owns no touches. Wraps today's bitmap behind `invalidate(rect:)` / `invalidateAll()`, `strokeCommitted(_:geometry:revisionBefore:)`, `visibleRect(for:)`, `isSettled` (what `rendersSettled` reads) and `publishedImage` (what `CanvasBenchmarks.mismatch(of:)` reads), so NOT-102 swaps the inside. The viewport already keeps the offset on device pixels (each pan or pinch step, and the fitted transform), so a settled transform is pixel-aligned |
-| `StrokeIndex` | NOT-101 | Per page, owned by `CanvasDocument`, updated by every command. `strokes(in: CGRect) -> [Int]` in page (z) order, `objects(in:)`, `nearest(to:limit:)`. A uniform grid (32 pt cells in the spike) is enough |
+| `StrokeIndex` | NOT-101 (landed) | Per page, owned by `CanvasDocument`, kept in step by every change (see Spatial index below). `strokes(in: CGRect) -> [Int]` (positions in page (z) order), `objects(in:)`; `CanvasDocument.strokeIndices(in:)` / `strokes(in:)` / `objects(in:)` wrap it. A uniform grid of 32 pt cells. No `nearest(to:limit:)`: tap selection wants the topmost stroke under the finger, which a rect query around the tap gives in z-order |
 | `TileLevel`, `TileKey` | NOT-102 | `TileLevel(pixelsPerPoint:)`; `TileKey(page: UUID, level: TileLevel, col: Int, row: Int)`, `TileKey.side = 256`, `rect` in page points, `keys(covering: CGRect, level:)` |
 | `TileCache` | NOT-102 | One per notebook, shared by every canvas showing a page. Thread-safe. `tile(for: TileKey) -> Tile?` (`image`, `revision`, `isStale`), `store(_:for:)`, `invalidate(page:rect:)` (marks stale at every level), LRU eviction under a byte budget, off-screen tiles first |
 | `TileFiller` | NOT-102 | `fill(_ key: TileKey, region: CGRect?, strokes: [Int], geometry:, into: CGContext)`: draws the given strokes (from `StrokeIndex`) into a tile, or only `region` of it (cleared first). `CoreGraphicsTileFiller` is the only one in M1.5; a `MetalTileFiller` would slot in later |
@@ -796,6 +797,35 @@ re-recorded, or a tolerance everywhere the two meet.
   regions over 8192²), and the fallback is what PDF export and old builds see.
 - **Simulator GPU numbers are the Mac's GPU.** None of this, wax or spike, has run on an iPad; on-device
   Instruments is the check before Metal goes further.
+
+### Spatial index
+
+Every question "what reaches this rect?" goes to the page's `StrokeIndex` rather than walking its strokes: the
+committed layer's culling (full renders and the zoom panel draw only what the index finds on screen), the stroke
+and standard erasers (the sweep), the pixel eraser's splits (the strokes under it and the erasers above each),
+lasso and tap selection, and circle-to-select. Tiles (NOT-102) query it per tile.
+
+- **What it holds.** A uniform grid of 32 pt cells (`SpatialGrid`) for the strokes and another for the objects.
+  Each item is filed under a conservative rectangle. For a stroke that is its **reach**
+  (`StrokeIndex.reach(of:)`): its points' bounds grown by the widest its nib can get (full pressure, a wet brush
+  pooling, full tilt with its contact shift, stamp jitter) plus half its longest step for the spline's bulge.
+  It reads only points and brush, never geometry, so it's cheap on open and on every edit. A test checks it
+  holds the ink of every bundled brush. For an object it's `bounds`. Queries return candidates; callers still
+  check exact geometry bounds.
+- **Z-order.** Results are positions in the page's arrays, bottom first. Each item has a slot with an order key
+  that increases with its position (fractional, renumbered in the rare case a gap runs out), so inserting or
+  removing a stroke moves no cell contents, only two position-ordered arrays the size of the page's own.
+  Queries sort what the cells give by order key and binary-search each back to its position.
+- **Kept in step.** Every change to `CanvasDocument`'s strokes and objects goes through helpers that update the
+  index too: commands and their undo and redo, live erasing (`remove`, `replace`), transform previews and late
+  estimate updates. Whole-array changes (an undo of an erase, restyle, arrange, paste) refile only what lies
+  between the unchanged start and end of the page. Tests check it against walking the page after random
+  sequences of every edit, undo and redo.
+- **Built off the main actor.** `DocumentStore` calls `InkPageFile.prepareIndex()` where it decodes a page, and
+  `CanvasDocument(file:)` takes the index from the file (a page built without one builds its own). A 20k-stroke
+  page builds in a few milliseconds (`index.build_20k_ms`). Items covering more than 1024 cells (a huge stroke
+  or a page-sized object) are kept aside and checked on every query; a query covering more cells than the page
+  has items walks the items instead.
 
 ### Stroke geometry
 
@@ -915,6 +945,8 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `live_event.crayon.wax_latency_p50/p95_ms` | From committing a tile's crayon job to its pixels being back on the main queue | – |
 | `live_event.crayon.long_stroke.*` | `live_event.long_stroke.*` with the crayon: its baked field must keep the work flat as the stroke grows | last-quarter p95 < 2 ms |
 | `full_redraw.crayon_500_ms` | Re-rendering a page of 500 crayon strokes into the committed bitmap, one GPU pass per stroke and band | – |
+| `index.build_20k_ms` | Building a 20k-stroke page's `StrokeIndex` from scratch (on open, off the main actor) | – |
+| `index.query_tile_{5k,20k}_us`, `index.scan_tile_20k_us` | One tile-sized (128 pt) query, over every tile of the page: on the 5k page, and on a 20k page holding the same 5k strokes plus 15k elsewhere (it must not grow), against a scan of every stroke's rect | – |
 | `memory.6x.*` | Physical footprint with a 5k page open at 6× zoom while the corpus is written on top: cached geometry, committed bitmap, live tiles. Measured from a settled baseline (free memory returned first), so earlier benchmarks don't change it | – |
 
 ### Canvas benchmarks
@@ -1008,5 +1040,10 @@ render. The external-display scene itself is only exercised by hand. `LinkObject
 web-address tidying, adding and retargeting with undo, following with a tap (and tape over a link), and the
 selection menu; `NoteOutlineTests` covers bookmarks, outline entries, pruning and remapping, lenient reading, PDF
 outline import and `LinkHistory`.
+
+`StrokeIndexTests` checks the spatial index: grid queries against a scan (z-order, huge, empty and off-page
+rects, renumbering), that a stroke's reach holds its ink for every bundled brush, and the page's index against
+walking the page after random sequences of every edit, live erase, preview, undo and redo (and rotate, copy and
+opening a prepared file).
 
 A physical-iPad verification checklist (pressure, tilt, sample rate, eraser, lasso) lives in the InkCanvas README.

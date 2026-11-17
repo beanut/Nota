@@ -73,6 +73,9 @@ public final class CanvasDocument: Identifiable {
         strokes = file.strokes
         preservedRecords = file.unknownRecords
         self.objects = objects?.objects ?? []
+        var index = file.preparedIndex ?? StrokeIndex(strokes: strokes)
+        index.replaceObjects(0 ..< 0, with: self.objects)
+        strokeIndex = index
     }
 
     /// The page's objects as they are now, ready to encode and write to disk (empty: no file needed).
@@ -189,6 +192,8 @@ public final class CanvasDocument: Identifiable {
     }
 
     private(set) var strokes: [Stroke] = []
+    /// Where the strokes and objects are, kept in step with them by every change below.
+    private(set) var strokeIndex = StrokeIndex()
     private var undoStack: [Command] = []
     private var redoStack: [Command] = []
     /// The gesture each command on the stacks belongs to (`editGroup` when it was made), in step with them.
@@ -299,7 +304,7 @@ public final class CanvasDocument: Identifiable {
     /// its pieces in the same undoable command, so undo restores the original in one step.
     func add(_ stroke: Stroke, splits: [Split] = []) {
         apply(splits)
-        strokes.append(stroke)
+        insertStroke(stroke, at: strokes.count)
         push(.add(stroke, splits: splits))
     }
 
@@ -308,9 +313,15 @@ public final class CanvasDocument: Identifiable {
     func remove(ids: Set<UUID>) -> [Removal] {
         var removed: [Removal] = []
         for i in strokes.indices.reversed() where ids.contains(strokes[i].id) {
-            removed.append(Removal(index: i, stroke: strokes.remove(at: i)))
+            removed.append(Removal(index: i, stroke: removeStroke(at: i)))
         }
         return removed
+    }
+
+    /// Removes the strokes at these positions immediately, like `remove(ids:)`, without looking at the
+    /// others: for a caller that found them with `strokeIndices(in:)`.
+    func remove(at positions: some Collection<Int>) -> [Removal] {
+        Set(positions).sorted(by: >).map { Removal(index: $0, stroke: removeStroke(at: $0)) }
     }
 
     func recordErase(_ removals: [Removal], objects objectRemovals: [ObjectRemoval] = []) {
@@ -322,7 +333,7 @@ public final class CanvasDocument: Identifiable {
     func removeObjects(ids: Set<UUID>) -> [ObjectRemoval] {
         var removed: [ObjectRemoval] = []
         for i in objects.indices.reversed() where ids.contains(objects[i].id) {
-            removed.append(ObjectRemoval(index: i, object: objects.remove(at: i)))
+            removed.append(ObjectRemoval(index: i, object: removeObject(at: i)))
         }
         return removed
     }
@@ -337,7 +348,7 @@ public final class CanvasDocument: Identifiable {
     public func addObject(_ object: any PageObject) {
         var object = object
         object.zIndex = (objects.last?.zIndex ?? -1) + 1
-        objects.append(object)
+        insertObject(object, at: objects.count)
         push(.addObject(object))
     }
 
@@ -366,7 +377,13 @@ public final class CanvasDocument: Identifiable {
     /// the strokes as they were when it began.
     func replace(id: UUID, with pieces: [Stroke]) {
         guard let i = strokes.firstIndex(where: { $0.id == id }) else { return }
-        strokes.replaceSubrange(i ... i, with: pieces)
+        replaceStrokes(i ..< i + 1, with: pieces)
+    }
+
+    /// `replace(id:with:)` for the stroke at `position`, for a caller that found it with `strokeIndices(in:)`.
+    /// Positions after it shift by `pieces.count - 1`.
+    func replace(at position: Int, with pieces: [Stroke]) {
+        replaceStrokes(position ..< position + 1, with: pieces)
     }
 
     /// Records the standard-erase gesture that changed `before` into the current strokes, as one command.
@@ -434,7 +451,7 @@ public final class CanvasDocument: Identifiable {
             let byID = Dictionary(newStrokes.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
             for i in strokes.indices {
                 if let replacement = byID[strokes[i].id] {
-                    strokes[i] = replacement
+                    setStroke(replacement, at: i)
                 }
             }
         }
@@ -442,7 +459,7 @@ public final class CanvasDocument: Identifiable {
             let byID = Dictionary(newObjects.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
             for i in objects.indices {
                 if let replacement = byID[objects[i].id] {
-                    objects[i] = replacement
+                    setObject(replacement, at: i)
                 }
             }
         }
@@ -542,10 +559,10 @@ public final class CanvasDocument: Identifiable {
 
     private func apply(_ edit: Edit, undoing: Bool) {
         if let s = undoing ? edit.strokesBefore : edit.strokesAfter {
-            strokes = s
+            setStrokes(s)
         }
         if let o = undoing ? edit.objectsBefore : edit.objectsAfter {
-            objects = o
+            setObjects(o)
         }
     }
 
@@ -553,8 +570,8 @@ public final class CanvasDocument: Identifiable {
     func clear() {
         guard !strokes.isEmpty || !objects.isEmpty else { return }
         let saved = strokes, savedObjects = objects
-        strokes.removeAll()
-        objects.removeAll()
+        setStrokes([])
+        setObjects([])
         push(.clear(saved, objects: savedObjects))
     }
 
@@ -562,7 +579,11 @@ public final class CanvasDocument: Identifiable {
     func updatePoint(strokeID: UUID, index: Int, _ body: (inout StrokePoint) -> Void) -> Bool {
         guard let s = strokes.lastIndex(where: { $0.id == strokeID }),
               strokes[s].points.indices.contains(index) else { return false }
+        let location = strokes[s].points[index].location
         body(&strokes[s].points[index])
+        if strokes[s].points[index].location != location {
+            strokeIndex.updateStroke(at: s, to: strokes[s])
+        }
         revision += 1
         lastReshapedIDs = [strokeID]
         notify(.refined)
@@ -577,30 +598,30 @@ public final class CanvasDocument: Identifiable {
         switch command {
         case let .add(stroke, splits):
             if let i = strokes.lastIndex(where: { $0.id == stroke.id }) {
-                redoStack.append(.add(strokes.remove(at: i), splits: splits))
+                redoStack.append(.add(removeStroke(at: i), splits: splits))
                 revert(splits)
             }
         case let .erase(removals, objectRemovals):
             for r in removals.reversed() {
-                strokes.insert(r.stroke, at: min(r.index, strokes.count))
+                insertStroke(r.stroke, at: min(r.index, strokes.count))
             }
             for r in objectRemovals.reversed() {
-                objects.insert(r.object, at: min(r.index, objects.count))
+                insertObject(r.object, at: min(r.index, objects.count))
             }
             redoStack.append(command)
         case let .clear(saved, savedObjects):
-            strokes = saved
-            objects = savedObjects
+            setStrokes(saved)
+            setObjects(savedObjects)
             redoStack.append(command)
         case let .replace(before, _):
-            strokes = before
+            setStrokes(before)
             redoStack.append(command)
         case let .transform(transformation):
             place(transformation.strokes, transformation.objects)
             lastReshapedIDs = transformation.strokeIDs
             redoStack.append(command)
         case let .addObject(object):
-            objects.removeAll { $0.id == object.id }
+            setObjects(objects.filter { $0.id != object.id })
             redoStack.append(command)
         case let .edit(edit):
             apply(edit, undoing: true)
@@ -625,7 +646,7 @@ public final class CanvasDocument: Identifiable {
         switch command {
         case let .add(stroke, splits):
             apply(splits)
-            strokes.append(stroke)
+            insertStroke(stroke, at: strokes.count)
             undoStack.append(.add(stroke, splits: splits))
         case let .erase(removals, objectRemovals):
             let again = remove(ids: Set(removals.map(\.stroke.id)))
@@ -633,18 +654,17 @@ public final class CanvasDocument: Identifiable {
             undoStack.append(.erase(again, objects: againObjects))
         case .clear:
             undoStack.append(.clear(strokes, objects: objects))
-            strokes.removeAll()
-            objects.removeAll()
+            setStrokes([])
+            setObjects([])
         case let .replace(_, after):
-            strokes = after
+            setStrokes(after)
             undoStack.append(command)
         case let .transform(transformation):
             apply(transformation)
             lastReshapedIDs = transformation.strokeIDs
             undoStack.append(command)
         case let .addObject(object):
-            objects.append(object)
-            objects = PageObjectsFile.stacked(objects)
+            setObjects(PageObjectsFile.stacked(objects + [object]))
             undoStack.append(command)
         case let .edit(edit):
             apply(edit, undoing: false)
@@ -697,7 +717,7 @@ public final class CanvasDocument: Identifiable {
             guard strokes.indices.contains(split.index), strokes[split.index].id == split.original.id else {
                 assertionFailure("split target moved"); continue
             }
-            strokes.replaceSubrange(split.index ... split.index, with: split.pieces)
+            replaceStrokes(split.index ..< split.index + 1, with: split.pieces)
         }
     }
 
@@ -710,7 +730,7 @@ public final class CanvasDocument: Identifiable {
             else {
                 assertionFailure("split pieces moved"); continue
             }
-            strokes.replaceSubrange(range, with: [split.original])
+            replaceStrokes(range, with: CollectionOfOne(split.original))
         }
     }
 
@@ -723,6 +743,7 @@ public final class CanvasDocument: Identifiable {
         page.strokes = strokes
         page.preservedRecords = preservedRecords
         page.objects = objects
+        page.strokeIndex = strokeIndex
         page.revision = revision
         page.objectsRevision = objectsRevision
         page.committedRaster = committedRaster
@@ -743,6 +764,7 @@ public final class CanvasDocument: Identifiable {
         for i in objects.indices where PageObjectKinds.isSelectable(objects[i]) {
             objects[i] = objects[i].applying(t)
         }
+        strokeIndex = StrokeIndex(strokes: strokes, objects: objects)
         undoStack.removeAll()
         redoStack.removeAll()
         undoGroups.removeAll()
@@ -754,6 +776,102 @@ public final class CanvasDocument: Identifiable {
         }
         pageSize = PageSize(width: height, height: width, name: pageSize.name)
         notify(.edited)
+    }
+
+    // MARK: Queries
+
+    /// Positions in `strokes` of the strokes that may reach `rect` (page space), bottom first, from the
+    /// page's `StrokeIndex`: a superset of those whose ink does, for the caller to check exactly.
+    func strokeIndices(in rect: CGRect) -> [Int] {
+        strokeIndex.strokes(in: rect)
+    }
+
+    /// The strokes that may reach `rect` (page space), bottom first (see `strokeIndices(in:)`).
+    func strokes(in rect: CGRect) -> [Stroke] {
+        strokeIndex.strokes(in: rect).map { strokes[$0] }
+    }
+
+    /// The objects whose bounds reach `rect` (page space), lowest first.
+    func objects(in rect: CGRect) -> [any PageObject] {
+        strokeIndex.objects(in: rect).map { objects[$0] }
+    }
+
+    // MARK: Changing strokes and objects (with the index in step)
+
+    private func replaceStrokes(_ range: Range<Int>, with new: some Collection<Stroke>) {
+        strokes.replaceSubrange(range, with: new)
+        strokeIndex.replaceStrokes(range, with: new)
+    }
+
+    private func insertStroke(_ stroke: Stroke, at position: Int) {
+        replaceStrokes(position ..< position, with: CollectionOfOne(stroke))
+    }
+
+    private func removeStroke(at position: Int) -> Stroke {
+        let stroke = strokes[position]
+        replaceStrokes(position ..< position + 1, with: EmptyCollection())
+        return stroke
+    }
+
+    private func setStroke(_ stroke: Stroke, at position: Int) {
+        let old = strokes[position]
+        strokes[position] = stroke
+        if !Self.sameReach(old, stroke) {
+            strokeIndex.updateStroke(at: position, to: stroke)
+        }
+    }
+
+    /// Replaces every stroke, refiling only those between the unchanged start and end of the page, so
+    /// undoing an erase or a restyle costs the index about what the edit did.
+    private func setStrokes(_ new: [Stroke]) {
+        let old = strokes
+        let shared = min(old.count, new.count)
+        var prefix = 0
+        while prefix < shared, Self.sameReach(old[prefix], new[prefix]) {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < shared - prefix, Self.sameReach(old[old.count - 1 - suffix], new[new.count - 1 - suffix]) {
+            suffix += 1
+        }
+        strokes = new
+        strokeIndex.replaceStrokes(prefix ..< old.count - suffix, with: new[prefix ..< new.count - suffix])
+    }
+
+    /// Whether the index files `a` and `b` alike. Copy-on-write points compare by identity first, so an
+    /// unchanged stroke costs next to nothing.
+    private static func sameReach(_ a: Stroke, _ b: Stroke) -> Bool {
+        a.points == b.points && a.brush == b.brush
+    }
+
+    private func insertObject(_ object: any PageObject, at position: Int) {
+        objects.insert(object, at: position)
+        strokeIndex.replaceObjects(position ..< position, with: CollectionOfOne(object))
+    }
+
+    private func removeObject(at position: Int) -> any PageObject {
+        strokeIndex.replaceObjects(position ..< position + 1, with: EmptyCollection())
+        return objects.remove(at: position)
+    }
+
+    private func setObject(_ object: any PageObject, at position: Int) {
+        objects[position] = object
+        strokeIndex.updateObject(at: position, to: object)
+    }
+
+    private func setObjects(_ new: [any PageObject]) {
+        let old = objects
+        let shared = min(old.count, new.count)
+        var prefix = 0
+        while prefix < shared, old[prefix].bounds == new[prefix].bounds {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < shared - prefix, old[old.count - 1 - suffix].bounds == new[new.count - 1 - suffix].bounds {
+            suffix += 1
+        }
+        objects = new
+        strokeIndex.replaceObjects(prefix ..< old.count - suffix, with: new[prefix ..< new.count - suffix])
     }
 
     private func push(_ command: Command, reshaping reshaped: Set<UUID> = []) {

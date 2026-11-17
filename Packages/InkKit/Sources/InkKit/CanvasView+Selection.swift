@@ -85,9 +85,10 @@ extension CanvasView {
         select(PageSelection(objectIDs: [object.id]))
     }
 
-    /// Every visible stroke as selection sees it, limited to those that may reach `region` (canvas space).
+    /// Every visible stroke as selection sees it, limited to those that may reach `region` (canvas space),
+    /// bottom first: the page's index finds them without looking at the rest.
     func strokeShapes(near region: CGRect) -> [SelectionGeometry.StrokeShape] {
-        document.strokes.compactMap { stroke in
+        document.strokes(in: region).compactMap { stroke in
             // Pixel-eraser strokes are invisible, so they're never selectable.
             guard !stroke.brush.erases else { return nil }
             let path = stroke.points.map(\.location)
@@ -104,9 +105,11 @@ extension CanvasView {
         (controller?.lassoFilter ?? .all).contains(.ink) ? strokeShapes(near: region) : []
     }
 
-    /// The objects the lasso may pick up: none when its filter leaves objects out.
-    var filteredObjects: [any PageObject] {
-        (controller?.lassoFilter ?? .all).contains(.objects) ? document.objects : []
+    /// The objects the lasso may pick up: none when its filter leaves objects out. With `region`, only
+    /// those whose bounds reach it (a lasso picks up nothing beyond its own bounds).
+    func filteredObjects(near region: CGRect? = nil) -> [any PageObject] {
+        guard (controller?.lassoFilter ?? .all).contains(.objects) else { return [] }
+        return region.map(document.objects(in:)) ?? document.objects
     }
 
     func handleLassoSample(_ p: CGPoint) {
@@ -184,7 +187,7 @@ extension CanvasView {
                 let tolerance = Self.tapSlop / inputTransform.scale
                 let near = CGRect(origin: first, size: .zero).insetBy(dx: -tolerance, dy: -tolerance)
                 let hit = SelectionGeometry.hitTest(first, tolerance: tolerance, strokes: filteredStrokeShapes(near: near),
-                                                    objects: filteredObjects)
+                                                    objects: filteredObjects())
                 select(hit ?? .empty)
                 if hit != nil {
                     showSelectionMenu()
@@ -195,9 +198,9 @@ extension CanvasView {
             }
             guard let polygon = LassoGeometry.region(mode: controller.lassoMode, points: pts) else { return }
             // Whole strokes and objects are selected even if only part of them is inside the region.
-            select(SelectionGeometry.select(in: polygon,
-                                            strokes: filteredStrokeShapes(near: LassoGeometry.bounds(of: polygon)),
-                                            objects: filteredObjects))
+            let region = LassoGeometry.bounds(of: polygon)
+            select(SelectionGeometry.select(in: polygon, strokes: filteredStrokeShapes(near: region),
+                                            objects: filteredObjects(near: region)))
             showSelectionMenu()
         case let .transforming(drag)?:
             if commit {

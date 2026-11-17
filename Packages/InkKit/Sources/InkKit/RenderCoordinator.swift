@@ -282,7 +282,8 @@ final class RenderCoordinator {
         let renderedRevision = unsubmittedIDs.isEmpty && !(host?.isEditingInk ?? false)
             ? document.revision : nil
         bitmapRevision = renderedRevision
-        let itemsToRender = committedItems(skipping: unsubmittedIDs)
+        // Only what the page's index finds on screen: off-screen strokes cost nothing, not even geometry.
+        let itemsToRender = committedItems(skipping: unsubmittedIDs, in: targetTransform.toCanvas(currentBounds))
 
         let coveredPending = pending.filter(\.submitted)
 
@@ -327,9 +328,10 @@ final class RenderCoordinator {
         }
     }
 
-    /// The document's strokes to render, with their cached geometry where there is some.
-    func committedItems(skipping skipped: Set<UUID> = []) -> [CommittedRenderer.Item] {
-        document.strokes.compactMap { stroke in
+    /// The document's strokes to render, with their cached geometry where there is some: all of them, or
+    /// those that may reach `rect` (page space), in page order.
+    func committedItems(skipping skipped: Set<UUID> = [], in rect: CGRect? = nil) -> [CommittedRenderer.Item] {
+        (rect.map(document.strokes(in:)) ?? document.strokes).compactMap { stroke in
             guard !skipped.contains(stroke.id) else { return nil }
             let cached = geometryCache[stroke.id]
             return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
@@ -566,14 +568,13 @@ final class RenderCoordinator {
         let scale = scale
         let pixels = Self.pixelSize(of: bounds.size, scale: scale)
         let visible = transform.toCanvas(bounds).insetBy(dx: -4, dy: -4)
-        // Only the strokes that reach the box. Geometry not cached yet is culled by its points.
-        let items: [CommittedRenderer.Item] = document.strokes.compactMap { stroke in
+        // Only the strokes that reach the box: the index's, then by geometry where it's cached.
+        let items: [CommittedRenderer.Item] = document.strokes(in: visible).compactMap { stroke in
             if let geometry = geometryCache[stroke.id] {
                 guard geometry.bounds.intersects(visible) else { return nil }
                 return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
                                               geometry: geometry, stroke: nil)
             }
-            guard Self.roughBounds(of: stroke).intersects(visible) else { return nil }
             return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
                                           geometry: nil, stroke: stroke)
         }
@@ -596,19 +597,5 @@ final class RenderCoordinator {
     /// Frees the snapshot bitmap (the zoom window closed).
     func releaseSnapshots() {
         snapshotQueue.async { [weak self] in self?.snapshotBitmap = nil }
-    }
-
-    /// A stroke's points' bounds grown by its widest nib: never smaller than its ink.
-    private static func roughBounds(of stroke: Stroke) -> CGRect {
-        guard let first = stroke.points.first?.location else { return .null }
-        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
-        for point in stroke.points {
-            minX = min(minX, point.location.x)
-            maxX = max(maxX, point.location.x)
-            minY = min(minY, point.location.y)
-            maxY = max(maxY, point.location.y)
-        }
-        let r = stroke.brush.maxWidth * 2
-        return CGRect(x: minX - r, y: minY - r, width: maxX - minX + 2 * r, height: maxY - minY + 2 * r)
     }
 }
