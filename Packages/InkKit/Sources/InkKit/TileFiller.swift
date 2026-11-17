@@ -257,6 +257,13 @@ struct InkSnapshot: @unchecked Sendable { // immutable values; geometry paths ar
 /// jobs build. A stroke reaching several tiles is built once, by the first job to need it, and the others
 /// wait for it. Building is serial within a job (the scheduler, not the job, decides how many cores
 /// work); a cancelled job stops between strokes and leaves the rest to whoever needs them.
+///
+/// A store made `releasing` the tiles a batch of fills will draw keeps what it builds only until the
+/// last of those tiles that the stroke reaches is drawn (`release(_:drawnIn:)`), and hands nothing to the
+/// owner's cache. Pages only shown in continuous scrolling fill that way (NOT-107): a dense page's
+/// geometry is ~170 MB, and a page scrolled past never needs it again once its tiles are cached, but a
+/// stroke reaching several tiles is still built once. Tiles are filled from the middle out, so what's held
+/// at once is the band of strokes the tiles in flight reach.
 final class GeometryStore: @unchecked Sendable { // guarded by `condition`
     private let condition = NSCondition()
     private var geometry: [UUID: StrokeGeometry]
@@ -265,10 +272,43 @@ final class GeometryStore: @unchecked Sendable { // guarded by `condition`
     /// The owner's geometry generation when the store was made: what's built for a stroke changed since
     /// isn't kept.
     let generation: Int
+    /// The tiles (page rects) the batch draws, when the store releases what it builds as they're drawn;
+    /// nil when it keeps it all, for the owner's cache (`takeBuilt`).
+    private let releasing: [CGRect]?
+    /// For each stroke built while `releasing`, how many of those tiles are still to draw it.
+    private var uses: [UUID: Int] = [:]
 
-    init(geometry: [UUID: StrokeGeometry], generation: Int = 0) {
+    init(geometry: [UUID: StrokeGeometry], generation: Int = 0, releasing tiles: [CGRect]? = nil) {
         self.geometry = geometry
         self.generation = generation
+        releasing = tiles
+    }
+
+    /// Whether what the jobs build is kept for the owner's cache.
+    var retains: Bool {
+        releasing == nil
+    }
+
+    /// The tile `rect` has been drawn with `strokes`' geometry (or given up on): a store `releasing` lets go
+    /// of what it built for them once no tile left to draw needs it.
+    func release(_ strokes: [Stroke], drawnIn rect: CGRect) {
+        guard releasing != nil else { return }
+        condition.withLock {
+            for stroke in strokes {
+                guard let left = uses[stroke.id], let g = geometry[stroke.id],
+                      Self.reaches(g, rect) else { continue }
+                if left <= 1 {
+                    uses[stroke.id] = nil
+                    geometry[stroke.id] = nil
+                } else {
+                    uses[stroke.id] = left - 1
+                }
+            }
+        }
+    }
+
+    private static func reaches(_ g: StrokeGeometry, _ rect: CGRect) -> Bool {
+        g.bounds.insetBy(dx: -3, dy: -3).intersects(rect)
     }
 
     /// The geometry of `strokes`: building the ones nobody has, waiting for the ones another job is
@@ -313,9 +353,14 @@ final class GeometryStore: @unchecked Sendable { // guarded by `condition`
                     return nil
                 }
                 let g = StrokeRenderer.geometry(for: stroke)
+                let uses = releasing.map { tiles in tiles.reduce(0) { $0 + (Self.reaches(g, $1) ? 1 : 0) } }
                 condition.withLock {
                     geometry[stroke.id] = g
-                    built.append((stroke.id, g))
+                    if let uses {
+                        self.uses[stroke.id] = uses
+                    } else {
+                        built.append((stroke.id, g))
+                    }
                     building.remove(stroke.id)
                     condition.broadcast()
                 }

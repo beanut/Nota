@@ -20,7 +20,9 @@ final class CanvasView: UIView {
     private var shadowColor = InkTheme.standard.shadow
     private(set) var paperTheme = InkTheme.standard
 
-    let document: CanvasDocument
+    /// The page shown. An embedded canvas is handed another page as pages scroll in and out of view
+    /// (`show(_:)`, NOT-107); otherwise it's the page the view was made with.
+    private(set) var document: CanvasDocument
     /// True when the view is one page among several in continuous scrolling (`ContinuousCanvasView`): the
     /// host places the page (`place(_:settled:)`) and does the scrolling and zooming, and the view is
     /// transparent outside its page so the pages around it show through.
@@ -29,6 +31,16 @@ final class CanvasView: UIView {
     var placement = ViewTransform()
     /// While embedded, whether the host is still moving the page (`place(_:settled:)`).
     var placementMoving = false
+    /// While embedded, true when the page isn't on screen yet but is about to be: the host gave it a
+    /// canvas ahead of the scroll, and its tiles fill behind those of the pages on screen.
+    var isAhead = false {
+        didSet {
+            if isAhead != oldValue {
+                coordinator.rendersAheadDidChange()
+            }
+        }
+    }
+
     /// The scale whose tiles the committed layer keeps while zoomed (set by a host that zooms the page
     /// itself, as continuous scrolling does); nil: the fitted page's.
     var restingScaleOverride: CGFloat?
@@ -47,7 +59,8 @@ final class CanvasView: UIView {
     }
 
     /// The committed ink: its surface, geometry cache, strokes waiting to be drawn and render requests.
-    let coordinator: RenderCoordinator
+    /// One per page shown: an embedded canvas handed another page gets a new one, over the same layers.
+    private(set) var coordinator: RenderCoordinator
     /// True when the committed layer shows the page as it is, sharp at the current transform: its tiles in
     /// view are at the transform's own level and the page's revision, and no fill of a tile in view or
     /// finished stroke is on its way (the margin around the view may still be filling). What the canvas benchmarks wait for after an edit,
@@ -212,15 +225,7 @@ final class CanvasView: UIView {
         pencil.delegate = self
         addInteraction(pencil)
 
-        document.addObserver(self, onChange: { [weak self] change in
-            self?.documentDidChange(change)
-        }, onPageSizeChange: { [weak self] in
-            self?.resetView()
-            self?.applyPaper()
-            self?.refreshObjects()
-        }, onTemplateChange: { [weak self] in
-            self?.applyPaper()
-        })
+        observeDocument()
         applyPaper()
         refreshObjects()
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground),
@@ -231,6 +236,86 @@ final class CanvasView: UIView {
     required init?(coder _: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    private func observeDocument() {
+        document.addObserver(self, onChange: { [weak self] change in
+            self?.documentDidChange(change)
+        }, onPageSizeChange: { [weak self] in
+            self?.resetView()
+            self?.applyPaper()
+            self?.refreshObjects()
+        }, onTemplateChange: { [weak self] in
+            self?.applyPaper()
+        })
+    }
+
+    /// Embedded: the page left view, and the canvas waits to be handed another (`show(_:)`), hidden. What
+    /// belonged to the page (a text box being edited, a picture being cropped, the selection) is finished,
+    /// its tiles are left with it (`captureTileRaster`, NOT-106), and its coordinator stops: nothing of the
+    /// page is held on screen or filled any more. Never while the page is taking ink.
+    func leavePage() {
+        guard isEmbedded, !hasLeftPage, !isInking else { return }
+        endEditingText()
+        finishImageCrop(commit: true)
+        clearSelection()
+        dismissEditMenu()
+        coordinator.captureTileRaster()
+        coordinator.retire()
+        document.removeObserver(self)
+        hasLeftPage = true
+        isHidden = true
+        // Hidden, its drawn layers are only memory: they're drawn again for the next page.
+        for view in [templateView, objectLayer, tapeLayer, lassoOverlayView] as [UIView] {
+            view.layer.contents = nil
+        }
+    }
+
+    /// Embedded: shows `newDocument` in place of the page shown, keeping the view, its layers, gestures and
+    /// interactions, as continuous scrolling hands a canvas from a page leaving view to one entering it
+    /// (NOT-107). The page shown is left first (`leavePage()`) if it hasn't been. The committed ink gets a
+    /// new coordinator for the new page, over the old one's layers.
+    func show(_ newDocument: CanvasDocument) {
+        guard isEmbedded, newDocument !== document || hasLeftPage, !isInking else { return }
+        leavePage()
+        let old = coordinator
+        document = newDocument
+        coordinator = RenderCoordinator(document: newDocument, embedded: true, reusingLayersOf: old)
+        coordinator.host = self
+        observeDocument()
+        hasLeftPage = false
+        isHidden = false
+        // Nothing of the old page's input, selection or placement carries over.
+        live = nil
+        eraseSession = nil
+        lassoSession = nil
+        lassoPending = false
+        shapeSnap = nil
+        rulerSnap = nil
+        textGesture = nil
+        toolGesture = nil
+        strokeGroup = nil
+        joinedStroke = false
+        selection = .empty
+        selectionBox = nil
+        pasteCounts = [:]
+        pendingPastePoint = nil
+        input = CanvasInput()
+        placement = ViewTransform()
+        placementMoving = false
+        isAhead = false
+        fittedBoundsSize = .zero
+        applyPaper()
+        templateView.setNeedsDisplay() // drawn again even when the paper is the same as the last page's
+        refreshObjects()
+        objectLayer.setNeedsDisplay()
+        tapeLayer.setNeedsDisplay()
+        invalidateAllLive()
+        updateLassoOverlay()
+        setNeedsLayout()
+    }
+
+    /// Set by `leavePage()` until the canvas is handed a page again.
+    private(set) var hasLeftPage = false
 
     /// Disable the system's three-finger undo/redo/copy gestures; we drive undo ourselves.
     override var canBecomeFirstResponder: Bool {
@@ -304,9 +389,11 @@ final class CanvasView: UIView {
         lassoOverlayView.frame = bounds
         layoutZoomPanel()
         if bounds.size != fittedBoundsSize, bounds.width > 0, bounds.height > 0 {
-            // First layout or a rotation / split-view resize: show the whole page again.
+            // First layout or a rotation / split-view resize: show the whole page again. Embedded, the host
+            // places the page: a canvas resized mid-pinch (or made for a page entering view) stays where it
+            // was put, rather than drawing its page fitted to its new size over the pages around it.
             fittedBoundsSize = bounds.size
-            viewTransform = fittedTransform()
+            viewTransform = isEmbedded ? placement : fittedTransform()
             liveView.settle(at: viewTransform)
             coordinator.updateLayerTransform()
             reportZoom()
@@ -483,7 +570,7 @@ final class CanvasView: UIView {
 
     func resetView() {
         updateZoomWindow()
-        viewTransform = fittedTransform()
+        viewTransform = isEmbedded ? placement : fittedTransform() // embedded, the host places the page
         liveView.settle(at: viewTransform)
         coordinator.updateLayerTransform()
         updatePageChrome()
@@ -745,6 +832,10 @@ extension CanvasView: RenderCoordinatorHost {
 
     var renderBounds: CGRect {
         bounds
+    }
+
+    var rendersAhead: Bool {
+        isAhead
     }
 
     var isEditingInk: Bool {

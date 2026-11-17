@@ -30,6 +30,15 @@ protocol RenderCoordinatorHost: AnyObject {
     func renderCoordinatorDidPublish()
     /// A finished stroke is now in the committed ink, so the live layer can stop showing `canvasRect` for it.
     func renderCoordinatorDidDrawPending(canvasRect: CGRect)
+    /// True while the page isn't on screen yet but is about to be (continuous scrolling's prefetch): its
+    /// tiles are filled behind those of every page on screen.
+    var rendersAhead: Bool { get }
+}
+
+extension RenderCoordinatorHost {
+    var rendersAhead: Bool {
+        false
+    }
 }
 
 /// A finished stroke that's waiting to be drawn into the committed ink, shown by the live layer meanwhile.
@@ -114,23 +123,29 @@ final class RenderCoordinator {
     let document: CanvasDocument
     /// True for one page among several in continuous scrolling: its raster keeps only the tiles it had.
     let isEmbedded: Bool
+    /// Whether geometry built to fill whole tiles is kept (and, after tiles are restored, every stroke's
+    /// built ahead) for the erasers, the lasso and later refills. An embedded page doesn't: continuous
+    /// scrolling shows many pages, each one's geometry is ~170 MB when dense, and a page that's only
+    /// scrolled past never needs it once its tiles are cached (NOT-107). It keeps what an edit builds:
+    /// geometry asked for on the main thread and built for refilling part of a tile.
+    let keepsGeometry: Bool
     weak var host: RenderCoordinatorHost?
     let cache: TileCache
     let filler: TileFiller
 
     /// The layer showing the committed ink. The host puts it in its view hierarchy; the coordinator sizes it
     /// (`resize(to:scale:)`) and lays its tiles out at the host's transform (`updateLayerTransform()`).
-    let layer = CALayer()
+    let layer: CALayer
     /// The displayed level's tiles, over the level shown before it (`underLevel`) where the displayed level
     /// has none yet, over the resting level's where neither has (NOT-105). Each lower level sits in a host
     /// masked away wherever a level above it has a tile, so blurrier ink never shows around the sharp.
-    private let current = TileLayerGrid()
-    private let under = TileLayerGrid()
-    private let underHost = CALayer()
-    private let underMask = CAShapeLayer()
-    private let fallback = TileLayerGrid()
-    private let fallbackHost = CALayer()
-    private let fallbackMask = CAShapeLayer()
+    private let current: TileLayerGrid
+    private let under: TileLayerGrid
+    private let underHost: CALayer
+    private let underMask: CAShapeLayer
+    private let fallback: TileLayerGrid
+    private let fallbackHost: CALayer
+    private let fallbackMask: CAShapeLayer
 
     /// The level whose tiles are on screen (nil before any are). Settled, it's the transform's own level,
     /// shown as its tiles land (centre-out) over the level shown before.
@@ -257,14 +272,47 @@ final class RenderCoordinator {
     /// Owns the zoom window panel's interest in the cache.
     private let panelInterest = NSObject()
 
+    /// A coordinator for `document`. With `reusingLayersOf`, it takes over a retired coordinator's layers
+    /// (already in the host's view hierarchy) instead of making its own: an embedded canvas handed another
+    /// page (`CanvasView.show(_:)`, NOT-107) keeps its tile layers.
     init(document: CanvasDocument, embedded: Bool, cache: TileCache = .shared,
-         filler: TileFiller = CoreGraphicsTileFiller(), scheduler: RenderScheduler = .shared) {
+         filler: TileFiller = CoreGraphicsTileFiller(), scheduler: RenderScheduler = .shared,
+         reusingLayersOf previous: RenderCoordinator? = nil) {
         self.document = document
         isEmbedded = embedded
+        keepsGeometry = !embedded
         self.cache = cache
         self.filler = filler
         self.scheduler = scheduler
         cancellation = RenderCancellation(parent: lifetime)
+        if let previous {
+            layer = previous.layer
+            current = previous.current
+            under = previous.under
+            underHost = previous.underHost
+            underMask = previous.underMask
+            fallback = previous.fallback
+            fallbackHost = previous.fallbackHost
+            fallbackMask = previous.fallbackMask
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            // A page's worth of tile layers is kept for the next page.
+            current.clear(sparing: 256)
+            under.clear()
+            fallback.clear()
+            underHost.isHidden = true
+            fallbackHost.isHidden = true
+            CATransaction.commit()
+            return
+        }
+        layer = CALayer()
+        current = TileLayerGrid()
+        under = TileLayerGrid()
+        underHost = CALayer()
+        underMask = CAShapeLayer()
+        fallback = TileLayerGrid()
+        fallbackHost = CALayer()
+        fallbackMask = CAShapeLayer()
         layer.anchorPoint = .zero
         for (host, mask) in [(underHost, underMask), (fallbackHost, fallbackMask)] {
             host.anchorPoint = .zero
@@ -283,6 +331,21 @@ final class RenderCoordinator {
 
     deinit {
         lifetime.cancel()
+        scheduler.setGesture(false, for: ObjectIdentifier(self))
+        cache.removeInterest(ObjectIdentifier(self))
+        cache.removeInterest(ObjectIdentifier(panelInterest))
+    }
+
+    /// Set by `retire()`: the layers may belong to another coordinator now, so nothing is laid out again.
+    private var isRetired = false
+
+    /// Stops everything for the page, as `deinit` does: fills and geometry jobs are cancelled and its tiles
+    /// are no longer held on screen. A canvas whose page left view retires its coordinator.
+    func retire() {
+        isRetired = true
+        host = nil
+        lifetime.cancel()
+        fills.removeAll()
         scheduler.setGesture(false, for: ObjectIdentifier(self))
         cache.removeInterest(ObjectIdentifier(self))
         cache.removeInterest(ObjectIdentifier(panelInterest))
@@ -327,6 +390,26 @@ final class RenderCoordinator {
         }
         let version = document.inkVersion
         return cache.tiles(for: keys).allSatisfy { $0?.revision == version }
+    }
+
+    /// How many tiles of `pageRect` (page points) show no ink yet that a tile would: those of the displayed
+    /// level that aren't laid out, unless the resting level's tile there is cached to show under them. What
+    /// the continuous scrolling benchmark counts as paper where ink belongs.
+    func blankTiles(in pageRect: CGRect) -> Int {
+        guard let shown = displayedLevel else {
+            return TileKey.keys(covering: pageRect.intersection(document.pageBounds), page: page, level: restingLevel).count
+        }
+        let resting = restingLevel
+        return TileKey.keys(covering: pageRect.intersection(document.pageBounds), page: page, level: shown)
+            .filter { key in
+                guard !shownKeys.contains(key) else { return false }
+                guard shown != resting else { return true }
+                let centre = CGPoint(x: key.rect.midX, y: key.rect.midY)
+                let under = TileKey.keys(covering: CGRect(origin: centre, size: CGSize(width: 0.01, height: 0.01)),
+                                         page: page, level: resting)
+                return under.contains { cache.tile(for: $0) == nil }
+            }
+            .count
     }
 
     /// The part of the page the committed surface shows at `transform`, in page (canvas) points.
@@ -409,6 +492,7 @@ final class RenderCoordinator {
     /// is the transform's own at once, and its tiles appear as they land (NOT-105); mid-gesture at a moving
     /// scale it stays the last one, scaled.
     func updateLayerTransform() {
+        guard !isRetired else { return }
         reportMoving()
         guard pixelSize != .zero else { return }
         let t = transform, want = level(for: t)
@@ -683,6 +767,7 @@ final class RenderCoordinator {
     /// what's missing or stale in view (then a tile's margin around it). Fills already on their way for the
     /// same tiles and revision carry on; the rest are cancelled.
     func requestRender() {
+        guard !isRetired else { return }
         // No surface for this size yet (a new view, or one just resized): sizing it (`resize`) renders.
         guard pixelSize != .zero, pixelSize == Self.pixelSize(of: bounds.size, scale: scale) else {
             host?.renderCoordinatorNeedsLayout()
@@ -690,6 +775,13 @@ final class RenderCoordinator {
         }
         updateLayerTransform()
         startRender()
+    }
+
+    /// The page came on screen, or went back to being rendered ahead of it (`RenderCoordinatorHost.rendersAhead`):
+    /// the fills on their way are given their new priority.
+    func rendersAheadDidChange() {
+        lastFillRequest = nil
+        requestRender()
     }
 
     /// Cancels the fills on their way: what they'd draw is out of date (a cancelled gesture's transform, a
@@ -754,19 +846,30 @@ final class RenderCoordinator {
             return
         }
         steady = nil
-        let visible = visibleKeys(at: t, level: want, centreOut: true)
+        var visible = visibleKeys(at: t, level: want, centreOut: true)
         let margin = revision < 0 ? [] : marginKeys(at: t, level: want, inside: visible)
+        // A page moving into view zoomed in (a scroll in continuous mode) gets its resting level in view
+        // first, where that isn't cached: restored from its raster, or filled at a quarter of the tiles or
+        // fewer, it shows the ink, blurred, under the sharper level until that lands, instead of paper.
+        let restingInView = isEmbedded && moving && want != resting
+            ? visibleKeys(at: t, level: resting, centreOut: true) : []
+        let restingFirst = zip(restingInView, cache.tiles(for: restingInView)).filter { $0.1 == nil }.map(\.0)
+        visible = restingFirst + visible
         let wanted = visible + margin
         cache.setInterest(ObjectIdentifier(self), page: page, visible: shownKeys.union(wanted), resting: resting,
                           shown: [want, underLevel].compactMap { $0 })
-        let plans = fillPlans(for: wanted, revision: revision)
+        let plans = restingFirst.map { plan(uncached: $0, revision: revision) }
+            + fillPlans(for: wanted.dropFirst(restingFirst.count).map { $0 }, revision: revision)
         let staleSet = Set(plans.map(\.key))
-        // Fills of tiles no longer wanted are dropped, running or not. Queued fills of an older revision are
-        // dropped and submitted again; a running one finishes, since its pixels are newer than those on
-        // screen (a dense fitted tile takes 100–250 ms, and an erase changes the page faster than that),
-        // and its tile is refilled once it lands (`needsRefill`).
+        // Fills of tiles no longer wanted are dropped, running or not (except the resting level's in view,
+        // which shows until the level wanted lands). Queued fills of an older revision are dropped and
+        // submitted again; a running one finishes, since its pixels are newer than those on screen (a dense
+        // fitted tile takes 100–250 ms, and an erase changes the page faster than that), and its tile is
+        // refilled once it lands (`needsRefill`).
+        let restingKept = isEmbedded && want != resting ? Set(visibleKeys(at: t, level: resting)) : []
         cancelFills { key, ticket in
-            !staleSet.contains(key) || (ticket.revision != revision && !scheduler.hasStarted(ticket.job))
+            (!staleSet.contains(key) && !(key.level == resting && restingKept.contains(key)))
+                || (ticket.revision != revision && !scheduler.hasStarted(ticket.job))
         }
         submitFills(plans, revision: revision, waiting: waiting, inView: Set(visible))
     }
@@ -813,7 +916,7 @@ final class RenderCoordinator {
     /// tiles near the Pencil first, then those `inView`, then the rest (the margin).
     private func submitFills(_ plans: [FillPlan], revision: Int, waiting: [PendingStroke], inView: Set<TileKey>) {
         guard !plans.isEmpty else { return }
-        let pencil = host?.pencilLocation
+        let pencil = host?.pencilLocation, ahead = host?.rendersAhead ?? false
         let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:],
                                    skipped: Set(waiting.map(\.live.stroke.id)))
         // One store per geometry generation: a new one shares the cache's storage, so the cache's next change
@@ -827,18 +930,24 @@ final class RenderCoordinator {
         }
         let source = FillSource(ink: snapshot, store: store, revision: revision, raster: document.tileRaster,
                                 filler: filler)
+        // Whole tiles of a page that doesn't keep geometry share what's built for them only until they're drawn.
+        let wholeKeys = plans.filter { $0.region == nil && !$0.restore }.map(\.key.rect)
+        let wholeSource = keepsGeometry || wholeKeys.isEmpty ? source
+            : FillSource(ink: snapshot, store: GeometryStore(geometry: geometryCache, releasing: wholeKeys),
+                         revision: revision, raster: document.tileRaster, filler: filler)
         var jobs: [RenderJob] = []
         for (rank, plan) in plans.enumerated() {
             let key = plan.key
             let priority: RenderPriority = pencil.map { key.rect.insetBy(dx: -8, dy: -8).contains($0) } == true
-                ? .underPencil : inView.contains(key) ? .visible : .margin
+                ? .underPencil : inView.contains(key) && !ahead ? .visible : .margin
             if let ticket = fills[key] {
                 if ticket.revision == revision {
                     scheduler.reprioritise(ticket.job, to: priority, rank: Double(rank))
                 }
                 continue
             }
-            let job = fillJob(plan, from: source, priority: priority, rank: Double(rank))
+            let job = fillJob(plan, from: plan.region == nil ? wholeSource : source, priority: priority,
+                              rank: Double(rank))
             jobs.append(job)
         }
         scheduler.submit(jobs)
@@ -977,6 +1086,8 @@ final class RenderCoordinator {
                 tile = Tile(image: ctx.makeImage(), revision: revision)
             }
         } else {
+            let candidates = ink.candidates(in: key.rect)
+            defer { store.release(candidates, drawnIn: key.rect) }
             guard let strokes = ink.drawable(in: key.rect, store: store, isCancelled: isCancelled) else { return nil }
             if strokes.isEmpty {
                 tile = Tile(image: nil, revision: revision)
@@ -1019,7 +1130,7 @@ final class RenderCoordinator {
             fillStats.jobs += 1
             if output.restored {
                 fillStats.tilesRestored += 1
-                needsWarmGeometry = true
+                needsWarmGeometry = keepsGeometry
             } else {
                 fillStats.tilesFilled += 1
                 if output.partial {
@@ -1285,7 +1396,7 @@ final class RenderCoordinator {
     /// one (a page among several in continuous scrolling, which come and go as they scroll by) leaves only
     /// what it has.
     func captureTileRaster() {
-        guard let host, !host.isEditingInk, pixelSize != .zero else { return }
+        guard !isRetired, let host, !host.isEditingInk, pixelSize != .zero else { return }
         let document = document, revision = document.inkVersion, level = restingLevel
         let pageSize = document.pageBounds.size
         guard document.strokes.contains(where: { !$0.brush.erases }) else { return }

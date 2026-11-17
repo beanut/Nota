@@ -373,13 +373,14 @@ final class CanvasBenchmarks: XCTestCase {
 
     // MARK: Continuous scrolling
 
-    /// A 5k-stroke page scrolling into view in continuous mode: `ContinuousCanvasView` gives it a fresh
-    /// embedded canvas, places it and lays it out (`makeCanvas`, `place(_:settled:)`, `layoutIfNeeded`);
-    /// timed until its ink is drawn. The budgeted case (`scroll.page_enter_5k_ms`) is a page seen before,
-    /// in this launch or an earlier one (NOT-106): the page read from its file again (nothing of it in the
-    /// tile cache) and the tiles it left read back from the file an app keeps them in (mapped, as
-    /// `DocumentStore` reads them), then restored. The first time a page is ever shown, its tiles in view
-    /// are filled: `scroll.page_enter_first_5k_ms`, no budget.
+    /// A 5k-stroke page scrolling into view in continuous mode: `ContinuousCanvasView` hands it a pooled
+    /// embedded canvas another page left (`show(_:)`, NOT-107), places it and lays it out
+    /// (`place(_:settled:)`, `layoutIfNeeded`); timed until its ink is drawn. The budgeted case
+    /// (`scroll.page_enter_5k_ms`) is a page seen before, in this launch or an earlier one (NOT-106): the
+    /// page read from its file again (nothing of it in the tile cache) and the tiles it left read back from
+    /// the file an app keeps them in (mapped, as `DocumentStore` reads them), then restored. The first time
+    /// a page is ever shown (on a new canvas), its tiles in view are filled: `scroll.page_enter_first_5k_ms`,
+    /// no budget.
     func testPageEnter5k() throws {
         let suite = "CanvasBenchmarks.\(UUID().uuidString)"
         let controller = try CanvasController(settingsStore: XCTUnwrap(UserDefaults(suiteName: suite)),
@@ -394,8 +395,9 @@ final class CanvasBenchmarks: XCTestCase {
         let placement = ViewTransform(scale: layout.scale,
                                       offset: CGPoint(x: page.minX - window.minX, y: page.minY - window.minY))
         let file = InkPageFile(pageID: UUID(), strokes: corpus.page(strokes: 5000))
-        func enter(_ document: CanvasDocument) throws -> CanvasView {
-            let canvas = CanvasView(frame: window, document: document, embedded: true)
+        func enter(_ document: CanvasDocument, on pooled: CanvasView? = nil) throws -> CanvasView {
+            let canvas = pooled ?? CanvasView(frame: window, document: document, embedded: true)
+            pooled?.show(document)
             canvas.traitOverrides.displayScale = Bench.displayScale
             canvas.controller = controller
             canvas.restingScaleOverride = layout.scale // as `ContinuousCanvasView` sets it
@@ -424,7 +426,7 @@ final class CanvasBenchmarks: XCTestCase {
             let start = Bench.now()
             let data = try Data(contentsOf: url, options: .alwaysMapped)
             XCTAssertTrue(document.restoreCommittedTiles(data))
-            let canvas = try enter(document)
+            let canvas = try enter(document, on: shown)
             times.append(Bench.milliseconds(since: start))
             XCTAssertEqual(canvas.coordinator.fillStats.tilesFilled, 0, "a page seen before filled tiles")
         }
@@ -433,9 +435,18 @@ final class CanvasBenchmarks: XCTestCase {
         check(median, under: Self.pageEnterBudgetMs, "A 5000-stroke page entering view (ms, median)")
     }
 
-    /// Scrolling a 20-page note of 5k-stroke pages from the first page to the last in continuous mode, a
-    /// page at a time, letting each page's ink draw: the peak footprint the canvases add over the note
-    /// itself (its strokes in memory, measured as `model_mb`), from a settled baseline.
+    /// A 20-page note of 5k-stroke pages in continuous scrolling, as the app shows it: in a window (so
+    /// pages leaving view leave their tiles, and drawn layers are drawn), with each page's tiles written to a
+    /// file and swapped for the mapped file as `DocumentStore` does (NOT-106).
+    ///
+    /// 1. **Memory** (`memory.continuous_20_pages_mb`): scrolled from the first page to the last a page at
+    ///    a time, each page's ink drawn for the first time: the peak footprint added over the note itself
+    ///    (its strokes in memory, `model_mb`), from a settled baseline.
+    /// 2. **A fling** (`scroll.fling_20_pages.*`, NOT-107) back to the top and down to the bottom again at
+    ///    6,000 points a second (50 a frame at 120 Hz), every page seen before: main-thread work per
+    ///    frame, and the frames on which a page on screen showed paper where its ink belongs (a tile in view
+    ///    not laid out, with no resting-level tile under it). Canvases made during the fling are counted
+    ///    too: the pool should make none.
     func testMemoryContinuous20Pages() throws {
         let start = Bench.settledFootprint()
         let pages = (0 ..< 20).map { _ in
@@ -443,6 +454,7 @@ final class CanvasBenchmarks: XCTestCase {
                            pageSize: corpus.pageSize)
         }
         let notebook = InkNotebook(pages: pages, defaultPageSize: corpus.pageSize)
+        let kept = try KeptTiles(pages: pages)
         let before = Bench.settledFootprint()
         var peak = before
 
@@ -452,13 +464,19 @@ final class CanvasBenchmarks: XCTestCase {
         let view = ContinuousCanvasView(notebook: notebook, controller: controller, telemetry: PencilTelemetry())
         view.traitOverrides.displayScale = Bench.displayScale
         view.frame = Bench.screenBounds
+        let window = UIWindow(frame: Bench.screenBounds)
+        window.addSubview(view)
+        window.isHidden = false
         view.layoutIfNeeded()
+        func settled() -> Bool {
+            !view.liveCanvases.isEmpty && view.liveCanvases.allSatisfy { $0.rendersSettled && !$0.coordinator.isFilling }
+        }
         for index in pages.indices {
             view.scroll(toPage: index, animated: false)
             view.layoutIfNeeded()
             try waitUntil(timeout: 120) {
                 peak = max(peak, Bench.footprint())
-                return !view.liveCanvases.isEmpty && view.liveCanvases.allSatisfy(\.rendersSettled)
+                return settled()
             }
         }
         let mb = { (bytes: UInt64) in Double(bytes) / 1_048_576 }
@@ -466,7 +484,85 @@ final class CanvasBenchmarks: XCTestCase {
         BenchResults.record("memory.continuous_20_pages_mb", added, unit: "MB", budget: Self.continuousMemoryBudgetMB)
         BenchResults.record("memory.continuous_20_pages.model_mb", mb(before.subtractingClamped(start)), unit: "MB")
         check(added, under: Self.continuousMemoryBudgetMB, "Scrolling a 20-page note (MB over the note)")
-        withExtendedLifetime((view, notebook)) {}
+
+        // The fling: up to the top, then down to the bottom, every page seen before.
+        try waitUntil(timeout: 60) { kept.isIdle }
+        let speed: CGFloat = 50 // content points a frame
+        let bottom = view.contentOffsetForTesting
+        var blankFrames = 0, blankTiles = 0
+        func blank() -> Int {
+            view.pagesInView.map { index -> Int in
+                guard let canvas = view.canvas(showing: pages[index].id) else { return 1 }
+                let onScreen = canvas.convert(view.bounds, from: view)
+                return canvas.coordinator.blankTiles(in: canvas.viewTransform.toCanvas(onScreen))
+            }
+            .reduce(0, +)
+        }
+        var maxPeak = before
+        func step(to y: CGFloat) {
+            view.scrollForTesting(toY: y)
+            let b = blank()
+            blankTiles += b
+            blankFrames += b > 0 ? 1 : 0
+            maxPeak = max(maxPeak, Bench.footprint())
+        }
+        let count = Int((bottom / speed).rounded(.up))
+        var frames = paced(frames: count) { n in step(to: bottom - CGFloat(n + 1) * speed) }
+        // The pool has as many canvases as a fling needs now: the way back down makes none.
+        let madeGoingUp = view.canvasesMade
+        frames += paced(frames: count) { n in step(to: CGFloat(n + 1) * speed) }
+        view.endScrollingForTesting()
+        let f = Stats(frames)
+        BenchResults.record("scroll.fling_20_pages.frame_p50_ms", f.median, unit: "ms")
+        BenchResults.record("scroll.fling_20_pages.frame_p95_ms", f.p95, unit: "ms", budget: Self.gestureFrameBudgetMs)
+        BenchResults.record("scroll.fling_20_pages.frame_max_ms", f.max, unit: "ms", budget: Self.gestureFrameBudgetMs)
+        BenchResults.record("scroll.fling_20_pages.blank_frames", Double(blankFrames), unit: "frames", budget: 0.5)
+        BenchResults.record("scroll.fling_20_pages.blank_tiles", Double(blankTiles), unit: "tiles")
+        BenchResults.record("scroll.fling_20_pages.canvases_made", Double(view.canvasesMade - madeGoingUp),
+                            unit: "canvases")
+        BenchResults.record("scroll.fling_20_pages.peak_mb", mb(maxPeak.subtractingClamped(before)), unit: "MB")
+        check(f.p95, under: Self.gestureFrameBudgetMs, "Fling through 20 pages: main-thread work per frame (ms, p95)")
+        XCTAssertEqual(view.canvasesMade, madeGoingUp, "the fling made canvases instead of reusing them")
+        withExtendedLifetime((view, notebook, window, kept)) {}
+    }
+}
+
+/// What the app does with the tiles a page leaves (`DocumentStore`, NOT-106), for the continuous
+/// scrolling benchmark: each capture is written to a file off the main thread and the page swaps its copy
+/// in memory for the mapped file, so kept tiles cost what they cost in the app.
+@MainActor
+final class KeptTiles {
+    private let folder: URL
+    private let queue = DispatchQueue(label: "KeptTiles")
+    private var writing = 0
+
+    init(pages: [CanvasDocument]) throws {
+        folder = FileManager.default.temporaryDirectory.appending(path: "kept-tiles-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for page in pages {
+            page.observeCommittedTiles(self) { [weak self, weak page] in
+                guard let self, let page, let tiles = page.committedTiles else { return }
+                let url = folder.appending(path: "\(page.id.uuidString).tiles")
+                writing += 1
+                queue.async {
+                    let mapped = (try? tiles.data.write(to: url)).flatMap { try? Data(contentsOf: url, options: .alwaysMapped) }
+                    DispatchQueue.main.async {
+                        self.writing -= 1
+                        if let mapped {
+                            page.adoptPersistedTiles(mapped, for: tiles)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    var isIdle: Bool {
+        writing == 0
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: folder)
     }
 }
 

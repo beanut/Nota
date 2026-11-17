@@ -112,6 +112,28 @@ struct ContinuousPageLayout: Equatable {
         return min(max(frames[index].minY - topInset, 0), maxOffset)
     }
 
+    // MARK: Prefetch
+
+    /// How far above and below the view, as a fraction of its height, pages get a canvas before they're in
+    /// view, whether or not it's scrolling.
+    static let prefetchFraction: CGFloat = 0.5
+    /// How far ahead of a scroll pages get a canvas: the distance it covers in this long at its speed…
+    static let prefetchLookahead: CGFloat = 0.4
+    /// …up to this many view heights.
+    static let maxPrefetchScreens: CGFloat = 2
+
+    /// The part of the column (zoom 1 points, like `viewport`) whose pages get a canvas: the view plus
+    /// `prefetchFraction` above and below, and in the direction of a scroll (`velocity`, points per second,
+    /// positive downwards) as far as it goes in `prefetchLookahead`, so a fling's next page has its canvas,
+    /// and its tiles are on their way, before it's on screen.
+    static func prefetchRect(around viewport: CGRect, velocity: CGFloat) -> CGRect {
+        let base = viewport.height * prefetchFraction
+        let ahead = min(abs(velocity) * prefetchLookahead, viewport.height * maxPrefetchScreens)
+        let above = base + (velocity < 0 ? ahead : 0), below = base + (velocity > 0 ? ahead : 0)
+        return CGRect(x: viewport.minX, y: viewport.minY - above, width: viewport.width,
+                      height: viewport.height + above + below)
+    }
+
     // MARK: Render windows
 
     /// How far a page's canvas reaches past the viewport on each side, as a fraction of the viewport.
@@ -120,9 +142,12 @@ struct ContinuousPageLayout: Equatable {
     /// before the canvas moves (and renders again) to keep ahead of it.
     static let renderMargin = CGSize(width: 0.125, height: 0.25)
 
-    /// Where a page's canvas goes, in scroll content points at the current zoom: the part of `page` its
-    /// ink is rendered for. Scrolling moves the canvas with the content, so the ink only renders again
-    /// when the canvas moves or changes size, never just because the view scrolled.
+    /// Where a page's canvas goes, in scroll content points at the current zoom: the part of `page` it
+    /// shows. The committed ink is page-space tiles shared through the `TileCache` (NOT-102), so moving the
+    /// window never draws ink again: it only lays the cached tiles out at their new place, and fills those
+    /// not cached. What the window bounds is the canvas's view-sized layers (its template, objects, live
+    /// ink and lasso), drawn as vectors for the part of the page it covers. Scrolling moves the canvas with
+    /// the content, so those are drawn again only when the window moves or changes size (NOT-107).
     ///
     /// The window is the viewport plus `renderOverscan`, cut to the page, so a page that fits in that is
     /// covered whole and never renders again while scrolling. `current` is kept while it still covers the

@@ -78,19 +78,20 @@ final class TileLayerGrid {
         return tile
     }
 
-    private func recycle(_ tile: CALayer) {
+    private func recycle(_ tile: CALayer, sparing limit: Int = 32) {
         tile.contents = nil
         tile.isHidden = true
-        if spare.count < 32 {
+        if spare.count < limit {
             spare.append(tile)
         } else {
             tile.removeFromSuperlayer()
         }
     }
 
-    func clear() {
+    /// Hides every tile, keeping up to `limit` layers for the next tiles shown.
+    func clear(sparing limit: Int = 32) {
         for tile in tiles.values {
-            recycle(tile)
+            recycle(tile, sparing: limit)
         }
         tiles.removeAll()
         images.removeAll()
