@@ -119,7 +119,7 @@ final class ZoomPanelView: UIView {
         displayedTransform = transform
         updateCommittedLayerTransform()
         CATransaction.commit()
-        liveView.underlay = image
+        liveView.underlay = image.map { [(transform.toCanvas(committedLayer.bounds), $0)] } ?? []
     }
 
     private func updateCommittedLayerTransform() {

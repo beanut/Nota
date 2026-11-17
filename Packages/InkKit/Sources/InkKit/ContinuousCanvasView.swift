@@ -266,6 +266,8 @@ final class ContinuousCanvasView: UIView {
             if canvas.frame != window {
                 canvas.frame = window
             }
+            // The column at zoom 1 is what zooming back out returns to: its tiles are kept while zoomed.
+            canvas.restingScaleOverride = layout.scale
             canvas.place(transform(forPage: i, from: window.origin), settled: settled)
             // A new or resized canvas makes its bitmap now, at the placement it was just given, so its
             // first render already shows the page.

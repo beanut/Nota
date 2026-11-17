@@ -130,6 +130,16 @@ enum PencilTexture {
         ctx.setPatternPhase(CGSize(width: px, height: py))
     }
 
+    /// Pins the grain to the page: anchors the pattern at the device pixel where `ctx`'s current user
+    /// space (page points) puts the page's origin. The pattern is anchored at the bitmap's bottom-left
+    /// corner in device pixels, so every bitmap that sets this, whatever part of the page it covers and
+    /// wherever it sits on screen (a committed tile, a live tile, a pan later), shows the same grain on the
+    /// same page pixel. The phase isn't reduced modulo the 64-pixel cell: a scaled grain's cell isn't 64.
+    static func pinToPage(_ ctx: CGContext) {
+        let origin = CGPoint.zero.applying(ctx.ctm)
+        ctx.setPatternPhase(CGSize(width: origin.x, height: origin.y))
+    }
+
     /// Returns a seamless pattern CGColor representing the graphite stroke texture
     /// for the given base color, run alpha and grain.
     static func fillColor(for color: RGBA, alpha: CGFloat, grain: Grain = .pencil) -> CGColor {

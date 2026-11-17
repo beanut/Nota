@@ -101,14 +101,29 @@ final class CanvasBenchmarks: XCTestCase {
     }
 
     /// The fraction of pixels in what `canvas` shows that differ from the page drawn from scratch at the
-    /// same transform: 0 when its pixels are correct.
+    /// same transform: 0 when its pixels are correct. The reference is drawn through the tile path from
+    /// scratch (every tile in view filled again, no cache, all geometry rebuilt) and assembled the same
+    /// way, since tiles differ from one whole-screen draw in about 0.1% of pixels (NOT-99), which would
+    /// hide a stale tile.
     private func mismatch(of canvas: CanvasView) throws -> Double {
-        let shown = try XCTUnwrap(canvas.coordinator.publishedImage, "the canvas published no image")
-        let items = canvas.document.strokes.map {
-            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0)
+        let coordinator = canvas.coordinator
+        let shown = try XCTUnwrap(coordinator.composedImage(), "the canvas shows no tiles")
+        let strokes = canvas.document.strokes
+        let ink = InkSnapshot(strokes: strokes, index: StrokeIndex(strokes: strokes),
+                              geometry: Dictionary(uniqueKeysWithValues: zip(strokes.map(\.id),
+                                                                             CommittedRenderer.geometries(for: strokes))),
+                              skipped: [])
+        let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: coordinator.level(for: canvas.viewTransform))
+        var tiles: [(key: TileKey, image: CGImage)] = []
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: keys.count) { i in
+            let tile = RenderCoordinator.draw(keys[i], from: ink, revision: 0, filler: CoreGraphicsTileFiller())
+            if let image = tile.image {
+                lock.withLock { tiles.append((keys[i], image)) }
+            }
         }
         let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
-        CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: canvas.viewTransform)
+        TileBitmap.compose(tiles, at: canvas.viewTransform, in: ctx)
         let reference = try XCTUnwrap(ctx.makeImage())
         return Self.differingFraction(shown, reference)
     }
@@ -255,6 +270,8 @@ final class CanvasBenchmarks: XCTestCase {
         for _ in 0 ..< 3 {
             canvas.resetView()
             try waitUntilSettled(canvas)
+            // Each pinch ends at a level not drawn yet: returning to a cached one fills nothing.
+            canvas.coordinator.cache.removeAll(page: canvas.document.cacheID, except: canvas.coordinator.restingLevel)
             let focus = canvas.viewTransform.toView(inkCentre)
             canvas.gestureBegan()
             frames += paced(frames: Self.gestureFrames) { _ in canvas.zoom(by: k, about: focus) }
@@ -279,6 +296,7 @@ final class CanvasBenchmarks: XCTestCase {
         let start6x = canvas.viewTransform
         var frames: [Double] = []
         var sharp: [Double] = []
+        let before = canvas.coordinator.fillStats
         for _ in 0 ..< 3 {
             canvas.gestureBegan()
             frames += paced(frames: Self.gestureFrames) { n in
@@ -290,29 +308,28 @@ final class CanvasBenchmarks: XCTestCase {
             try waitUntilSettled(canvas)
             sharp.append(Bench.milliseconds(since: start))
         }
+        let fill = canvas.coordinator.fillStats
         XCTAssertNotEqual(canvas.viewTransform, start6x)
         try assertCorrectPixels(canvas, "At 6× after the pan")
         recordGesture("pan.6x_dense", frames: frames, sharp: sharp)
 
-        // What each pan step asks the renderer for today: the screen at the new 6× transform, every
-        // stroke's geometry cached. Timed on its own, as it runs off the main thread.
-        let items = canvas.document.strokes.map {
-            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color,
-                                   geometry: canvas.coordinator.geometryCache[$0.id], stroke: nil)
-        }
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
-        var transform = start6x
-        var steps: [Double] = []
-        for _ in 0 ..< 20 {
-            transform.offset.x -= 10
-            let start = Bench.now()
-            CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
-            _ = ctx.makeImage()
-            steps.append(Bench.milliseconds(since: start))
-        }
-        let step = Stats(steps).median
+        // The render work each pan step costs, off the main thread: the tiles the pans uncovered (with a
+        // tile's margin ahead of the view) filled, spread over their frames.
+        let step = (fill.milliseconds - before.milliseconds) / Double(3 * Self.gestureFrames)
         BenchResults.record("pan.6x_dense.step_render_ms", step, unit: "ms", budget: Self.panStepRenderBudgetMs)
-        check(step, under: Self.panStepRenderBudgetMs, "Render work per pan step at 6× (ms, median)")
+        BenchResults.record("pan.6x_dense.tiles_filled", Double(fill.tilesFilled - before.tilesFilled), unit: "tiles")
+        check(step, under: Self.panStepRenderBudgetMs, "Render work per pan step at 6× (ms, mean)")
+
+        // Back the way the last pass came (untimed): every tile on the way is cached, so nothing is filled.
+        canvas.gestureBegan()
+        _ = paced(frames: Self.gestureFrames) { n in
+            canvas.pan(by: CGPoint(x: n < Self.gestureFrames / 2 ? -10 : 10, y: 3))
+        }
+        canvas.gestureEnded()
+        try waitUntilSettled(canvas)
+        let refilled = canvas.coordinator.fillStats.tilesFilled - fill.tilesFilled
+        BenchResults.record("pan.6x_dense.cached_tiles_filled", Double(refilled), unit: "tiles")
+        XCTAssertEqual(refilled, 0, "a pan over cached tiles filled some again")
     }
 
     private func recordGesture(_ name: String, frames: [Double], sharp: [Double]) {
@@ -329,7 +346,8 @@ final class CanvasBenchmarks: XCTestCase {
 
     /// A 5k-stroke page scrolling into view in continuous mode: `ContinuousCanvasView` gives it a fresh
     /// embedded canvas, places it and lays it out (`makeCanvas`, `place(_:settled:)`, `layoutIfNeeded`);
-    /// timed until its ink is drawn. Pages never restore a `CommittedRaster` while embedded today.
+    /// timed until its ink is drawn. A page seen for the first time: nothing is cached or restored (an
+    /// embedded page keeps no raster until NOT-106), so its tiles in view are filled.
     func testPageEnter5k() throws {
         let suite = "CanvasBenchmarks.\(UUID().uuidString)"
         let controller = try CanvasController(settingsStore: XCTUnwrap(UserDefaults(suiteName: suite)),

@@ -6,8 +6,8 @@ import UIKit
 /// Layers, bottom to top:
 ///  1. `pageLayer` and `templateView` – the paper and its template (the background).
 ///  2. `objectLayer` – the page's objects (see `PageObject`), drawn as vectors at the current transform.
-///  3. `coordinator.layer` – the committed ink: finished strokes, drawn off the main thread by the
-///     `RenderCoordinator` (coalesced full re-renders and incremental commits).
+///  3. `coordinator.layer` – the committed ink: finished strokes in page-space tiles, filled off the main
+///     thread by the `RenderCoordinator` into the shared `TileCache`.
 ///  4. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
 ///  5. `tapeLayer` – the page's tape, which covers the ink (`TapeObject`), then the laser (`LaserView`).
@@ -27,6 +27,11 @@ final class CanvasView: UIView {
     let isEmbedded: Bool
     /// Where the host has put the page, while embedded.
     var placement = ViewTransform()
+    /// While embedded, whether the host is still moving the page (`place(_:settled:)`).
+    var placementMoving = false
+    /// The scale whose tiles the committed layer keeps while zoomed (set by a host that zooms the page
+    /// itself, as continuous scrolling does); nil: the fitted page's.
+    var restingScaleOverride: CGFloat?
     weak var controller: CanvasController? {
         didSet { pencilSettingsDidChange() }
     }
@@ -43,9 +48,9 @@ final class CanvasView: UIView {
 
     /// The committed ink: its surface, geometry cache, strokes waiting to be drawn and render requests.
     let coordinator: RenderCoordinator
-    /// True when the committed layer shows the page as it is, sharp at the current transform: no render,
-    /// raster restore or finished stroke on its way. What the canvas benchmarks wait for after an edit,
-    /// a gesture or a page entering view.
+    /// True when the committed layer shows the page as it is, sharp at the current transform: its tiles in
+    /// view are at the transform's own level and the page's revision, and no render or finished stroke is
+    /// on its way. What the canvas benchmarks wait for after an edit, a gesture or a page entering view.
     var rendersSettled: Bool {
         coordinator.isSettled
     }
@@ -241,7 +246,7 @@ final class CanvasView: UIView {
             endEditingText()
         }
         if newWindow == nil, window != nil, !isEmbedded {
-            coordinator.saveCommittedRaster()
+            coordinator.saveTileRaster()
         }
     }
 
@@ -723,6 +728,14 @@ extension CanvasView: RenderCoordinatorHost {
         viewTransform
     }
 
+    var isMoving: Bool {
+        isEmbedded ? placementMoving : viewport.activeGestureCount > 0 || settleLink != nil
+    }
+
+    var restingScale: CGFloat {
+        restingScaleOverride ?? fittedTransform().scale
+    }
+
     var renderBounds: CGRect {
         bounds
     }
@@ -743,16 +756,12 @@ extension CanvasView: RenderCoordinatorHost {
         setNeedsLayout()
     }
 
-    func renderCoordinator(didPublish image: CGImage) {
-        liveView.underlay = image
+    func renderCoordinatorDidPublish() {
+        liveView.underlay = coordinator.underlay
         scheduleZoomRender()
     }
 
     func renderCoordinatorDidDrawPending(canvasRect: CGRect) {
         invalidateLive(canvasRect: canvasRect)
-    }
-
-    func renderCoordinatorDidRedraw() {
-        liveView.invalidateAll()
     }
 }

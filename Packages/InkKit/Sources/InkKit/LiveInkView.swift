@@ -34,8 +34,9 @@ final class LiveInkView: UIView {
     /// rect. Without it the backdrop is plain `paperColor`.
     var drawPaper: ((CGContext, ViewTransform, CGRect) -> Void)?
 
-    /// The committed image. Multiply ink needs the real backdrop to preview what will be committed.
-    var underlay: CGImage? {
+    /// The committed ink under the live layer, as images of page rects (the committed tiles on screen).
+    /// Multiply ink needs the real backdrop to preview what will be committed.
+    var underlay: [(pageRect: CGRect, image: CGImage)] = [] {
         didSet { for tile in tiles.values where tile.drewBackdrop {
             tile.setNeedsDisplay()
         } }
@@ -423,8 +424,7 @@ final class LiveInkView: UIView {
             let brush = stroke.stroke.brush
             let color = stroke.stroke.color
             if brush.usesPattern {
-                PencilTexture.prepareContext(ctx, phase: CGPoint(x: bakeTransform.offset.x - tileFrame.minX,
-                                                                 y: bakeTransform.offset.y - tileFrame.minY))
+                PencilTexture.pinToPage(ctx) // the bake context is in canvas space
             }
             for run in stroke.chunkRuns(chunk) {
                 let fill = entry.previewFill ?? StrokeRenderer.fillColor(for: brush, color: color, alpha: run.alpha)
@@ -485,7 +485,7 @@ final class LiveInkView: UIView {
         if dirty.contains(tileFrame) {
             tile.drewBackdrop = false
         }
-        if let underlay, items.contains(where: { $0.entry.stroke.stroke.brush.blend == .multiply }) {
+        if !underlay.isEmpty, items.contains(where: { $0.entry.stroke.stroke.brush.blend == .multiply }) {
             tile.drewBackdrop = true
             if let drawPaper {
                 drawPaper(ctx, bakeTransform, tileFrame)
@@ -493,8 +493,12 @@ final class LiveInkView: UIView {
                 ctx.setFillColor(paperColor)
                 ctx.fill(tileFrame)
             }
-            let size = CGSize(width: CGFloat(underlay.width) / scale, height: CGFloat(underlay.height) / scale)
-            drawImage(underlay, in: CGRect(origin: .zero, size: size), ctx: ctx)
+            for (pageRect, image) in underlay {
+                let rect = bakeTransform.toView(pageRect)
+                if rect.intersects(tileFrame) {
+                    drawImage(image, in: rect, ctx: ctx)
+                }
+            }
         }
 
         for item in items {
@@ -517,8 +521,7 @@ final class LiveInkView: UIView {
                     ctx.setBlendMode(.copy)
                 }
                 if stroke.brush.usesPattern {
-                    PencilTexture.prepareContext(ctx, phase: CGPoint(x: bakeTransform.offset.x - tileFrame.minX,
-                                                                     y: bakeTransform.offset.y - tileFrame.minY))
+                    PencilTexture.pinToPage(ctx) // now in canvas space
                 }
                 for run in item.hot {
                     let fill = preview ?? StrokeRenderer.fillColor(for: stroke.brush, color: stroke.color,

@@ -4,8 +4,8 @@ import Foundation
 import Testing
 
 @MainActor
-@Suite("Committed layer: banded rendering and the page raster")
-struct CommittedRasterTests {
+@Suite("Committed renderer: banded rendering")
+struct CommittedRendererTests {
     private let pixels = CGSize(width: 600, height: 800)
     private let scale: CGFloat = 2
     private var bounds: CGRect {
@@ -59,42 +59,5 @@ struct CommittedRasterTests {
             visible += 1
         }
         #expect(visible <= serial.count / 10000, "\(visible) bytes differ by more than 3")
-    }
-
-    @Test func rasterRestoresTheSamePixels() throws {
-        let shown = try render(page(30))
-        let image = try #require(shown.makeImage())
-        let raster = try #require(CommittedRaster(image: image, revision: 4, transform: transform, scale: scale))
-        #expect(raster.compressed.count < shown.bytesPerRow * shown.height / 2)
-
-        let reopened = try #require(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: scale))
-        #expect(raster.restore(into: reopened))
-        #expect(bytes(reopened) == bytes(shown))
-    }
-
-    @Test func rasterOnlyStandsInForTheSamePageAndBitmap() throws {
-        let image = try #require(try render(page(5)).makeImage())
-        let raster = try #require(CommittedRaster(image: image, revision: 4, transform: transform, scale: scale))
-        #expect(raster.matches(revision: 4, pixelSize: pixels, scale: scale, transform: transform))
-        #expect(!raster.matches(revision: 5, pixelSize: pixels, scale: scale, transform: transform))
-        #expect(!raster.matches(revision: 4, pixelSize: CGSize(width: 800, height: 600), scale: scale,
-                                transform: transform))
-        #expect(!raster.matches(revision: 4, pixelSize: pixels, scale: 3, transform: transform))
-        var moved = transform
-        moved.offset.x += 1
-        #expect(!raster.matches(revision: 4, pixelSize: pixels, scale: scale, transform: moved))
-
-        let other = try #require(CommittedRenderer.makeBitmap(pixelSize: CGSize(width: 800, height: 600), scale: scale))
-        #expect(!raster.restore(into: other))
-    }
-
-    @Test func documentDropsItsRasterWhenThePageChanges() throws {
-        let doc = CanvasDocument()
-        doc.add(makeStroke(at: CGPoint(x: 10, y: 10)))
-        let image = try #require(try render(doc.snapshot().strokes).makeImage())
-        doc.committedRaster = CommittedRaster(image: image, revision: doc.revision, transform: transform, scale: scale)
-        #expect(doc.committedRaster != nil)
-        doc.undo()
-        #expect(doc.committedRaster == nil)
     }
 }

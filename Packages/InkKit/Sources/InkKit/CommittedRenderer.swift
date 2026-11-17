@@ -1,17 +1,14 @@
 import CoreGraphics
 import Foundation
 
-/// The canvas's committed layer: one screen-resolution bitmap holding every finished stroke.
+/// Bitmaps laid out like the committed tiles (`makeBitmap`, `bitmapInfo`), stroke geometry for many strokes
+/// built on every core (`geometries(for:)`), and the whole-screen render the committed layer used before
+/// tiles (NOT-102).
 ///
-/// `CanvasView` runs `render` on its render queue for every full re-render (opening a page without a
-/// `CommittedRaster`, undo, erase, the end of a zoom or pan). The benchmarks call the same code, so what
-/// they time is what the canvas does.
-///
-/// A full render costs about 2 ms of Core Graphics fill per handwritten word at the fitted zoom, so it
-/// spreads the work over every core: stroke geometry is built in parallel, then the bitmap is split into
-/// horizontal bands that are filled at the same time, each band drawing, in page order, the strokes
-/// that reach into it. That is still seconds for a dense page, which is why reopening a page restores
-/// its `CommittedRaster` instead.
+/// `render` clears a bitmap and fills every item that shows through it, splitting the bitmap into
+/// horizontal bands filled at the same time, each drawing in page order the strokes that reach it. The
+/// canvas no longer calls it (it fills tiles: `RenderCoordinator`, `CoreGraphicsTileFiller`); the benchmarks'
+/// whole-page timings (`full_redraw.*`, `page_open_cold.*`) and some tests still do. NOT-112 retires it.
 enum CommittedRenderer {
     /// One stroke to draw: its geometry if the canvas has it cached, otherwise the stroke to build it from.
     struct Item {

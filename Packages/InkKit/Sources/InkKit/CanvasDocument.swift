@@ -102,15 +102,23 @@ public final class CanvasDocument: Identifiable {
     /// of the page is current while its revision matches.
     public private(set) var revision = 0 {
         didSet {
-            if committedRaster?.revision != revision {
-                committedRaster = nil
+            if tileRaster?.revision != revision {
+                tileRaster = nil
             }
         }
     }
 
-    /// The page's committed layer as the canvas last showed it, fitted, for reopening it without
-    /// filling every stroke again. Dropped as soon as the page changes.
-    var committedRaster: CommittedRaster?
+    /// The page's fitted-level committed tiles, compressed, as the canvas left them when the page closed,
+    /// for reopening it without filling every stroke again. Dropped as soon as the page changes.
+    var tileRaster: TileRaster?
+
+    /// Names this page in the shared `TileCache`. Not the page's `id`: a page read from its file again is
+    /// a new document, starting again at revision 0, so the tiles of the old one must not pass for its.
+    nonisolated let cacheID = UUID()
+
+    deinit {
+        TileCache.shared.removeAll(page: cacheID)
+    }
 
     /// Goes up whenever the page's objects change (each edit, undo and redo that touches them). Separate
     /// from `revision`, which is the ink's: objects aren't in the committed ink layer, so changing one
@@ -746,7 +754,7 @@ public final class CanvasDocument: Identifiable {
         page.strokeIndex = strokeIndex
         page.revision = revision
         page.objectsRevision = objectsRevision
-        page.committedRaster = committedRaster
+        page.tileRaster = tileRaster
         return page
     }
 

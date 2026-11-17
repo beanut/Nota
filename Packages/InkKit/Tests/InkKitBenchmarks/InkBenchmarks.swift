@@ -284,7 +284,7 @@ final class InkBenchmarks: XCTestCase {
     }
 
     /// Redrawing a page of 500 crayon strokes into a screen-sized committed bitmap (an undo or the end of
-    /// a zoom), one GPU pass per stroke and band. No budget: page open restores the `CommittedRaster`.
+    /// a zoom), one GPU pass per stroke and band. No budget: page open restores the page's `TileRaster`.
     func testCrayonPageRedraw() throws {
         let page = corpus.distinctPage(strokes: 500).map { stroke in
             var stroke = stroke
@@ -305,54 +305,56 @@ final class InkBenchmarks: XCTestCase {
 
     // MARK: Page open
 
-    /// Opening a page the canvas has shown before: a fresh screen-sized committed bitmap and the page's
-    /// `CommittedRaster` (what the canvas left with the document when the page closed) decompressed into
-    /// it, exactly as `CanvasView` does instead of a full render. This is the budgeted page open.
+    /// Opening a page the canvas has shown before, once the tile cache has let its tiles go: the page's
+    /// `TileRaster` (its fitted-level tiles, compressed, left with the document when the page closed)
+    /// decompressed tile by tile, exactly as the canvas's render job does instead of filling them. This is
+    /// the budgeted page open; with the tiles still cached, opening fills and restores nothing.
     /// Ink isn't stored on disk yet; decoding it, and the raster with it, joins this measurement when it is.
     func testPageOpen5k() throws {
-        let (shown, transform) = try fittedPage(strokes: 5000)
-        let saved = try XCTUnwrap(CommittedRaster(image: shown, revision: 1, transform: transform,
-                                                  scale: Bench.displayScale))
-        let pixels = Bench.pixelSize
-        var restored: CGImage?
+        let (tiles, level) = try fittedTiles(strokes: 5000)
+        let saved = try XCTUnwrap(TileRaster(tiles: tiles, revision: 1, level: level))
+        var restored: [Tile?] = []
         let times = timed {
-            guard let ctx = CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale),
-                  saved.matches(revision: 1, pixelSize: pixels, scale: Bench.displayScale, transform: transform),
-                  saved.restore(into: ctx)
-            else {
-                return XCTFail("Couldn't restore the page raster")
-            }
-            restored = ctx.makeImage()
+            restored = tiles.map { key, _ in saved.holds(key, revision: 1) ? saved.restore(key) : nil }
         }
-        let image = try XCTUnwrap(restored)
-        XCTAssertEqual(image.dataProvider?.data as Data?, shown.dataProvider?.data as Data?,
-                       "The reopened page must be pixel for pixel the page that was shown")
+        for ((_, image), tile) in zip(tiles, restored) {
+            XCTAssertEqual(tile?.image?.dataProvider?.data as Data?, image?.dataProvider?.data as Data?,
+                           "The reopened page must be pixel for pixel the page that was shown")
+        }
         BenchResults.record("page_open.5k_ms", Stats(times).median, unit: "ms", budget: Self.pageOpenBudgetMs)
         check(Stats(times).median, under: Self.pageOpenBudgetMs, "Page open with 5000 strokes (median)")
     }
 
-    /// Leaving a page: compressing the 5k-stroke page's committed layer into its `CommittedRaster`. Runs
-    /// in the background after the page closes, so it has no budget, but it bounds how soon a page
-    /// reopened straight away can be restored rather than drawn.
+    /// Leaving a page: compressing the 5k-stroke page's fitted-level tiles into its `TileRaster`. Runs in
+    /// the background after the page closes, so it has no budget, but it bounds how soon a page reopened
+    /// straight away (and evicted from the cache) can be restored rather than drawn.
     func testPageRasterCapture5k() throws {
-        let (shown, transform) = try fittedPage(strokes: 5000)
-        var raster: CommittedRaster?
+        let (tiles, level) = try fittedTiles(strokes: 5000)
+        var raster: TileRaster?
         let times = timed(iterations: 3) {
-            raster = CommittedRaster(image: shown, revision: 1, transform: transform, scale: Bench.displayScale)
+            raster = TileRaster(tiles: tiles, revision: 1, level: level)
         }
         let saved = try XCTUnwrap(raster)
         BenchResults.record("page_raster.capture_5k_ms", Stats(times).median, unit: "ms")
-        BenchResults.record("page_raster.5k_kb", Double(saved.compressed.count) / 1024, unit: "KB")
+        BenchResults.record("page_raster.5k_kb", Double(saved.byteCount) / 1024, unit: "KB")
     }
 
-    /// A page of `count` strokes drawn fitted into a committed bitmap, as the canvas shows it.
-    private func fittedPage(strokes count: Int) throws -> (CGImage, ViewTransform) {
+    /// A page of `count` strokes as the fitted canvas's tiles, filled on every core.
+    private func fittedTiles(strokes count: Int) throws -> ([(key: TileKey, image: CGImage?)], TileLevel) {
         let page = corpus.page(strokes: count)
-        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0) }
-        let transform = Bench.fittedTransform(for: corpus.pageSize)
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
-        CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
-        return try (XCTUnwrap(ctx.makeImage()), transform)
+        let ink = InkSnapshot(strokes: page, index: StrokeIndex(strokes: page),
+                              geometry: Dictionary(uniqueKeysWithValues: zip(page.map(\.id),
+                                                                             CommittedRenderer.geometries(for: page))),
+                              skipped: [])
+        let level = TileLevel(Bench.fittedTransform(for: corpus.pageSize), displayScale: Bench.displayScale)
+        let keys = TileKey.keys(covering: corpus.pageSize.bounds, page: UUID(), level: level)
+        var images = [CGImage?](repeating: nil, count: keys.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: keys.count) { i in
+            let image = RenderCoordinator.draw(keys[i], from: ink, revision: 1, filler: CoreGraphicsTileFiller()).image
+            lock.withLock { images[i] = image }
+        }
+        return (Array(zip(keys, images)).map { (key: $0.0, image: $0.1) }, level)
     }
 
     /// Opening a page with no raster to restore (the first time it's shown at this size): a fresh

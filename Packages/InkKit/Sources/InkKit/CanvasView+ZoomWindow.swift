@@ -202,11 +202,11 @@ extension CanvasView {
         let bounds = CGRect(origin: .zero, size: panel.inkFrame.size)
         let included = Set(zoomHeld.map { ObjectIdentifier($0) })
 
-        coordinator.renderSnapshot(bounds: bounds, transform: transform) { [weak self] image in
+        coordinator.renderSnapshot(bounds: bounds, transform: transform) { [weak self] image, drawnAt in
             guard let self else { return }
             zoomRenderInFlight = false
             if generation == zoomGeneration, let panel = zoomPanel {
-                panel.publish(image, transform: transform)
+                panel.publish(image, transform: drawnAt)
                 if !included.isEmpty {
                     zoomHeld.removeAll { included.contains(ObjectIdentifier($0)) }
                     panel.liveView.invalidateAll()
