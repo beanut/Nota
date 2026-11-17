@@ -25,19 +25,20 @@ extension CanvasView {
         if transform != placement {
             placement = transform
             viewTransform = transform
-            updateCommittedLayerTransform()
+            coordinator.updateLayerTransform()
             updatePageChrome()
             liveView.follow(viewTransform)
             updateLassoOverlay()
             if !settled {
-                requestFullRender()
+                coordinator.requestRender()
             }
         }
         if settled {
             liveView.settle(at: viewTransform)
             // A render already on its way to this transform will show it; asking again only draws it twice.
-            if bitmapTransform != viewTransform || (!fullRenderInFlight && displayedTransform != viewTransform) {
-                requestFullRender()
+            if coordinator.targetTransform != viewTransform
+                || (!coordinator.isRendering && coordinator.displayedTransform != viewTransform) {
+                coordinator.requestRender()
             }
         }
     }

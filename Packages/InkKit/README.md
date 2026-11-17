@@ -40,7 +40,10 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `TemplateView.swift` | The canvas layer that redraws the template at the current zoom, between the paper and the ink |
 | `TemplateMenu.swift` | The page bar's template pill: built-ins, paper colour, PDF or image, use for all pages |
 | `ViewTransform.swift` | Canvas → view mapping, zoom limits and page-swipe detection |
-| `CanvasView.swift` | `UIView` that handles raw touches, gestures, palm rejection, finger ink, `UIPencilInteraction`, hover and the scribble gestures. Owns the page, the cached committed bitmap and the lasso overlay. Redraws from the document when another canvas on the same page changes it |
+| `CanvasView.swift` | The canvas `UIView`: its layers, the gesture recognizers, `UIPencilInteraction`, hover, the HUD and the lasso overlay. Composes input, viewport and the render coordinator below; redraws from the document when another canvas on the same page changes it |
+| `CanvasView+Input.swift` / `CanvasInput.swift` | Input: touch phases, coalesced and predicted samples, estimated-property updates (`EstimateTracker`), palm rejection and finger ink, feeding `LiveStroke`; a finished stroke goes to the render coordinator |
+| `CanvasView+Viewport.swift` / `CanvasViewport.swift` | Viewport: the view transform, the fitted transform, pan and pinch steps, page swipes, the slide back to the fitted page, cancelling an incidental pan or pinch. Pan and pinch steps (and the fitted transform) keep the offset on whole device pixels, so a gesture settles on the pixel grid with no extra render |
+| `RenderCoordinator.swift` | The committed side: the committed surface (one bitmap today), the geometry cache, finished strokes waiting to be drawn (`PendingStroke`), revision tracking, render requests and the settled state, the page's `CommittedRaster` and the zoom panel's renders. Knows nothing of touches; NOT-102 swaps tiles in behind it |
 | `PencilSettings.swift` | `PencilSettings` (double-tap and squeeze actions, finger drawing, palm rejection, handedness, scribble toggles) and their persistence, quick-palette placement, and `PalmRejector` |
 | `PencilSettingsView.swift` | The More menu's Apple Pencil settings |
 | `Scribble.swift` | Circle-to-select detection and the strokes a loop selects |
@@ -741,7 +744,7 @@ differ in 0.002%. So:
 
 | Type | Issue | Role |
 | --- | --- | --- |
-| `RenderCoordinator` | NOT-100 | The committed side pulled out of `CanvasView`: geometry cache, pending strokes, revision tracking, render requests. `CanvasView`, embedded canvases and the zoom panel talk to it; it owns no touches. Its first version wraps today's bitmap, so NOT-102 swaps the inside |
+| `RenderCoordinator` | NOT-100 (landed) | The committed side pulled out of `CanvasView`: geometry cache, pending strokes, revision tracking, render requests. `CanvasView`, embedded canvases and the zoom panel talk to it; it owns no touches. Wraps today's bitmap behind `invalidate(rect:)` / `invalidateAll()`, `strokeCommitted(_:geometry:revisionBefore:)`, `visibleRect(for:)`, `isSettled` (what `rendersSettled` reads) and `publishedImage` (what `CanvasBenchmarks.mismatch(of:)` reads), so NOT-102 swaps the inside. The viewport already keeps the offset on device pixels (each pan or pinch step, and the fitted transform), so a settled transform is pixel-aligned |
 | `StrokeIndex` | NOT-101 | Per page, owned by `CanvasDocument`, updated by every command. `strokes(in: CGRect) -> [Int]` in page (z) order, `objects(in:)`, `nearest(to:limit:)`. A uniform grid (32 pt cells in the spike) is enough |
 | `TileLevel`, `TileKey` | NOT-102 | `TileLevel(pixelsPerPoint:)`; `TileKey(page: UUID, level: TileLevel, col: Int, row: Int)`, `TileKey.side = 256`, `rect` in page points, `keys(covering: CGRect, level:)` |
 | `TileCache` | NOT-102 | One per notebook, shared by every canvas showing a page. Thread-safe. `tile(for: TileKey) -> Tile?` (`image`, `revision`, `isStale`), `store(_:for:)`, `invalidate(page:rect:)` (marks stale at every level), LRU eviction under a byte budget, off-screen tiles first |
@@ -833,6 +836,10 @@ More › Scroll Direction › Vertical (`PageLayoutMode.continuous`, the default
 - `coalescedTouches(for:)` delivers every Pencil sample (about 240 Hz) instead of one per 120 Hz frame.
 - `predictedTouches(for:)` only extends the drawn tail and is discarded on the next real event.
 - `touchesEstimatedPropertiesUpdated` patches refined force and tilt into both live and committed strokes.
+- Input (`CanvasView+Input`), the viewport (`CanvasView+Viewport`) and the committed ink (`RenderCoordinator`) are
+  separate (NOT-100): input feeds `LiveStroke` and hands finished strokes to the coordinator
+  (`strokeCommitted`), the viewport moves the transform and asks the coordinator for ink at it, and only the
+  coordinator touches a `CGContext` for committed ink.
 - Pan, pinch and swipe recognizers accept only `.direct` (finger) touches, and they won't begin while the Pencil is down.
 - The system three-finger editing gestures are disabled (`editingInteractionConfiguration = .none`) so the app's own undo/redo swipe takes over.
 

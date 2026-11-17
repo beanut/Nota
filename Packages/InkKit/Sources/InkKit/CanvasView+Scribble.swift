@@ -59,7 +59,7 @@ extension CanvasView {
         // drag what it caught.
         discardLiveStroke()
         controller.select(.lasso)
-        dropPending(ids) // they're redrawn where they move to
+        coordinator.dropPending(ids) // they're redrawn where they move to
         select(PageSelection(strokeIDs: ids))
         if let box = selectionBox {
             lassoSession = .transforming(SelectionDrag(handle: .move, start: inputTransform.toCanvas(last.location),

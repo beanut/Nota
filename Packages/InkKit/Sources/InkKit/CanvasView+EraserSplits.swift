@@ -8,7 +8,7 @@ extension CanvasView {
     /// above each stroke that overlaps it, so two partial erases that together sever a line count too.
     /// `hulls` are the eraser's own, reused from its `LiveStroke` (identical to a fresh build once it ended).
     func splits(cutBy eraser: Stroke, hulls eraserOwnHulls: [Hull]) -> [CanvasDocument.Split] {
-        let eraserBounds = geometry(for: eraser).bounds
+        let eraserBounds = coordinator.geometry(for: eraser).bounds
         guard !eraserBounds.isNull else { return [] }
         let strokes = document.strokes
         var eraserHulls: [UUID: [Hull]] = [eraser.id: eraserOwnHulls]
@@ -23,12 +23,12 @@ extension CanvasView {
 
         var splits: [CanvasDocument.Split] = []
         for (index, stroke) in strokes.enumerated() where !stroke.brush.erases {
-            let bounds = geometry(for: stroke).bounds
+            let bounds = coordinator.geometry(for: stroke).bounds
             guard bounds.intersects(eraserBounds) else { continue }
             let region = bounds.insetBy(dx: -1, dy: -1)
             var coverage = StrokeSplitter.Coverage()
             for other in strokes[(index + 1)...] where other.brush.erases
-                && geometry(for: other).bounds.intersects(region) {
+                && coordinator.geometry(for: other).bounds.intersects(region) {
                 coverage.add(hulls(of: other), within: region)
             }
             coverage.add(hulls(of: eraser), within: region)
@@ -82,7 +82,7 @@ extension CanvasView {
         var cuts: [(id: UUID, pieces: [Stroke])] = []
         // Pixel-eraser strokes are invisible; removing them would resurrect ink, so they're skipped.
         for stroke in document.strokes where session.target.erases(stroke.brush) {
-            let bounds = geometry(for: stroke).bounds
+            let bounds = coordinator.geometry(for: stroke).bounds
             guard bounds.intersects(sweep) else { continue }
             if session.isStandard {
                 if let pieces = StrokeSplitter.remainder(of: stroke, erasedFrom: from, to: point, radius: radius) {
@@ -100,17 +100,17 @@ extension CanvasView {
         }
         if !hits.isEmpty {
             for id in hits {
-                forgetGeometry(id)
+                coordinator.forgetGeometry(id)
             }
             session.removals += document.remove(ids: hits)
         }
         for cut in cuts {
-            forgetGeometry(cut.id)
+            coordinator.forgetGeometry(cut.id)
             document.replace(id: cut.id, with: cut.pieces)
         }
         if !hits.isEmpty || !cuts.isEmpty {
             dropOrphanedPendingStrokes()
-            requestFullRender()
+            coordinator.invalidateAll()
         }
         session.last = point
         eraseSession = session

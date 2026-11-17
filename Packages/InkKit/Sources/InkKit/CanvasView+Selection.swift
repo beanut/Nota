@@ -18,10 +18,10 @@ extension CanvasView {
         let ids = document.lastReshapedIDs
         guard !ids.isEmpty else { return }
         for id in ids {
-            forgetGeometry(id)
+            coordinator.forgetGeometry(id)
         }
         // Moved strokes may still be waiting in `pending` with stale geometry; the full render redraws them.
-        dropPending(ids)
+        coordinator.dropPending(ids)
         if !selection.isEmpty {
             updateSelectionBox()
         }
@@ -29,7 +29,7 @@ extension CanvasView {
 
     /// Fits a fresh box around the selection (see `SelectionGeometry.box`) and tells the controller.
     func updateSelectionBox() {
-        let strokeBounds = document.strokes.filter { selection.strokeIDs.contains($0.id) }.map { geometry(for: $0).bounds }
+        let strokeBounds = document.strokes.filter { selection.strokeIDs.contains($0.id) }.map { coordinator.geometry(for: $0).bounds }
         let objects = document.objects.filter { selection.objectIDs.contains($0.id) }
         selectionBox = SelectionGeometry.box(strokeBounds: strokeBounds, objects: objects)
         // Only armed while there's something to drag out, so its long press never touches the ink path.
@@ -58,14 +58,14 @@ extension CanvasView {
         guard !selection.isEmpty else { return }
         let deleted = selection
         for id in deleted.strokeIDs {
-            forgetGeometry(id)
+            coordinator.forgetGeometry(id)
         }
         editDocument { document.delete(deleted) }
         select(.empty)
         dropOrphanedPendingStrokes()
         refreshObjects()
         if !deleted.strokeIDs.isEmpty {
-            requestFullRender()
+            coordinator.invalidateAll()
         }
     }
 
@@ -92,7 +92,7 @@ extension CanvasView {
             guard !stroke.brush.erases else { return nil }
             let path = stroke.points.map(\.location)
             let radius = stroke.brush.maxWidth / 2
-            let bounds = geometryCache[stroke.id]?.bounds
+            let bounds = coordinator.geometryCache[stroke.id]?.bounds
                 ?? LassoGeometry.bounds(of: path).insetBy(dx: -radius, dy: -radius)
             guard bounds.intersects(region) else { return nil }
             return SelectionGeometry.StrokeShape(id: stroke.id, path: path, bounds: bounds, radius: radius)
@@ -120,7 +120,7 @@ extension CanvasView {
             }
             if let box = selectionBox, !selection.isEmpty, let handle = selectionHandle(at: p, box: box) {
                 // Dragging the selection or a handle transforms it. Pending strokes are redrawn by the full render.
-                dropPending(selection.strokeIDs)
+                coordinator.dropPending(selection.strokeIDs)
                 lassoSession = .transforming(SelectionDrag(handle: handle, start: p, box: box,
                                                            session: document.beginTransform(selection)))
             } else {
@@ -158,11 +158,11 @@ extension CanvasView {
     /// Shows the drag's strokes and objects where it has put them.
     func preview(_ drag: SelectionDrag) {
         for stroke in drag.session.strokes {
-            forgetGeometry(stroke.id)
+            coordinator.forgetGeometry(stroke.id)
         }
         document.previewTransform(drag.session, by: drag.transform)
         if !drag.session.strokes.isEmpty {
-            requestFullRender()
+            coordinator.invalidateAll()
         }
         if !drag.session.objects.isEmpty {
             refreshObjects()
@@ -208,10 +208,10 @@ extension CanvasView {
             } else {
                 document.cancelTransform(drag.session)
                 for stroke in drag.session.strokes {
-                    forgetGeometry(stroke.id)
+                    coordinator.forgetGeometry(stroke.id)
                 }
                 if !drag.session.strokes.isEmpty {
-                    requestFullRender()
+                    coordinator.invalidateAll()
                 }
                 refreshObjects()
                 selectionBox = drag.box

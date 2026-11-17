@@ -103,7 +103,7 @@ final class CanvasBenchmarks: XCTestCase {
     /// The fraction of pixels in what `canvas` shows that differ from the page drawn from scratch at the
     /// same transform: 0 when its pixels are correct.
     private func mismatch(of canvas: CanvasView) throws -> Double {
-        let shown = try XCTUnwrap(canvas.liveView.underlay, "the canvas published no image")
+        let shown = try XCTUnwrap(canvas.coordinator.publishedImage, "the canvas published no image")
         let items = canvas.document.strokes.map {
             CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0)
         }
@@ -298,7 +298,7 @@ final class CanvasBenchmarks: XCTestCase {
         // stroke's geometry cached. Timed on its own, as it runs off the main thread.
         let items = canvas.document.strokes.map {
             CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color,
-                                   geometry: canvas.geometryCache[$0.id], stroke: nil)
+                                   geometry: canvas.coordinator.geometryCache[$0.id], stroke: nil)
         }
         let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
         var transform = start6x
