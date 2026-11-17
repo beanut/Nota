@@ -61,10 +61,14 @@ extension CanvasView {
         if let cached = coordinator.cachedScale(near: viewTransform.scale), cached != viewTransform.scale {
             viewport.zoom(by: cached / viewTransform.scale, about: CGPoint(x: bounds.midX, y: bounds.midY),
                           fitted: fittedTransform(), displayScale: displayScale)
+            // Exactly the level's scale: a hair off (`scale × ratio` rounds) is another level, filled afresh.
+            viewTransform.scale = cached
             moved = true
         }
-        if viewport.settleOnPixelGrid(displayScale: displayScale) || moved {
-            updatePageChrome()
+        let settled = viewport.settleOnPixelGrid(displayScale: displayScale) || moved
+        // Also draws the template and objects sharp again, scaled until now like the ink.
+        updatePageChrome()
+        if settled {
             updateLassoOverlay()
             controller?.zoomDidChange(viewTransform.scale)
         }

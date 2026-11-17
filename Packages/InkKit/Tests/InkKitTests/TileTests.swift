@@ -246,6 +246,25 @@ struct TileCacheTests {
         #expect(cache.tile(for: key(0, level: 1)) == nil || cache.tile(for: key(6)) == nil)
     }
 
+    @Test func levelsZoomedThroughGoBeforeTheShownLevelsMargin() {
+        let tileBytes = 256 * 256 * 4
+        let cache = TileCache(byteBudget: tileBytes * 4)
+        let owner = ObjectIdentifier(cache)
+        cache.setInterest(owner, page: page, visible: [key(0)], resting: TileLevel(pixelsPerPoint: 1),
+                          shown: [TileLevel(pixelsPerPoint: 2)])
+        cache.store(Tile(image: Self.image, revision: 1), for: key(0)) // on screen
+        cache.store(Tile(image: Self.image, revision: 1), for: key(0, level: 3)) // a level zoomed through
+        cache.store(Tile(image: Self.image, revision: 1), for: key(1)) // the shown level's margin
+        cache.store(Tile(image: Self.image, revision: 1), for: key(0, level: 1)) // resting
+        _ = cache.tile(for: key(0, level: 3)) // used since the margin tile was
+        // Over budget: evicted down to 90% of it, two tiles.
+        cache.store(Tile(image: Self.image, revision: 1), for: key(2))
+        #expect(cache.tile(for: key(0, level: 3)) == nil, "a level no one shows goes first, though used later")
+        #expect(cache.tile(for: key(1)) == nil, "then the shown level's least recently used margin")
+        #expect(cache.tile(for: key(0)) != nil && cache.tile(for: key(2)) != nil)
+        #expect(cache.tile(for: key(0, level: 1)) != nil, "the resting level goes last")
+    }
+
     @Test func aRefillNeverReplacesANewerRevision() {
         let cache = TileCache(byteBudget: 1 << 30)
         cache.store(Tile(image: nil, revision: 5), for: key(0))

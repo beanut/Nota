@@ -66,6 +66,8 @@ struct FillStats: Equatable {
     var tilesRefilledInPart = 0
     /// Wall time during which any of the coordinator's tile fills was running, in milliseconds.
     var milliseconds = 0.0
+    /// Every fill's own time added up (more than `milliseconds` when fills ran side by side), in milliseconds.
+    var fillMilliseconds = 0.0
 }
 
 /// Time spans (uptime nanoseconds), merged where they overlap: how long anything was running when many
@@ -119,14 +121,23 @@ final class RenderCoordinator {
     /// The layer showing the committed ink. The host puts it in its view hierarchy; the coordinator sizes it
     /// (`resize(to:scale:)`) and lays its tiles out at the host's transform (`updateLayerTransform()`).
     let layer = CALayer()
-    /// The displayed level's tiles, over the resting level's where the displayed level has none.
+    /// The displayed level's tiles, over the level shown before it (`underLevel`) where the displayed level
+    /// has none yet, over the resting level's where neither has (NOT-105). Each lower level sits in a host
+    /// masked away wherever a level above it has a tile, so blurrier ink never shows around the sharp.
     private let current = TileLayerGrid()
+    private let under = TileLayerGrid()
+    private let underHost = CALayer()
+    private let underMask = CAShapeLayer()
     private let fallback = TileLayerGrid()
     private let fallbackHost = CALayer()
     private let fallbackMask = CAShapeLayer()
 
-    /// The level whose tiles are on screen (nil before any are).
+    /// The level whose tiles are on screen (nil before any are). Settled, it's the transform's own level,
+    /// shown as its tiles land (centre-out) over the level shown before.
     private(set) var displayedLevel: TileLevel?
+    /// The level displayed before the current one, scaled under it until the current level's tiles in view
+    /// have all landed (nil when there's none, or it's the resting level, which is always under).
+    private(set) var underLevel: TileLevel?
     /// The last transform the tiles were laid out at while showing its own level.
     private(set) var displayedTransform = ViewTransform()
     /// Where render work runs: tile fills, finished strokes, the zoom panel, rasters, geometry warm-up.
@@ -184,14 +195,17 @@ final class RenderCoordinator {
         let version: Int
         let revision: Int
         let shown: TileLevel?
+        let under: TileLevel?
         let want: TileLevel
         let cols: ClosedRange<Int>?
         let rows: ClosedRange<Int>?
+        /// The tiles in view of the levels shown under it (the level before, the resting one), for a layout.
+        let below: [ClosedRange<Int>?]
         let moving: Bool
     }
 
     /// `level`'s tiles in view at `t` (with a tile's margin), against what's cached now. `want` is the level
-    /// being asked for: a layout leaves it out (it only depends on the level shown), a fill request doesn't.
+    /// being asked for: a layout leaves it out (it only depends on the levels shown), a fill request doesn't.
     private func layoutKey(level: TileLevel, transform t: ViewTransform, margin: Bool, want: TileLevel? = nil) -> LayoutKey {
         var rect = visibleRect(for: t)
         if margin {
@@ -199,9 +213,17 @@ final class RenderCoordinator {
             rect = rect.insetBy(dx: -pad, dy: -pad)
         }
         let range = TileKey.range(covering: rect.intersection(document.pageBounds), level: level)
+        var below: [ClosedRange<Int>?] = []
+        if want == nil {
+            let inView = visibleRect(for: t).intersection(document.pageBounds)
+            for lower in [underLevel, restingLevel] {
+                let r = lower.flatMap { TileKey.range(covering: inView, level: $0) }
+                below += [r?.cols, r?.rows]
+            }
+        }
         return LayoutKey(version: contentVersion, revision: document.inkVersion, shown: displayedLevel,
-                         want: want ?? level, cols: range?.cols, rows: range?.rows,
-                         moving: host?.isMoving ?? false)
+                         under: underLevel, want: want ?? level, cols: range?.cols, rows: range?.rows,
+                         below: below, moving: host?.isMoving ?? false)
     }
 
     /// The tiles held for this view may have changed: the next layout and fill request look again.
@@ -244,12 +266,18 @@ final class RenderCoordinator {
         self.scheduler = scheduler
         cancellation = RenderCancellation(parent: lifetime)
         layer.anchorPoint = .zero
-        fallbackHost.anchorPoint = .zero
-        fallbackMask.fillRule = .evenOdd
-        fallbackHost.mask = fallbackMask
-        fallbackHost.isHidden = true
+        for (host, mask) in [(underHost, underMask), (fallbackHost, fallbackMask)] {
+            host.anchorPoint = .zero
+            mask.fillRule = .evenOdd
+            host.mask = mask
+            host.isHidden = true
+        }
+        // Resting under the level before, both under the current one; masks nest, so the resting level
+        // shows only where neither level above it has a tile.
         fallbackHost.addSublayer(fallback.layer)
-        layer.addSublayer(fallbackHost)
+        underHost.addSublayer(fallbackHost)
+        underHost.addSublayer(under.layer)
+        layer.addSublayer(underHost)
         layer.addSublayer(current.layer)
     }
 
@@ -337,7 +365,8 @@ final class RenderCoordinator {
     /// gesture ending there snaps to it, so the tiles already drawn are reused.
     func cachedScale(near scale: CGFloat) -> CGFloat? {
         let wanted = TileLevel(pixelsPerPoint: scale * self.scale)
-        let levels = cache.levels(page: page).union([restingLevel])
+        // Levels being filled count too: a pinch held at a scale started on its tiles (`steadyLevel`).
+        let levels = cache.levels(page: page).union([restingLevel]).union(fills.keys.map(\.level))
         return levels.filter { $0.isNear(wanted) }
             .min { abs($0.pixelsPerPoint - wanted.pixelsPerPoint) < abs($1.pixelsPerPoint - wanted.pixelsPerPoint) }
             .map { $0.pixelsPerPoint / self.scale }
@@ -356,8 +385,10 @@ final class RenderCoordinator {
         guard pixels != pixelSize || newScale != scale else { return }
         if newScale != scale {
             current.clear()
+            under.clear()
             fallback.clear()
             displayedLevel = nil
+            underLevel = nil
         }
         pixelSize = pixels
         scale = newScale
@@ -366,29 +397,37 @@ final class RenderCoordinator {
         CATransaction.setDisableActions(true)
         layer.bounds = CGRect(origin: .zero, size: bounds.size)
         layer.position = .zero
-        fallbackHost.frame = layer.bounds
-        fallbackMask.frame = layer.bounds
+        for sublayer in [underHost, underMask, fallbackHost, fallbackMask] {
+            sublayer.frame = layer.bounds
+        }
         CATransaction.commit()
         requestRender()
     }
 
-    /// Lays the tiles out at the host's current transform: the displayed level's, moved and scaled, and
-    /// the resting level's under them where they're missing. Switches to the transform's own level once
-    /// its tiles in view are all cached (never mid-gesture at a moving scale).
+    /// Lays the tiles out at the host's current transform: the displayed level's, moved and scaled, over the
+    /// level shown before it and the resting level's where it has no tiles yet. Settled, the displayed level
+    /// is the transform's own at once, and its tiles appear as they land (NOT-105); mid-gesture at a moving
+    /// scale it stays the last one, scaled.
     func updateLayerTransform() {
         reportMoving()
         guard pixelSize != .zero else { return }
         let t = transform, want = level(for: t)
-        if displayedLevel != want, displayedLevel == nil || !(host?.isMoving ?? false),
-           cache.tiles(for: visibleKeys(at: t, level: want)).allSatisfy({ $0 != nil }) {
+        if displayedLevel != want, displayedLevel == nil || !(host?.isMoving ?? false) {
+            // The level on screen stays under the new one until the new one's tiles cover the view.
+            if let old = displayedLevel, current.level == old, !current.shownImages.isEmpty {
+                underLevel = old
+            }
             displayedLevel = want
+        }
+        if underLevel == displayedLevel || underLevel == restingLevel {
+            underLevel = nil
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         guard let shown = displayedLevel else {
             current.clear()
-            hideFallback()
+            hideUnder()
             shownKeys = []
             lastLayout = nil
             return
@@ -397,9 +436,7 @@ final class RenderCoordinator {
         let key = layoutKey(level: shown, transform: t, margin: false)
         if key == lastLayout {
             current.place(at: t, displayScale: scale)
-            if !fallbackHost.isHidden {
-                placeFallback(at: t)
-            }
+            placeUnder(at: t)
             if shown == want {
                 displayedTransform = t
             }
@@ -411,10 +448,12 @@ final class RenderCoordinator {
         let changed = current.show(held.present.compactMap { key, tile in tile.image.map { (key, $0) } }, level: shown,
                                    displayScale: scale)
         current.place(at: t, displayScale: scale)
-        if held.complete || shown == restingLevel {
-            hideFallback()
+        if held.complete {
+            // Nothing of the levels under it shows: let them go.
+            underLevel = nil
+            hideUnder()
         } else {
-            showFallback(at: t, under: held.present.map(\.key))
+            showUnder(at: t, below: held.present.map(\.key), shown: shown)
         }
         if shown == want {
             displayedTransform = t
@@ -450,40 +489,74 @@ final class RenderCoordinator {
         return (present, present.count == expected)
     }
 
-    private func hideFallback() {
-        guard !fallbackHost.isHidden || fallback.level != nil else { return }
+    /// Hides the levels under the displayed one.
+    private func hideUnder() {
+        guard !underHost.isHidden || under.level != nil || fallback.level != nil else { return }
+        underHost.isHidden = true
         fallbackHost.isHidden = true
+        under.clear()
         fallback.clear()
+        coveredRects = []
+        underCoveredRects = []
     }
 
-    /// Shows the resting level under the displayed one, masked away wherever the displayed level has a
-    /// tile (with ink or empty), so blurrier ink never shows around the sharp.
-    private func showFallback(at t: ViewTransform, under covered: [TileKey]) {
-        let resting = restingLevel
-        let held = tiles(at: resting, covering: t).present
-        guard !held.isEmpty else {
-            hideFallback()
-            return
+    /// Shows, under the displayed level's tiles (`covered`), the level shown before it (`underLevel`), and
+    /// under both the resting level, each masked away wherever a level above it has a tile (with ink or
+    /// empty), so blurrier ink never shows around the sharp.
+    private func showUnder(at t: ViewTransform, below covered: [TileKey], shown: TileLevel) {
+        var underKeys: [TileKey] = []
+        var underComplete = false
+        if let level = underLevel {
+            let held = tiles(at: level, covering: t)
+            underKeys = held.present.map(\.key)
+            underComplete = held.complete
+            under.show(held.present.compactMap { key, tile in tile.image.map { (key, $0) } }, level: level,
+                       displayScale: scale)
+            shownKeys.formUnion(underKeys)
+        } else {
+            under.clear()
         }
-        fallbackHost.isHidden = false
-        shownKeys.formUnion(held.map(\.key))
-        fallback.show(held.compactMap { key, tile in tile.image.map { (key, $0) } }, level: resting, displayScale: scale)
+        let resting = restingLevel
+        let rested = shown == resting || underComplete ? [] : tiles(at: resting, covering: t).present
+        if rested.isEmpty {
+            fallback.clear()
+            fallbackHost.isHidden = true
+        } else {
+            fallbackHost.isHidden = false
+            shownKeys.formUnion(rested.map(\.key))
+            fallback.show(rested.compactMap { key, tile in tile.image.map { (key, $0) } }, level: resting,
+                          displayScale: scale)
+        }
+        underHost.isHidden = underKeys.isEmpty && rested.isEmpty
         coveredRects = Self.merged(covered)
-        placeFallback(at: t)
+        underCoveredRects = Self.merged(underKeys)
+        placeUnder(at: t)
     }
 
-    /// The displayed level's tiles under the resting level, as page rects (the mask's holes).
+    /// The displayed level's tiles, and those of the level under it, as page rects (the masks' holes).
     private var coveredRects: [CGRect] = []
+    private var underCoveredRects: [CGRect] = []
 
-    private func placeFallback(at t: ViewTransform) {
-        fallback.place(at: t, displayScale: scale)
+    /// Moves the levels under the displayed one, and their masks, to `t`.
+    private func placeUnder(at t: ViewTransform) {
+        guard !underHost.isHidden else { return }
+        under.place(at: t, displayScale: scale)
+        underMask.path = maskPath(at: t, holes: coveredRects)
+        if !fallbackHost.isHidden {
+            fallback.place(at: t, displayScale: scale)
+            fallbackMask.path = maskPath(at: t, holes: underCoveredRects)
+        }
+    }
+
+    /// The whole surface but `holes` (page rects): a lower level's mask.
+    private func maskPath(at t: ViewTransform, holes: [CGRect]) -> CGPath {
         let path = CGMutablePath()
         path.addRect(layer.bounds.insetBy(dx: -1, dy: -1))
-        for rect in coveredRects {
-            // A pixel inside the tiles, so the resting level runs under their edge rather than leaving a hairline.
+        for rect in holes {
+            // A pixel inside the tiles, so the level below runs under their edge rather than leaving a hairline.
             path.addRect(t.toView(rect).insetBy(dx: 1 / scale, dy: 1 / scale))
         }
-        fallbackMask.path = path
+        return path
     }
 
     /// `keys` (one level) as few page rects as possible: runs of columns in a row, then equal runs in
@@ -655,18 +728,36 @@ final class RenderCoordinator {
         lastFillRequest = request
         syncChanges()
         let resting = restingLevel
-        // Nothing is filled at a scale still changing: the last level is shown scaled.
-        if host?.isMoving ?? false, let shown = displayedLevel, shown != want {
-            cache.setInterest(ObjectIdentifier(self), page: page, visible: shownKeys, resting: resting)
-            cancelFills { key, _ in key.level != shown }
-            return
-        }
-        let visible = visibleKeys(at: t, level: want, centreOut: true)
         let waiting = pending.filter { !$0.submitted }
         let revision = fillRevision(skipping: waiting)
+        // Nothing is filled at a scale still changing: the last level is shown scaled, over the level before
+        // it and the resting level. Only resting tiles in view that aren't cached are filled, so a fast
+        // pinch out past the tiles drawn never leaves the page blank (a resting level is a fixed scale),
+        // and once the pinch has held a scale a moment (`steadyDelay`), that level's tiles in view, so
+        // lifting the fingers there (it snaps to a level within 2%) finds them filled or on their way.
+        let moving = host?.isMoving ?? false
+        if moving, let shown = displayedLevel, shown != want {
+            let blank = shown == resting ? [] : visibleKeys(at: t, level: resting, centreOut: true)
+            var plans = zip(blank, cache.tiles(for: blank)).filter { $0.1 == nil }.map { FillPlan.whole($0.0) }
+            var interest = Set(blank)
+            if let held = steadyLevel(for: want), held != shown, held != resting {
+                let keys = visibleKeys(at: t, level: held, centreOut: true)
+                interest.formUnion(keys)
+                plans += fillPlans(for: keys, revision: revision)
+            }
+            cache.setInterest(ObjectIdentifier(self), page: page, visible: shownKeys.union(interest), resting: resting,
+                              shown: [shown, underLevel].compactMap { $0 })
+            let filling = Set(plans.map(\.key))
+            cancelFills { key, _ in key.level != shown && !filling.contains(key) }
+            submitFills(plans, revision: revision, waiting: waiting, inView: filling)
+            return
+        }
+        steady = nil
+        let visible = visibleKeys(at: t, level: want, centreOut: true)
         let margin = revision < 0 ? [] : marginKeys(at: t, level: want, inside: visible)
         let wanted = visible + margin
-        cache.setInterest(ObjectIdentifier(self), page: page, visible: shownKeys.union(wanted), resting: resting)
+        cache.setInterest(ObjectIdentifier(self), page: page, visible: shownKeys.union(wanted), resting: resting,
+                          shown: [want, underLevel].compactMap { $0 })
         let plans = fillPlans(for: wanted, revision: revision)
         let staleSet = Set(plans.map(\.key))
         // Fills of tiles no longer wanted are dropped, running or not. Queued fills of an older revision are
@@ -676,9 +767,51 @@ final class RenderCoordinator {
         cancelFills { key, ticket in
             !staleSet.contains(key) || (ticket.revision != revision && !scheduler.hasStarted(ticket.job))
         }
-        guard !plans.isEmpty else { return }
+        submitFills(plans, revision: revision, waiting: waiting, inView: Set(visible))
+    }
 
-        let inView = Set(visible)
+    /// How long a gesture has to hold a scale (within the 2% snap) before that level is filled under it.
+    static let steadyDelay: CFTimeInterval = 0.1
+    /// Mid-gesture, the level the view has stayed near and since when.
+    private var steady: (level: TileLevel, since: CFTimeInterval)?
+
+    /// The level a moving view has held near `want` for `steadyDelay`, if it has; otherwise starts timing
+    /// `want` and looks again once the delay is up (the fingers may not move again before they lift).
+    private func steadyLevel(for want: TileLevel) -> TileLevel? {
+        let now = CACurrentMediaTime()
+        if let steady, steady.level.isNear(want) {
+            return now - steady.since >= Self.steadyDelay ? steady.level : nil
+        }
+        steady = (want, now)
+        checkSteady(after: Self.steadyDelay)
+        return nil
+    }
+
+    /// One check at a time is scheduled, not one per gesture frame.
+    private var steadyCheckScheduled = false
+
+    /// Looks at the gesture again after `delay`, should it have held its scale until then.
+    private func checkSteady(after delay: CFTimeInterval) {
+        guard !steadyCheckScheduled else { return }
+        steadyCheckScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.005) { [weak self] in
+            guard let self else { return }
+            steadyCheckScheduled = false
+            guard host?.isMoving == true, let steady else { return }
+            let left = steady.since + Self.steadyDelay - CACurrentMediaTime()
+            if left > 0 {
+                checkSteady(after: left)
+            } else {
+                lastFillRequest = nil
+                requestRender()
+            }
+        }
+    }
+
+    /// Submits a fill job for each of `plans` (in order: their rank) not already on its way at `revision`;
+    /// tiles near the Pencil first, then those `inView`, then the rest (the margin).
+    private func submitFills(_ plans: [FillPlan], revision: Int, waiting: [PendingStroke], inView: Set<TileKey>) {
+        guard !plans.isEmpty else { return }
         let pencil = host?.pencilLocation
         let snapshot = InkSnapshot(strokes: document.strokes, index: document.strokeIndex, geometry: [:],
                                    skipped: Set(waiting.map(\.live.stroke.id)))
@@ -861,6 +994,7 @@ final class RenderCoordinator {
                 needsRefill = true
             }
             busy.add(output.span)
+            fillStats.fillMilliseconds += Double(output.span.upperBound - output.span.lowerBound) / 1e6
             fillStats.jobs += 1
             if output.restored {
                 fillStats.tilesRestored += 1
@@ -1175,7 +1309,8 @@ final class RenderCoordinator {
         let level = level(for: t)
         let pixels = Self.pixelSize(of: bounds.size, scale: scale)
         let keys = TileKey.keys(covering: t.toCanvas(bounds).intersection(document.pageBounds), page: page, level: level)
-        cache.setInterest(ObjectIdentifier(panelInterest), page: page, visible: Set(keys), resting: nil)
+        cache.setInterest(ObjectIdentifier(panelInterest), page: page, visible: Set(keys), resting: nil,
+                          shown: [level])
         let revision = document.inkVersion
         // The panel shows every stroke at once, waiting ones too; tiles like that aren't the canvas's to keep.
         let keeps = !pending.contains { !$0.submitted }

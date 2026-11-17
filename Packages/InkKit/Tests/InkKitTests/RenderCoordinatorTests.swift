@@ -196,6 +196,110 @@ struct RenderCoordinatorTests {
         #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
     }
 
+    /// A pinch at 2×, then on to 3×: once it ends the 3× level is the displayed one at once, its tiles shown
+    /// as they land over the 2× level's, which goes once they cover the view (NOT-105).
+    @Test func aNewLevelShowsAsItsTilesLandOverTheLevelBefore() async throws {
+        for y in stride(from: 100, through: 700, by: 120) {
+            document.add(finishedStroke(y: CGFloat(y)).stroke)
+        }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        canvas.gestureBegan()
+        canvas.zoom(by: 2, about: CGPoint(x: 300, y: 400))
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let two = try #require(coordinator.displayedLevel)
+        canvas.gestureBegan()
+        canvas.zoom(by: 1.5, about: CGPoint(x: 300, y: 400))
+        #expect(coordinator.displayedLevel == two) // scaled mid-pinch
+        canvas.gestureEnded()
+        #expect(coordinator.displayedLevel == coordinator.level(for: canvas.viewTransform))
+        #expect(coordinator.underLevel == two)
+        #expect(!coordinator.isSettled)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.underLevel == nil)
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
+    }
+
+    @Test func zoomingBackOutToCachedLevelsFillsNothing() async throws {
+        for y in stride(from: 100, through: 700, by: 120) {
+            document.add(finishedStroke(y: CGFloat(y)).stroke)
+        }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let fitted = canvas.viewTransform
+        let focus = CGPoint(x: 300, y: 400)
+        canvas.gestureBegan()
+        canvas.zoom(by: 2, about: focus)
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let two = canvas.viewTransform
+        canvas.gestureBegan()
+        canvas.zoom(by: 3, about: focus)
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let filled = coordinator.fillStats.tilesFilled
+        canvas.gestureBegan()
+        canvas.zoom(by: 1 / 3, about: focus)
+        canvas.gestureEnded()
+        #expect(canvas.viewTransform.scale == two.scale)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.fillStats.tilesFilled == filled, "the 2× level was cached")
+        canvas.gestureBegan()
+        canvas.zoom(by: 0.5, about: focus)
+        canvas.gestureEnded()
+        #expect(canvas.viewTransform.scale == fitted.scale)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.fillStats.tilesFilled == filled, "the fitted level is kept while zoomed in")
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
+    }
+
+    /// A pinch that holds a scale fills that level under it, so lifting the fingers there finds it filled.
+    @Test func aPinchHeldAtAScaleFillsThatLevelBeforeItEnds() async throws {
+        document.add(finishedStroke(y: 300).stroke)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let fitted = coordinator.displayedLevel
+        canvas.gestureBegan()
+        canvas.zoom(by: 1.8, about: CGPoint(x: 300, y: 300))
+        let held = coordinator.level(for: canvas.viewTransform)
+        try await waitUntil {
+            let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: held)
+            return !coordinator.isFilling && TileCache.shared.tiles(for: keys).allSatisfy { $0 != nil }
+        }
+        #expect(coordinator.displayedLevel == fitted) // still scaled until the fingers lift
+        let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: held)
+        let filled = TileCache.shared.tiles(for: keys)
+        canvas.gestureEnded()
+        #expect(coordinator.level(for: canvas.viewTransform) == held)
+        try await waitUntil { coordinator.isSettled }
+        #expect(coordinator.underLevel == nil)
+        let shown = TileCache.shared.tiles(for: keys)
+        #expect(zip(filled, shown).allSatisfy { $0?.image === $1?.image }, "the tiles in view weren't filled again")
+    }
+
+    /// Pinching out from a zoom whose tiles cover only part of the view, with the resting level's tiles
+    /// gone from the cache: those are filled mid-pinch, so the page never shows blank.
+    @Test func aPinchOutPastTheTilesDrawnFillsTheRestingLevel() async throws {
+        for y in stride(from: 100, through: 700, by: 120) {
+            document.add(finishedStroke(y: CGFloat(y)).stroke)
+        }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        canvas.gestureBegan()
+        canvas.zoom(by: 4, about: CGPoint(x: 300, y: 400))
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let four = try #require(coordinator.displayedLevel)
+        TileCache.shared.removeAll(page: document.cacheID, except: four)
+        canvas.gestureBegan()
+        canvas.zoom(by: 0.3, about: CGPoint(x: 300, y: 400))
+        let resting = coordinator.restingLevel
+        try await waitUntil {
+            let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: resting)
+            return !coordinator.isFilling && TileCache.shared.tiles(for: keys).allSatisfy { $0 != nil }
+        }
+        #expect(coordinator.displayedLevel == four) // nothing at the moving scale
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+    }
+
     @Test func aGestureEndingNearACachedLevelSnapsToItAndFillsNothing() async throws {
         document.add(finishedStroke(y: 300).stroke)
         try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
@@ -274,6 +378,59 @@ struct RenderCoordinatorTests {
         let image = try #require(snapshot)
         #expect(image.width == 400)
         #expect(image.height == 200)
+    }
+}
+
+/// The template and object layers follow the ink's settle rule (NOT-105).
+@MainActor
+@Suite("Following vector view")
+struct FollowingVectorViewTests {
+    private final class Page: FollowingVectorView {
+        override var coveredPageRect: CGRect {
+            CGRect(x: 0, y: 0, width: 600, height: 800)
+        }
+    }
+
+    private func view() -> FollowingVectorView {
+        let view = Page()
+        view.fill(CGRect(x: 0, y: 0, width: 600, height: 800))
+        view.follow(ViewTransform(scale: 1, offset: .zero), moving: false)
+        return view
+    }
+
+    @Test func midGestureWhatWasDrawnIsScaledUntilItsTooBlurry() {
+        let view = view()
+        let drawn = view.drawnTransform
+        // Zooming in by 1.4× about the middle: still covers the page in view, so it's scaled.
+        let zoomed = ViewTransform(scale: 1.4, offset: CGPoint(x: -120, y: -160))
+        view.follow(zoomed, moving: true)
+        #expect(view.drawnTransform == drawn)
+        let shown = view.layer.affineTransform()
+        let centre = CGPoint(x: 300, y: 400)
+        // A page point lands where the transform puts it: (100, 100) at 1.4× is (20, -20).
+        let drawnPoint = drawn.toView(CGPoint(x: 100, y: 100))
+        let moved = CGPoint(x: centre.x + (drawnPoint.x - centre.x) * shown.a + shown.tx,
+                            y: centre.y + (drawnPoint.y - centre.y) * shown.d + shown.ty)
+        #expect(abs(moved.x - 20) < 1e-9 && abs(moved.y + 20) < 1e-9)
+        // Past 1.5×, drawn again.
+        view.follow(ViewTransform(scale: 1.6, offset: CGPoint(x: -180, y: -240)), moving: true)
+        #expect(view.drawnTransform.scale == 1.6)
+        #expect(view.layer.affineTransform().isIdentity)
+    }
+
+    @Test func zoomingOutPastWhatWasDrawnDrawsAgainAndSettlingDrawsSharp() {
+        let view = view()
+        view.follow(ViewTransform(scale: 2, offset: CGPoint(x: -300, y: -400)), moving: false)
+        view.follow(ViewTransform(scale: 2.2, offset: CGPoint(x: -360, y: -480)), moving: true)
+        #expect(view.drawnTransform.scale == 2) // scaled
+        // Out to where the page shows more than was drawn: drawn again at once.
+        view.follow(ViewTransform(scale: 1.2, offset: CGPoint(x: -60, y: -80)), moving: true)
+        #expect(view.drawnTransform.scale == 1.2)
+        view.follow(ViewTransform(scale: 1.3, offset: CGPoint(x: -90, y: -120)), moving: true)
+        #expect(view.drawnTransform.scale == 1.2)
+        view.follow(ViewTransform(scale: 1.3, offset: CGPoint(x: -90, y: -120)), moving: false)
+        #expect(view.drawnTransform.scale == 1.3)
+        #expect(view.layer.affineTransform().isIdentity)
     }
 }
 

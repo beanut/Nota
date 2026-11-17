@@ -1,15 +1,14 @@
 import UIKit
 
 /// The canvas layer that draws the page's objects, between the template and the ink. Like the template,
-/// it's redrawn as vectors at the canvas's transform when the page pans or zooms, and while a selection
+/// it's redrawn as vectors at the canvas's transform once the page settles after a pan or zoom, and while a selection
 /// with objects in it is dragged. A page without objects hides it, so ink-only pages draw nothing extra.
 ///
 /// Pictures never make it wait: it draws the size `ImageAssets` has decoded and redraws when the size it
 /// needs arrives (`ImageAssets.didLoadImageNotification`).
-final class ObjectLayerView: UIView {
+final class ObjectLayerView: FollowingVectorView {
     private(set) var objects: [any PageObject] = []
     private var pageBounds = CGRect.zero
-    private var canvasTransform = ViewTransform()
     /// The pictures shown, to redraw when one of them finishes decoding.
     private var assetIDs: Set<ImageAssetID> = []
     private var imageObserver: NSObjectProtocol?
@@ -52,13 +51,8 @@ final class ObjectLayerView: UIView {
         setNeedsDisplay()
     }
 
-    /// Follows the canvas to `transform`.
-    func follow(_ transform: ViewTransform) {
-        guard transform != canvasTransform else { return }
-        canvasTransform = transform
-        if !isHidden {
-            setNeedsDisplay()
-        }
+    override var coveredPageRect: CGRect {
+        pageBounds
     }
 
     /// Draws the objects in view space at `transform`, limited to `viewRect`. Also part of the live
@@ -75,6 +69,6 @@ final class ObjectLayerView: UIView {
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        drawObjects(at: canvasTransform, viewRect: rect, in: ctx)
+        drawObjects(at: drawnTransform, viewRect: rect, in: ctx)
     }
 }

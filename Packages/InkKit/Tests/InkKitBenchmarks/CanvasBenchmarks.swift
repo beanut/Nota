@@ -269,10 +269,21 @@ final class CanvasBenchmarks: XCTestCase {
     /// A pinch from the fitted page to 6× over half a second, about the middle of a 5k-stroke page's
     /// ink: main-thread work per frame, and how long after the fingers lift the ink is sharp at 6×.
     func testPinch1xTo6x() throws {
+        try pinch1xTo6x(name: "zoom.pinch_1x_6x", holding: 0)
+    }
+
+    /// The same pinch, with the fingers held still at 6× for 150 ms before they lift, as a pinch usually
+    /// ends: the level it holds is filled meanwhile (NOT-105), so less is left once they lift.
+    func testPinch1xTo6xHeld() throws {
+        try pinch1xTo6x(name: "zoom.pinch_1x_6x_held", holding: 0.15)
+    }
+
+    private func pinch1xTo6x(name: String, holding: TimeInterval) throws {
         let (canvas, _) = try denseCanvas()
         let k = pow(ViewTransform.maxZoomFactor, 1 / CGFloat(Self.gestureFrames))
         var frames: [Double] = []
         var sharp: [Double] = []
+        var fillWork: [Double] = [], tiles: [Double] = []
         for _ in 0 ..< 3 {
             canvas.resetView()
             try waitUntilSettled(canvas)
@@ -281,15 +292,26 @@ final class CanvasBenchmarks: XCTestCase {
             let focus = canvas.viewTransform.toView(inkCentre)
             canvas.gestureBegan()
             frames += paced(frames: Self.gestureFrames) { _ in canvas.zoom(by: k, about: focus) }
+            if holding > 0 {
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: holding))
+            }
             let start = Bench.now()
+            let before = canvas.coordinator.fillStats
             canvas.gestureEnded()
             try waitUntilSettled(canvas)
             sharp.append(Bench.milliseconds(since: start))
+            let after = canvas.coordinator.fillStats
+            fillWork.append(after.fillMilliseconds - before.fillMilliseconds)
+            tiles.append(Double(after.tilesFilled - before.tilesFilled))
         }
         XCTAssertEqual(canvas.viewTransform.scale / canvas.fittedTransform().scale, ViewTransform.maxZoomFactor,
                        accuracy: 0.01)
         try assertCorrectPixels(canvas, "At 6× after the pinch")
-        recordGesture("zoom.pinch_1x_6x", frames: frames, sharp: sharp)
+        recordGesture(name, frames: frames, sharp: sharp)
+        // What getting sharp costs once the fingers lift: the tiles filled by then, and their fill times added
+        // up, which time to sharp spreads over the workers.
+        BenchResults.record("\(name).tiles_filled", Stats(tiles).median, unit: "tiles")
+        BenchResults.record("\(name).fill_cpu_ms", Stats(fillWork).median, unit: "ms")
     }
 
     /// Panning at 6× across the middle of a 5k-stroke page's ink, 10 pt a frame for half a second.

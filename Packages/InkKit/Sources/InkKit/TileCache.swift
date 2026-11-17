@@ -114,6 +114,7 @@ final class TileCache: @unchecked Sendable { // every stored property is guarded
         let page: UUID
         let visible: Set<TileKey>
         let resting: TileLevel?
+        let shown: [TileLevel]
     }
 
     init(byteBudget: Int) {
@@ -263,10 +264,13 @@ final class TileCache: @unchecked Sendable { // every stored property is guarded
         }
     }
 
-    /// `owner` shows `visible` (never evicted) of `page`, and keeps `resting`'s tiles over other levels.
-    func setInterest(_ owner: ObjectIdentifier, page: UUID, visible: Set<TileKey>, resting: TileLevel?) {
+    /// `owner` shows `visible` (never evicted) of `page`, at the levels `shown`, and keeps `resting`'s tiles
+    /// over other levels. Off-screen tiles of a level shown (the margin a pan finds next) go after those of
+    /// levels nobody shows (one zoomed through, NOT-105), before the resting level's.
+    func setInterest(_ owner: ObjectIdentifier, page: UUID, visible: Set<TileKey>, resting: TileLevel?,
+                     shown: [TileLevel] = []) {
         lock.withLock {
-            interests[owner] = Interest(page: page, visible: visible, resting: resting)
+            interests[owner] = Interest(page: page, visible: visible, resting: resting, shown: shown)
             evictIfNeeded()
         }
     }
@@ -277,21 +281,25 @@ final class TileCache: @unchecked Sendable { // every stored property is guarded
         }
     }
 
-    /// Evicts least recently used tiles until the cache is within 90% of its budget: tiles no one shows
-    /// first, then resting-level tiles, never a visible one.
+    /// Evicts least recently used tiles until the cache is within 90% of its budget: tiles of levels no one
+    /// shows first, then off-screen tiles of levels shown, then resting-level tiles, never a visible one.
     private func evictIfNeeded() {
         guard storedBytes > byteBudget else { return }
         var visible = Set<TileKey>()
-        var resting = Set<RestingLevel>()
+        var resting = Set<PageLevel>()
+        var shown = Set<PageLevel>()
         for interest in interests.values {
             visible.formUnion(interest.visible)
             if let level = interest.resting {
-                resting.insert(RestingLevel(page: interest.page, level: level))
+                resting.insert(PageLevel(page: interest.page, level: level))
+            }
+            for level in interest.shown {
+                shown.insert(PageLevel(page: interest.page, level: level))
             }
         }
         let candidates = entries.filter { !visible.contains($0.key) }.map { key, entry in
-            (key: key, rank: resting.contains(RestingLevel(page: key.page, level: key.level)) ? 1 : 0,
-             lastUse: entry.lastUse)
+            let level = PageLevel(page: key.page, level: key.level)
+            return (key: key, rank: resting.contains(level) ? 2 : shown.contains(level) ? 1 : 0, lastUse: entry.lastUse)
         }.sorted { ($0.rank, $0.lastUse) < ($1.rank, $1.lastUse) }
         let target = byteBudget / 10 * 9
         for candidate in candidates {
@@ -300,7 +308,7 @@ final class TileCache: @unchecked Sendable { // every stored property is guarded
         }
     }
 
-    private struct RestingLevel: Hashable {
+    private struct PageLevel: Hashable {
         let page: UUID
         let level: TileLevel
     }

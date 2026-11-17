@@ -291,9 +291,9 @@ final class CanvasView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         inkClipView.frame = bounds
-        templateView.frame = bounds
-        objectLayer.frame = bounds
-        tapeLayer.frame = bounds
+        templateView.fill(bounds)
+        objectLayer.fill(bounds)
+        tapeLayer.fill(bounds)
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
         layoutZoomPanel()
@@ -500,9 +500,9 @@ final class CanvasView: UIView {
         CATransaction.setDisableActions(true)
         pageLayer.frame = frame
         pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
-        templateView.follow(viewTransform)
-        objectLayer.follow(viewTransform)
-        tapeLayer.follow(viewTransform)
+        templateView.follow(viewTransform, moving: isMoving)
+        objectLayer.follow(viewTransform, moving: isMoving)
+        tapeLayer.follow(viewTransform, moving: isMoving)
         placeTextEditor()
         placeImageCrop()
         inkMask.frame = inkClipView.bounds

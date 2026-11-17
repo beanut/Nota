@@ -29,6 +29,8 @@ extension CanvasView {
             updatePageChrome()
             liveView.follow(viewTransform)
             updateLassoOverlay()
+        } else if settled {
+            updatePageChrome() // the template and objects, scaled while the scroll view moved, drawn sharp
         }
         if settled {
             liveView.settle(at: viewTransform)

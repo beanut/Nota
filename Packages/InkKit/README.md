@@ -40,12 +40,13 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `TemplateRenderer.swift` | Draws a template as Core Graphics vectors (canvas, thumbnails, PDF), skipping pattern outside the visible rect |
 | `TemplateArtwork.swift` | A custom background's bytes (a PDF page or an image), decoded once; PDF pages stay vector |
 | `TemplateView.swift` | The canvas layer that redraws the template at the current zoom, between the paper and the ink |
+| `FollowingVectorView.swift` | Base of the template and object layers: drawn sharp when the canvas settles, scaled in between (until it no longer covers the page in view or is magnified past 1.5×), like the committed ink (NOT-105) |
 | `TemplateMenu.swift` | The page bar's template pill: built-ins, paper colour, PDF or image, use for all pages |
 | `ViewTransform.swift` | Canvas → view mapping, zoom limits and page-swipe detection |
 | `CanvasView.swift` | The canvas `UIView`: its layers, the gesture recognizers, `UIPencilInteraction`, hover, the HUD and the lasso overlay. Composes input, viewport and the render coordinator below; redraws from the document when another canvas on the same page changes it |
 | `CanvasView+Input.swift` / `CanvasInput.swift` | Input: touch phases, coalesced and predicted samples, estimated-property updates (`EstimateTracker`), palm rejection and finger ink, feeding `LiveStroke`; a finished stroke goes to the render coordinator |
 | `CanvasView+Viewport.swift` / `CanvasViewport.swift` | Viewport: the view transform, the fitted transform, pan and pinch steps, page swipes, the slide back to the fitted page, cancelling an incidental pan or pinch. Pan and pinch steps (and the fitted transform) keep the offset on whole device pixels, so a gesture settles on the pixel grid with no extra render |
-| `RenderCoordinator.swift` | The committed side: which tiles the view needs, filling missing and stale ones off the main thread, showing them, drawing finished strokes (`PendingStroke`) into the tiles they reach, the geometry cache, revision tracking, the settled state, the page's `TileRaster` and the zoom panel's renders. Knows nothing of touches |
+| `RenderCoordinator.swift` | The committed side: which tiles the view needs, filling missing and stale ones off the main thread, showing them (the current level over the level before it and the resting level while it fills in), drawing finished strokes (`PendingStroke`) into the tiles they reach, the geometry cache, revision tracking, the settled state, the page's `TileRaster` and the zoom panel's renders. Knows nothing of touches |
 | `RenderScheduler.swift` | `RenderScheduler` (`.shared`), `RenderJob`, `RenderPriority`, `RenderCancellation`: the one place render work runs (tiles, finished strokes, the zoom panel, the presentation mirror, thumbnails, geometry warm-up, page rasters), by priority, cancellable, on a bounded number of workers, published in batches on the main thread at most once a frame |
 | `TileCache.swift` | `TileLevel`, `TileKey` (256-pixel page-space tiles), `Tile` (pixels and the page revision they show) and `TileCache`, every page's tiles shared by every canvas and zoom panel, evicted least recently used under a byte budget |
 | `TileFiller.swift` | `TileFiller` and `CoreGraphicsTileFiller` (drawing strokes into a tile), `TileBitmap` (tile contexts in page points with the grain pinned to the page; assembling tiles into an image), `InkSnapshot` (the ink a render job draws from), `GeometryStore` (stroke geometry the jobs of one fill share and build), `TileRaster` (a page's fitted tiles, compressed, for reopening it) |
@@ -654,7 +655,31 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
      cached tiles fills nothing; a pinch fills nothing until it ends: the last level is scaled, over the
      **resting level** (the fitted page; continuous scrolling's column at zoom 1) where it has no tiles, masked
      away wherever it has. When the gesture ends, the new level's tiles in view are filled, centre-out, and
-     swapped in together once they're all there (NOT-105 adds progressive levels).
+     each appears as its batch lands (see Zoom levels below).
+   - **Zoom levels: progressive refinement (NOT-105).** A canvas shows up to three levels, each in a layer
+     masked away wherever a level above it has a tile, so blurrier ink never shows around the sharp:
+     - the **displayed level** (`displayedLevel`): mid-gesture the last settled one, scaled; once the gesture
+       ends, the transform's own level at once, its tiles appearing as they land, centre-out;
+     - the **level before it** (`underLevel`), scaled under it until the new level's tiles cover the view,
+       then let go; so a pinch from 2× to 3× shows the 2× ink where 3× hasn't landed, never blank or the
+       fitted page's softer ink;
+     - the **resting level** (the fitted page; continuous scrolling's column at zoom 1) under both.
+
+     Nothing is filled at a scale still changing, with two exceptions, both at fixed levels. A pinch out
+     past the tiles drawn (fast, or after the cache let the resting level's tiles go) fills the resting
+     level's missing tiles in view, so the page is never blank. And a pinch that holds a scale (within the 2%
+     snap) for 100 ms (`steadyDelay`) fills that level's tiles in view while the fingers are still down;
+     lifting them there snaps to it (levels being filled count as cached), so it's sharp sooner. Zooming
+     back to a level still cached (the fitted page always is, as is a recent zoom) fills nothing, and the
+     snap lands on the level's scale exactly (a scale a rounding error off would be another level).
+     Settled levels stay exact rather than quantised to powers of √2: NOT-99 chose the transform's own level
+     so a settled tile pixel is a screen pixel and the live layer matches; the fallbacks above do the
+     quantised levels' job of always having something to show.
+
+     The cache evicts tiles of levels nobody shows (one zoomed through) before the shown levels' off-screen
+     tiles (the margin a pan uses next), and those before the resting level's (`TileCache.setInterest`'s
+     `shown`), all within its 192 MB. The template and objects follow the same settle rule
+     (`FollowingVectorView`), so paper, objects and ink sharpen together.
    - **Versions and dirty rects (NOT-104).** Each tile records the version of the page's ink it shows
      (`CanvasDocument.inkVersion`, which moves on with every change to the strokes: each command, undo and
      redo, and each step of an erase or a lasso drag, which `revision` only counts once recorded). The page
@@ -740,9 +765,9 @@ the presentation mirror, page thumbnails, geometry warm-up after a raster restor
   fills may still be running (`RenderCoordinator.isFilling`), as they change nothing on screen. So
   time-to-sharp no longer waits for the margin; benchmarks and tests that count fills wait for those too.
 - **Region jobs.** NOT-104's dirty-rect refills are tile jobs like any other, with a region
-  (`TileFiller.fill`'s `region`) and the tile they start from. **Seam for later issues:** NOT-105's
-  progressive levels are `visible` jobs swapped in as each batch lands, with stale levels'
-  jobs cancelled (`startRender` already cancels fills of levels passed through during a pinch).
+  (`TileFiller.fill`'s `region`) and the tile they start from. NOT-105's progressive levels are `visible`
+  jobs shown as each batch lands; fills of levels passed through during a pinch are cancelled, bar the
+  resting level's missing tiles and a held scale's (see Zoom levels above).
 
 #### Decision: tiled committed layer (NOT-99)
 
@@ -813,7 +838,8 @@ What decided it:
   or returning to a zoom refills nothing. Otherwise the new scale is a new level.
 - **During a gesture nothing is filled at the moving scale.** The layers of the last settled level are
   transformed (as the bitmap is today), over the fitted level's tiles as a fallback where they're missing. When
-  the gesture ends, the visible tiles of the new level are filled centre-out and swapped in as they land.
+  the gesture ends, the visible tiles of the new level are filled centre-out and swapped in as they land
+  (NOT-105, landed: see Zoom levels in the pipeline above).
 - The **fitted level** of each layout (paged; continuous) is kept for every open page; other levels go first
   under the byte budget. A fitted 5k-stroke page is 20 MB of tiles.
 
@@ -847,6 +873,7 @@ differ in 0.002%. So:
 | `StrokeGeometry` pieces | not done | Each run's strips and stamps with their bounds, so a filler draws only the pieces reaching its tile. Left out of NOT-102: a copy of every stroke's pieces would roughly double the geometry cache (NOT-108 bounds it), and the spike's gain was at 6× only (7.9 → 5.6 ms a tile) |
 | `RenderScheduler`, `RenderJob` | NOT-103 (landed) | Jobs carry a priority (`.underPencil`, `.visible`, `.margin`, `.otherLevel`, `.background`), a rank and a cancellation token; the coordinator tracks each tile's fill and its revision. Dropped before they start when stale or off screen, checked between strokes while running; results published in one batch per frame. See Render scheduler above |
 | `CanvasDocument` change rects | NOT-104 (landed) | `inkVersion` moves on with every change to the strokes, mid-gesture too, and `inkChanges` (`InkChangeLog`) keeps the rect each touched; the coordinator relabels tiles no change reached and refills the rest by region (`FillPlan`, `TileFiller.fill(_:region:…)`). The rects travel in the document rather than with `invalidate(rect:)`, so every canvas and level showing the page uses them, whichever view made the change |
+| Progressive levels | NOT-105 (landed) | `RenderCoordinator.displayedLevel` / `underLevel` over the resting level, each masked where the level above has tiles; the resting level's missing tiles and a held pinch's level filled mid-gesture (`steadyDelay`); `TileCache` evicts levels nobody shows first. `FollowingVectorView` gives the template and objects the same settle rule |
 
 **Order of the follow-ups**: NOT-100 (split `CanvasView`, no behaviour change) → NOT-101 (index: tiles query it
 per tile, and a linear scan per tile over 5k strokes would cost more than small fills) → NOT-102 (tiles, levels,
@@ -857,7 +884,12 @@ edits). What to expect against the NOT-98 budgets on the 5k page:
 - `pan.6x_dense.*`: met after NOT-102/103 (cached tiles fill nothing; a new column of eleven 6× tiles every
   ~13 frames at 10 pt a frame is ~60 ms of background fill).
 - `zoom.pinch_1x_6x.time_to_sharp_ms`: ~100 ms of fill on every core for the 6× screen, so about the 150 ms
-  budget once the scheduler holds two cores back; centre-out order gets the middle sharp first.
+  budget once the scheduler holds two cores back; centre-out order gets the middle sharp first. Measured
+  after NOT-105: ~200 ms on the M1 Pro simulator, ~110 tiles whose fills add up to ~1.4 s (7.7 ms a tile
+  alone, ~13 ms each when nine run side by side), so it's fill-bound; NOT-105 shows the tiles as they land
+  and fills a held pinch's level before the fingers lift (`zoom.pinch_1x_6x_held`). Cutting run paths to
+  the tile as they're drawn was tried and was slower (and not byte-identical): closing the rest needs
+  cheaper strokes or the Metal fill.
 - `edit.*`: ~31 ms at the fitted zoom after NOT-104, so still about 2× over on this page; 9 ms at 6×. Closing
   it needs cheaper strokes: the multi-run transparency layer is 4× a plain fill. Proposed as a follow-up
   (see below) rather than more scope for NOT-104.
@@ -1067,7 +1099,8 @@ simulator's GPU isn't an iPad's. An on-device Instruments profile is the check o
 | `edit.erase_stroke_5k_ms` | One stroke-eraser sweep through the middle of a 5k-stroke page's ink, to correct pixels | < 16 ms |
 | `edit.pixel_erase_5k_ms` | A pixel-eraser stroke across a 5k-stroke page's ink, from the Pencil lifting (splitting the strokes it severs, adding it, drawing it) to correct pixels | < 16 ms |
 | `zoom.pinch_1x_6x.frame_p50/p95/max_ms` | Main-thread work per frame of a half-second pinch from the fitted page to 6× over a 5k-stroke page | p95 and max < 8 ms |
-| `zoom.pinch_1x_6x.time_to_sharp_ms` | From the fingers lifting at 6× to sharp ink | < 150 ms |
+| `zoom.pinch_1x_6x.time_to_sharp_ms` | From the fingers lifting at 6× to sharp ink. `tiles_filled` and `fill_cpu_ms` (the fills' own times added up) say what it waited for | < 150 ms |
+| `zoom.pinch_1x_6x_held.*` | The same pinch with the fingers held at 6× for 150 ms before lifting, as pinches usually end: the held level is filled meanwhile (NOT-105) | as above |
 | `pan.6x_dense.frame_p50/p95/max_ms` | Main-thread work per frame of a half-second pan (10 pt a frame) at 6× over a 5k-stroke page | p95 and max < 8 ms |
 | `pan.6x_dense.time_to_sharp_ms` | From the pan ending to sharp ink | < 150 ms |
 | `pan.6x_dense.step_render_ms` | The tile fills the pans at 6× set off (what they uncovered and a tile's margin ahead), per frame, off the main thread. `tiles_filled` counts them; `cached_tiles_filled` counts fills in an untimed pan back over the last pass's cached tiles, which must be 0 | < 8 ms |
