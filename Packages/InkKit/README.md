@@ -759,6 +759,41 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `full_redraw.crayon_500_ms` | Re-rendering a page of 500 crayon strokes into the committed bitmap, one GPU pass per stroke and band | – |
 | `memory.6x.*` | Physical footprint with a 5k page open at 6× zoom while the corpus is written on top: cached geometry, committed bitmap, live tiles. Measured from a settled baseline (free memory returned first), so earlier benchmarks don't change it | – |
 
+### Canvas benchmarks
+
+`CanvasBenchmarks` (NOT-98) covers what the canvas does beyond drawing a stroke and reopening a page. These
+drive a real `CanvasView` (or `ContinuousCanvasView`) through the entry points its gestures and touches use
+(`zoom(by:about:)`, `pan(by:)`, `undo()`, `eraseStrokes(along:)`, `endStroke(commit:)`, `place(_:settled:)`)
+and time until `rendersSettled`: the committed layer shows the page as it is, sharp, at the current transform.
+So they keep measuring what the user sees whatever the render architecture becomes; a new architecture only
+has to keep `rendersSettled` honest. After each edit and gesture the pixels shown are checked against the page
+drawn from scratch.
+
+Gesture frames are fed at 120 Hz. A frame's **main-thread work** is its wall time minus the time the main run
+loop slept in it, so it counts the gesture step, every render callback the main queue ran and any wait on a
+lock. It doesn't count Core Animation's render server or the GPU: the views aren't in a window, and the
+simulator's GPU isn't an iPad's. An on-device Instruments profile is the check on those.
+
+| Metric | What it times | Budget |
+| --- | --- | --- |
+| `edit.undo_5k_ms` | Undoing the last stroke on a 5k-stroke page, to correct pixels | < 16 ms |
+| `edit.erase_stroke_5k_ms` | One stroke-eraser sweep through the middle of a 5k-stroke page's ink, to correct pixels | < 16 ms |
+| `edit.pixel_erase_5k_ms` | A pixel-eraser stroke across a 5k-stroke page's ink, from the Pencil lifting (splitting the strokes it severs, adding it, drawing it) to correct pixels | < 16 ms |
+| `zoom.pinch_1x_6x.frame_p50/p95/max_ms` | Main-thread work per frame of a half-second pinch from the fitted page to 6× over a 5k-stroke page | p95 and max < 8 ms |
+| `zoom.pinch_1x_6x.time_to_sharp_ms` | From the fingers lifting at 6× to sharp ink | < 150 ms |
+| `pan.6x_dense.frame_p50/p95/max_ms` | Main-thread work per frame of a half-second pan (10 pt a frame) at 6× over a 5k-stroke page | p95 and max < 8 ms |
+| `pan.6x_dense.time_to_sharp_ms` | From the pan ending to sharp ink | < 150 ms |
+| `pan.6x_dense.step_render_ms` | The render one pan step asks for at 6× (today: the whole screen, geometry cached), off the main thread | < 8 ms |
+| `scroll.page_enter_5k_ms` | A 5k-stroke page entering view in continuous scrolling: its embedded canvas made, placed, laid out and drawn (no raster today) | < 50 ms |
+| `memory.continuous_20_pages_mb` | Peak footprint scrolling a 20-page note of 5k-stroke pages page by page, each page drawn, over the note's own strokes (`memory.continuous_20_pages.model_mb`) | < 300 MB |
+
+The budgets are where the canvas revamp (milestone M1.5) is headed; today's engine misses most of them, and
+`baselines/apple-m1-pro-simulator-canvas-revamp.json` (today's engine, every metric) records them as known
+misses, so they only gate a run once a change meets them. It's the per-metric best of two full runs on an
+M1 Pro that wasn't idle, so a single run on a busy Mac can read worse than it with no code change; rerun before
+believing a regression, and compare against your base branch on the same machine as well. `*_max_ms` regressions are reported but don't fail a
+run (one scheduler hiccup moves them); their budgets still count.
+
 ### Recorded input
 
 The benchmarks replay `*.inkrec.json` recordings from `Tests/InkKitBenchmarks/Fixtures` through
@@ -777,8 +812,8 @@ tiled from the same strokes.
 ### Running them
 
 ```bash
-scripts/run-benchmarks.sh bench-output          # Release, iPad Pro 13-inch simulator; ~5 min
-scripts/bench-compare.py bench-output/results.json --baseline Packages/InkKit/Benchmarks/baselines/apple-m1-pro-simulator.json
+scripts/run-benchmarks.sh bench-output          # Release, iPad Pro 13-inch simulator; ~10 min
+scripts/bench-compare.py bench-output/results.json --baseline Packages/InkKit/Benchmarks/baselines/apple-m1-pro-simulator-canvas-revamp.json
 ```
 
 Run them in Release (`-configuration Release ENABLE_TESTABILITY=YES`, which the script does); a Debug build

@@ -40,6 +40,16 @@ final class CanvasView: UIView {
     private(set) var displayedTransform = ViewTransform() // transform of the image currently in committedLayer.contents
     private(set) var fullRenderInFlight = false
     private var fullRenderRequested = false
+    /// True while the page's `CommittedRaster` is being restored into the bitmap.
+    private var rasterRestoreInFlight = false
+    /// True when the committed layer shows the page as it is, sharp at the current transform: no render,
+    /// raster restore or finished stroke on its way. What the canvas benchmarks wait for after an edit,
+    /// a gesture or a page entering view.
+    var rendersSettled: Bool {
+        !fullRenderInFlight && !fullRenderRequested && !rasterRestoreInFlight && pending.isEmpty
+            && displayedTransform == viewTransform && bitmapTransform == viewTransform
+    }
+
     private var modifiedSinceSnapshot = Set<UUID>()
     /// Strokes whose geometry was dropped while `warmGeometry` was building it in the background.
     private var modifiedSinceWarmup = Set<UUID>()
@@ -543,11 +553,18 @@ final class CanvasView: UIView {
         let transform = viewTransform
         bitmapTransform = transform
         bitmapRevision = raster.revision
+        rasterRestoreInFlight = true
         renderQueue.async { [weak self] in
-            guard let self, let ctx = bitmap else { return }
+            guard let self else { return }
+            guard let ctx = bitmap else {
+                DispatchQueue.main.async { [weak self] in self?.rasterRestoreInFlight = false }
+                return
+            }
             let image = raster.restore(into: ctx) ? ctx.makeImage() : nil
             DispatchQueue.main.async { [weak self] in
-                guard let self, generation == currentGeneration else { return }
+                guard let self else { return }
+                rasterRestoreInFlight = false
+                guard generation == currentGeneration else { return }
                 guard let image else {
                     // Undecodable: draw the page the slow way after all.
                     document.committedRaster = nil
@@ -1275,7 +1292,7 @@ final class CanvasView: UIView {
                            timestamp: touch.timestamp)
     }
 
-    private func endStroke(commit: Bool) {
+    func endStroke(commit: Bool) {
         activeTouch = nil
         // Edits made by a stroke carried across pages share its group, for undo.
         document.editGroup = strokeGroup
@@ -1417,7 +1434,8 @@ extension CanvasView {
         addInteraction(selectionDragInteraction)
     }
 
-    private func gestureBegan() {
+    /// A pan or pinch began (`pan(by:)`, `zoom(by:about:)` follow, then `gestureEnded()`).
+    func gestureBegan() {
         finishSettling()
         if activeGestureCount == 0, !didTransformInTouchSequence {
             gestureStartTransform = viewTransform
@@ -1425,7 +1443,8 @@ extension CanvasView {
         activeGestureCount += 1
     }
 
-    private func gestureEnded() {
+    /// A pan or pinch ended: once the last one has, the ink is drawn sharp at the new transform.
+    func gestureEnded() {
         activeGestureCount = max(0, activeGestureCount - 1)
         guard !isCancellingGesture else { return }
         if activeGestureCount == 0 {
@@ -1436,7 +1455,8 @@ extension CanvasView {
         }
     }
 
-    private func transformDidChange() {
+    /// The view transform changed under a gesture: moves the layers and asks for a render at it.
+    func transformDidChange() {
         didTransformInTouchSequence = true
         updateCommittedLayerTransform()
         updatePageChrome()
@@ -1454,12 +1474,10 @@ extension CanvasView {
                 panTranslation = .zero
             }
             let t = g.translation(in: self)
-            viewTransform.offset.x += t.x
-            viewTransform.offset.y += t.y
             panTranslation.x += t.x
             panTranslation.y += t.y
             g.setTranslation(.zero, in: self)
-            transformDidChange()
+            pan(by: t)
         case .ended:
             gestureEnded()
             if !turnPageIfSwiped(velocity: g.velocity(in: self)) {
@@ -1478,28 +1496,11 @@ extension CanvasView {
             if g.state == .began {
                 gestureBegan()
             }
-            let focus = g.location(in: self)
-            let fitted = fittedTransform()
-            let range = ViewTransform.zoomRange(fitScale: fitted.scale)
-            let newScale = min(max(viewTransform.scale * g.scale, range.lowerBound), range.upperBound)
-            let oldScale = viewTransform.scale
             if abs(g.scale - 1) > 0.01 {
                 didPinchInSequence = true
             }
-            let k = newScale / oldScale
-            // Zoom about the pinch centroid: keep the canvas point under it fixed.
-            viewTransform.offset = CGPoint(x: focus.x - (focus.x - viewTransform.offset.x) * k,
-                                           y: focus.y - (focus.y - viewTransform.offset.y) * k)
-            viewTransform.scale = newScale
-            // Near the zoom-out limit, ease the page back to the centre so it lands exactly on the fitted
-            // view rather than stopping wherever the pinch left it.
-            let pull = ViewTransform.recentringAmount(from: oldScale, to: newScale, fitScale: fitted.scale)
-            if pull > 0 {
-                viewTransform.offset = CGPoint(x: viewTransform.offset.x + (fitted.offset.x - viewTransform.offset.x) * pull,
-                                               y: viewTransform.offset.y + (fitted.offset.y - viewTransform.offset.y) * pull)
-            }
+            zoom(by: g.scale, about: g.location(in: self))
             g.scale = 1
-            transformDidChange()
         case .ended, .cancelled, .failed:
             gestureEnded()
         default:

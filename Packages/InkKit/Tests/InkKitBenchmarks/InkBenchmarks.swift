@@ -478,12 +478,6 @@ final class InkBenchmarks: XCTestCase {
     }
 }
 
-private extension UInt64 {
-    func subtractingClamped(_ other: UInt64) -> UInt64 {
-        self > other ? self - other : 0
-    }
-}
-
 /// Regenerates the synthetic fixture. Skipped unless `INK_BENCH_WRITE_FIXTURE` names the file to write:
 ///
 ///     TEST_RUNNER_INK_BENCH_WRITE_FIXTURE=$PWD/Tests/InkKitBenchmarks/Fixtures/handwriting.synthetic.inkrec.json \

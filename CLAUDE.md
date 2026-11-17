@@ -65,14 +65,27 @@ Ink must not get slower. Budgets (from NOT-13), measured on a simulated iPad Pro
 - **Live stroke:** p95 < 2 ms of work per touch event, and it mustn't grow with stroke length.
 - **Page open:** < 150 ms to reopen a 5k-stroke page.
 
+Canvas budgets (NOT-98, `CanvasBenchmarks`). Today's engine misses most of them; the M1.5 canvas revamp works
+towards them, and they're marked as known misses in the baseline so they gate only once met:
+
+- **Edits:** undo, stroke erase and pixel erase on a 5k-stroke page show correct pixels in < 16 ms.
+- **Gestures:** no main-thread frame over 8 ms during a pinch or a pan (p95 and max), ink sharp < 150 ms after
+  the fingers lift, and < 8 ms of render work per pan step at 6×.
+- **Continuous scrolling:** a 5k-stroke page entering view has its ink in < 50 ms; scrolling a 20-page note of
+  5k-stroke pages adds < 300 MB.
+
 If you touch anything on the ink path (InkKit input, smoothing, geometry, rendering, rasters, page
 open/close), run the benchmarks in Release and compare with a baseline before and after:
 
 ```bash
 scripts/run-benchmarks.sh bench-output
 scripts/bench-compare.py bench-output/results.json \
-  --baseline Packages/InkKit/Benchmarks/baselines/apple-m1-pro-simulator.json
+  --baseline Packages/InkKit/Benchmarks/baselines/apple-m1-pro-simulator-canvas-revamp.json
 ```
+
+`apple-m1-pro-simulator-canvas-revamp.json` is today's engine (`main` before the canvas revamp) with every
+metric, the canvas ones included: compare M1.5 work against it. `--only zoom. pan. edit. scroll. memory.continuous`
+compares a run of just `-only-testing:InkKitBenchmarks/CanvasBenchmarks`.
 
 It fails on a > 10% regression or on a budget the baseline met and this run misses. The committed baseline
 was recorded on an M1 Pro, and simulator numbers are noisy: run on an idle Mac (not straight after other

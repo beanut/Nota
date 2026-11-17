@@ -39,6 +39,11 @@ final class ContinuousCanvasView: UIView {
     /// bar, the sidebar) can be told apart and scrolled to.
     private var trackedPageID: CanvasDocument.ID?
     private var canvases: [CanvasDocument.ID: CanvasView] = [:]
+    /// The pages that have a canvas now (in or near the view).
+    var liveCanvases: [CanvasView] {
+        Array(canvases.values)
+    }
+
     private var notebookObservation: AnyCancellable?
 
     /// The most pages that have a live canvas at once. Pages fitted to the width rarely show more than

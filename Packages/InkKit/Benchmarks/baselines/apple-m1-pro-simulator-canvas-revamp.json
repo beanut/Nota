@@ -1,0 +1,228 @@
+{
+  "environment": {
+    "configuration": "release",
+    "corpus": "synthetic",
+    "device": "iPad17,4",
+    "host_cpu": "Apple M1 Pro",
+    "note": "per-metric best of 2 runs of main's engine (NOT-98), Apple M1 Pro, iPad Pro 13-inch (M5) simulator",
+    "os": "iPadOS 27.2"
+  },
+  "metrics": {
+    "edit.erase_stroke_5k_ms": {
+      "budget": 16,
+      "unit": "ms",
+      "value": 3565.12
+    },
+    "edit.pixel_erase_5k_ms": {
+      "budget": 16,
+      "unit": "ms",
+      "value": 27.836
+    },
+    "edit.undo_5k_ms": {
+      "budget": 16,
+      "unit": "ms",
+      "value": 1886.363
+    },
+    "full_redraw.5k_ms": {
+      "unit": "ms",
+      "value": 1845.507
+    },
+    "full_redraw.crayon_500_ms": {
+      "unit": "ms",
+      "value": 158.653
+    },
+    "ink_file.5k_kb": {
+      "budget": 1024,
+      "unit": "KB",
+      "value": 1908.88
+    },
+    "ink_file.bytes_per_point": {
+      "unit": "B",
+      "value": 2.571
+    },
+    "ink_file.decode_5k_ms": {
+      "budget": 50,
+      "unit": "ms",
+      "value": 20.613
+    },
+    "ink_file.encode_5k_ms": {
+      "unit": "ms",
+      "value": 54.912
+    },
+    "live_event.crayon.long_stroke.first_quarter_p95_ms": {
+      "unit": "ms",
+      "value": 0.785
+    },
+    "live_event.crayon.long_stroke.last_quarter_p95_ms": {
+      "budget": 2,
+      "unit": "ms",
+      "value": 0.596
+    },
+    "live_event.crayon.p50_ms": {
+      "unit": "ms",
+      "value": 0.03
+    },
+    "live_event.crayon.p95_ms": {
+      "budget": 2,
+      "unit": "ms",
+      "value": 0.427
+    },
+    "live_event.crayon.p99_ms": {
+      "unit": "ms",
+      "value": 0.707
+    },
+    "live_event.crayon.wax_latency_p50_ms": {
+      "unit": "ms",
+      "value": 0.484
+    },
+    "live_event.crayon.wax_latency_p95_ms": {
+      "unit": "ms",
+      "value": 0.848
+    },
+    "live_event.long_stroke.first_quarter_p95_ms": {
+      "unit": "ms",
+      "value": 0.271
+    },
+    "live_event.long_stroke.last_quarter_p95_ms": {
+      "budget": 2,
+      "unit": "ms",
+      "value": 0.242
+    },
+    "live_event.p50_ms": {
+      "unit": "ms",
+      "value": 0.069
+    },
+    "live_event.p95_ms": {
+      "budget": 2,
+      "unit": "ms",
+      "value": 0.187
+    },
+    "live_event.p99_ms": {
+      "unit": "ms",
+      "value": 0.283
+    },
+    "live_event.stamp.p50_ms": {
+      "unit": "ms",
+      "value": 0.255
+    },
+    "live_event.stamp.p95_ms": {
+      "unit": "ms",
+      "value": 0.794
+    },
+    "live_event.stamp.p99_ms": {
+      "unit": "ms",
+      "value": 1.683
+    },
+    "memory.6x.geometry_mb": {
+      "unit": "MB",
+      "value": 108.578
+    },
+    "memory.6x.live_tiles_peak_mb": {
+      "unit": "MB",
+      "value": 15
+    },
+    "memory.6x.peak_mb": {
+      "unit": "MB",
+      "value": 155.609
+    },
+    "memory.continuous_20_pages.model_mb": {
+      "unit": "MB",
+      "value": 807.047
+    },
+    "memory.continuous_20_pages_mb": {
+      "budget": 300,
+      "unit": "MB",
+      "value": 940.563
+    },
+    "page_open.5k_ms": {
+      "budget": 150,
+      "unit": "ms",
+      "value": 15.179
+    },
+    "page_open_cold.1k_ms": {
+      "unit": "ms",
+      "value": 482.95
+    },
+    "page_open_cold.20k_ms": {
+      "unit": "ms",
+      "value": 11564.49
+    },
+    "page_open_cold.5k_ms": {
+      "unit": "ms",
+      "value": 2567.933
+    },
+    "page_raster.5k_kb": {
+      "unit": "KB",
+      "value": 5234.979
+    },
+    "page_raster.capture_5k_ms": {
+      "unit": "ms",
+      "value": 188.564
+    },
+    "pan.6x_dense.frame_max_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 42.805
+    },
+    "pan.6x_dense.frame_p50_ms": {
+      "unit": "ms",
+      "value": 0.079
+    },
+    "pan.6x_dense.frame_p95_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 2.922
+    },
+    "pan.6x_dense.step_render_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 190.486
+    },
+    "pan.6x_dense.time_to_sharp_ms": {
+      "budget": 150,
+      "unit": "ms",
+      "value": 237.598
+    },
+    "scroll.page_enter_5k_ms": {
+      "budget": 50,
+      "unit": "ms",
+      "value": 2310.859
+    },
+    "stroke_geometry.corpus_ms": {
+      "unit": "ms",
+      "value": 12.431
+    },
+    "stroke_geometry.per_stroke_us": {
+      "unit": "us",
+      "value": 194.234
+    },
+    "stroke_geometry.stamp.corpus_ms": {
+      "unit": "ms",
+      "value": 41.992
+    },
+    "stroke_geometry.stamp.per_stroke_us": {
+      "unit": "us",
+      "value": 656.127
+    },
+    "zoom.pinch_1x_6x.frame_max_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 42.764
+    },
+    "zoom.pinch_1x_6x.frame_p50_ms": {
+      "unit": "ms",
+      "value": 0.074
+    },
+    "zoom.pinch_1x_6x.frame_p95_ms": {
+      "budget": 8,
+      "unit": "ms",
+      "value": 5.094
+    },
+    "zoom.pinch_1x_6x.time_to_sharp_ms": {
+      "budget": 150,
+      "unit": "ms",
+      "value": 318.354
+    }
+  },
+  "schema": 1
+}
