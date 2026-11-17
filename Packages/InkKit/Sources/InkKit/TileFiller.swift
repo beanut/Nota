@@ -146,6 +146,26 @@ enum TileBitmap {
         return region.insetBy(dx: -pad, dy: -pad)
     }
 
+    /// `pixels`, a tile's worth of one stroke drawn alone (the live layer's, `LiveInkView.bakedInk(of:)`),
+    /// laid over `base` with a normal blend, pixel on pixel: what drawing the stroke into the tile gives,
+    /// without drawing it again (NOT-110).
+    static func composite(_ pixels: CGImage, over base: CGImage?) -> CGImage? {
+        let side = TileKey.side
+        guard pixels.width == side, pixels.height == side, let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: space, bitmapInfo: CommittedRenderer.bitmapInfo)
+        else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: side, height: side) // base space: upright, like `context(for:)`
+        ctx.interpolationQuality = .none
+        if let base {
+            ctx.setBlendMode(.copy)
+            ctx.draw(base, in: rect)
+        }
+        ctx.setBlendMode(.normal)
+        ctx.draw(pixels, in: rect)
+        return ctx.makeImage()
+    }
+
     /// A blank bitmap for `key`, or one starting from `image` (the tile's pixels so far).
     static func context(for key: TileKey, startingFrom image: CGImage? = nil) -> CGContext? {
         context(pixelRect: key.pixelRect, level: key.level, startingFrom: image)

@@ -65,7 +65,7 @@ The editor's chrome (Pen Case, page bar, tool options, quick palette), the paper
 | `ZoomWindow.swift` | `WritingLines` (a page's ruling) and `ZoomWindow`, the box's geometry: auto-advance, line return, dragging and resizing |
 | `ZoomPanelView.swift` | The zoom window's writing panel and the box overlay drawn on the page |
 | `MultiFingerTapRecognizer.swift` | Two- and three-finger taps (undo, redo) without multi-tap delay |
-| `LiveInkView.swift` | The live ink layer: a grid of tile layers showing the in-progress stroke and strokes awaiting rasterization, plus the hover/eraser cursor |
+| `LiveInkView.swift` | The live ink layer: a grid of tile layers on the committed tiles' pixel grid showing the in-progress stroke and strokes awaiting rasterization, the finished stroke's pixels handed to the committed tiles (`bakedInk(of:)`), plus the hover/eraser cursor |
 | `BrushDescriptor.swift` | `BrushDescriptor`: every brush parameter, its legal range and `clamped()`, and lenient JSON |
 | `BuiltInBrushes.swift` | The built-in brush set (pens, pencils, highlighters, pixel eraser), `sized` and `personalized` (the Pressure & Tilt settings on top of a brush's character) |
 | `BrushPicker.swift` | The tool options' brush picker (built-in brushes, then the user's), with sample strokes drawn by the engine (`BrushPreview`) |
@@ -228,8 +228,10 @@ with Pencil (NOT-12).
     the tile draws like any baked ink. Each tile has one job out at most; dirt asked for meanwhile waits and
     goes next. So the crayon's wax shows when the GPU is done (0.5 ms p50, 1.7 ms p95 on the simulator),
     up to about a frame after the other ink would. A wait per tile cost 0.3–1.5 ms on the simulator, several
-    times an event, which is why it's asynchronous. The committed layer and page images still draw
-    synchronously.
+    times an event, which is why it's asynchronous. Page images still draw synchronously. A finished crayon
+    stroke waits for its last wax to come back (up to the 0.25 s estimate deadline) and then hands its wax to
+    the committed tiles like any normal-blend ink (see Rendering pipeline › A finished stroke); where its wax
+    isn't back, its tiles are drawn synchronously as before.
   - **Fallback.** Without a Metal device, or for a region over 8192² pixels, the stroke's paths are filled
     with the grain pattern of the same scale, contrast and seed, like a pencil. A build that doesn't know
     `wax` decodes it as `none` (as it does any unknown texture) and draws the same stamps solid.
@@ -727,6 +729,15 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
      waiting for their estimates out, so a fill that started before the stroke was sent lands labelled with the
      revision before it: where the stroke doesn't reach, the coordinator's stroke log moves the label on; where
      it does, or the job saw a tile a fill has since replaced, the tile is marked stale and filled again.
+   - **No second rasterization at the level it was written at (NOT-110).** The live layer has already drawn the
+     stroke, alone, on the same pixel grid, so the tiles of the level it was written at take those pixels instead
+     (`LiveInkView.bakedInk(of:)`, `TileBitmap.composite`): each tile lays its quarter of a live tile over what it
+     has with a normal blend, which is what drawing the stroke on gives, to a level of rounding at its
+     anti-aliased edges (the tests hold such tiles to fills within 2 of 255 in all but 0.2% of pixels). The
+     stroke is drawn from its geometry, as before, where that isn't so: multiply ink and erasers (they need
+     what's under them), a stroke with estimates still to come, a page origin off a whole device pixel, other
+     levels' cached tiles, tiles the live layer never covered (off screen), and a crayon's tiles whose wax isn't
+     back. `FillStats.finishedStrokeFills` / `finishedStrokeCopies` count the two.
    - **Live and committed match** as before: the same `.copy` run rule, multiply and wax, on a pixel grid
      aligned with the live layer's, and the pencil grain is pinned to the page in both
      (`PencilTexture.pinToPage`: the pattern anchored at the page origin's device pixel, not reduced modulo a
@@ -758,9 +769,10 @@ put as the page pans and zooms, and isn't saved (the controller keeps its place 
    - `PageRenderer` (thumbnails, PDF, the golden snapshots) still draws the page whole; tiles differ from it in
      well under 0.2% of pixels (Core Graphics' coverage of a path cut by a different clip), and the tile tests
      hold them to that.
-2. **Live layer.** The in-progress stroke is drawn in a separate view made of 256 pt tile layers, so per-frame work doesn't grow with stroke length, screen size or zoom:
-   - The stroke is cut into chunks of 8 segments. A chunk that is complete, and whose points are no longer waiting for estimated-property updates, is **baked**: rasterized once into a per-stroke bitmap for each tile it reaches, and never filled again.
-   - Only the **hot** part (the newest chunk or two and the provisional tail) is re-filled each frame, and only in the tiles under the new ink, clipped to the invalidated rect.
+2. **Live layer.** The in-progress stroke is drawn in a separate view made of tile layers, so per-frame work doesn't grow with stroke length, screen size or zoom:
+   - **On the committed grid (NOT-110).** A live tile is 512 device pixels square (256 pt at 2×), laid from the page origin's device pixel, so it covers exactly 2 × 2 committed tiles of the level the view is settled at. Its bitmaps are then the committed tiles' pixels, and a finished stroke hands them over (Committed layer › No second rasterization). The layer is still view-sized: it covers the view, not the page.
+   - The stroke is cut into chunks of 8 segments. A chunk that is complete, and whose points are no longer waiting for estimated-property updates, is **baked**: rasterized once into a per-stroke bitmap for each tile it reaches, and never filled again. A tile draw bakes at most 64 runs (`bakeBudget`), carrying on next draw, so several chunks settling at once when late estimates arrive (a stamp brush's chunk is about a hundred runs, up to a millisecond to bake) don't land on one touch event.
+   - Only the **hot** part (what the tile hasn't baked: the newest chunk or two and the provisional tail) is re-filled each frame, and only in the tiles under the new ink, clipped to the invalidated rect. Runs whose own bounds miss that rect are skipped (`LiveStroke.runs(within:)`).
    - Baking uses `.copy`, the same "later run replaces earlier" rule as the committed path, so live and committed pixels match.
    - A late estimate that changes a baked chunk re-bakes just the tiles it touches. Tiles are freed once every stroke has been committed.
    - A raster brush (the crayon) bakes its wax field on the GPU instead and gets its pixels back asynchronously (see Brushes › Raster brushes).
@@ -1027,7 +1039,7 @@ More › Scroll Direction › Vertical (`PageLayoutMode.continuous`, the default
 - **Pooled canvases (NOT-107).** Views follow what's on screen (at most 6 canvases), not the note's length, and scrolling makes none: a page leaving view leaves its tiles, finishes what belonged to it (a text box, a crop, the selection), stops its coordinator (`CanvasView.leavePage()`) and its canvas waits, hidden, for the next page to enter view, which it's handed with its layers, gestures and interactions (`show(_:)`). The page gets a new `RenderCoordinator` over the old one's tile layers. A canvas taking ink is never handed on.
 - **Prefetch ahead of the scroll.** How far ahead pages get a canvas grows with the scroll's speed (`ContinuousPageLayout.prefetchRect`: half a screen either way, plus 0.4 s of the scroll ahead, at most two screens), so a fling's next pages have their canvas, and their tiles on their way, before they're on screen. A page not on screen yet fills behind every page that is (`CanvasView.isAhead`: its fills are `margin` priority). A page scrolled into view zoomed in gets its resting level in view first where that isn't cached (restored, or filled at a quarter of the tiles or fewer), shown blurred under the zoomed level until that lands, rather than paper.
 - **Pages that scroll past keep no geometry.** Every page keeps its strokes' geometry in the page's `PageGeometry`, in the app's one budgeted `GeometryCache` (see Stroke geometry › Keeping geometry), and none is built after restoring tiles. A page's first fills in continuous scrolling use what's kept (another canvas on the page may have built it) but add nothing; edits keep what they build. That's what brought `memory.continuous_20_pages_mb` from ~800 MB to under 300 (NOT-107, then with a `keepsGeometry` flag per coordinator; NOT-108 made it the shared cache's keep rule).
-- **Scrolling doesn't draw ink again.** Each canvas sits in the scroll content over its *render window* (`ContinuousPageLayout.renderWindow`): the viewport plus half a screen above and below and a quarter to each side, cut to the page. At zoom 1 that's the whole page. The scroll view moves the canvas, ink and all, with the paper. The window is kept even though the ink, template and objects are page-space tiles (which never need it, NOT-109): it still bounds the canvas's view-sized layers (live ink, lasso), so they're drawn again only when the window re-centres, not every frame of a scroll. Letting the windows go waits on the live layer moving to page space (NOT-110). A page fills tiles only when it gets its canvas and they aren't cached, when the zoom changes (at the new level, once the pinch ends), and, when zoomed in, for the tiles a re-centred window uncovers. During a pinch the window keeps its size and the last level is scaled. The host places each page with `place(_:settled:)`, and an embedded canvas that's resized keeps that placement (a canvas resized mid-pinch past the smallest zoom used to draw its page fitted to its new size, over the page beside it).
+- **Scrolling doesn't draw ink again.** Each canvas sits in the scroll content over its *render window* (`ContinuousPageLayout.renderWindow`): the viewport plus half a screen above and below and a quarter to each side, cut to the page. At zoom 1 that's the whole page. The scroll view moves the canvas, ink and all, with the paper. The window is kept even though the ink, template and objects are page-space tiles (which never need it, NOT-109): it still bounds the canvas's view-sized layers (live ink, lasso), so they're drawn again only when the window re-centres, not every frame of a scroll. NOT-110 put the live layer's tiles on the page's pixel grid but kept the layer view-sized (it only holds strokes being written or waiting to be drawn), so the windows stay; letting them go is left to NOT-112. A page fills tiles only when it gets its canvas and they aren't cached, when the zoom changes (at the new level, once the pinch ends), and, when zoomed in, for the tiles a re-centred window uncovers. During a pinch the window keeps its size and the last level is scaled. The host places each page with `place(_:settled:)`, and an embedded canvas that's resized keeps that placement (a canvas resized mid-pinch past the smallest zoom used to draw its page fitted to its new size, over the page beside it).
 - **Paged and continuous share the page bar and sidebar:** choosing a page scrolls to it, and reordering keeps the page being read where it was on screen. Writing in the bottom 15% of the last page adds a page like it.
 - **Writing across pages** (`PageSeam`). Ink and the eraser (every mode) carry on from one page onto the next without lifting the Pencil. The touch keeps arriving at the page the stroke began on, which hands each event to `ContinuousCanvasView`; every page with a canvas takes part while the Pencil is within its *reach* above or below it, and runs a piece of the stroke of its own, in its own coordinates, through the same `LiveStroke` path as any stroke (`joinStroke`, `continueStroke`, `leaveStroke`). The reach is the brush's longest taper plus twice its nib radius plus 12 points (at most 160), so neighbouring pages' pieces overlap across the gap: the piece above runs on past its bottom edge and the piece below starts above its top. Each page clips its ink to the page, so what shows is the same ink from the same samples up to the edge, and the pieces' ends, tapers and the stabiliser settling in all fall off the page. Each piece is committed as an ordinary stroke of its page, so saving needs nothing new. A piece whose ink never reached its page is dropped; a joined piece is never a tap or a shape (the shape tool, the lasso and the gesture tools stay on their page, and holding still doesn't snap a stroke on two pages). The pages' pieces share one `CanvasDocument.editGroup`, and undo or redo on any of them takes back the others' (`InkNotebook.undoGroup(_:)`), unless a page was edited since. Refined force and tilt are forwarded to the pages that joined. While a stroke is under way, the pages taking part keep their canvases and stay put, the scroll view doesn't pan or zoom, and writing past the end of the last page adds the next page at once, so the stroke carries on onto it. The cost per event is a location check for each page with a canvas (at most six).
 - **Not yet:** the lasso works on one page at a time, so a selection can't span two pages or be dragged onto another; and the zoom window is offered only in paged mode.
@@ -1111,7 +1123,7 @@ InkKit's own code paths, the ones `CanvasView` runs, on a model iPad Pro 13-inch
 | `ink_file.5k_kb`, `ink_file.bytes_per_point` | Size of a 5k-stroke page's `.ink` file. Each corpus copy is stretched a little so the compressor can't match copies against each other | < 1024 KB |
 | `ink_file.encode_5k_ms` / `decode_5k_ms` | Encoding that page, and decoding it back (which joins page open in NOT-6) | decode < 50 ms |
 | `stroke_geometry.stamp.*` | `stroke_geometry.*` with every stroke drawn by a stamp brush (bristles, jitter) | – (baseline only) |
-| `live_event.stamp.p50/p95/p99_ms` | `live_event.*` with the same stamp brush | – (baseline only) |
+| `live_event.stamp.p50/p95/p99_ms` | `live_event.*` with the same stamp brush | p95 and p99 < 2 ms |
 | `live_event.crayon.p50/p95/p99_ms` | `live_event.*` with every stroke drawn with the crayon: encoding each dirty tile's GPU job, plus copying back the wax that's finished (the main queue is drained after each event, without waiting) | p95 < 2 ms |
 | `live_event.crayon.wax_latency_p50/p95_ms` | From committing a tile's crayon job to its pixels being back on the main queue | – |
 | `live_event.crayon.long_stroke.*` | `live_event.long_stroke.*` with the crayon: its baked field must keep the work flat as the stroke grows | last-quarter p95 < 2 ms |
@@ -1258,7 +1270,10 @@ capacity, unknown changes), the reach a change counts (recolour, reorder, cut in
 change moves the ink version (live erasing and lasso drags too, objects not), a region refill against the tile
 drawn from scratch for every kind of ink at two levels, and on a coordinator: an undo refilling only regions
 of the tiles it reached, live erasing refilling as it goes, and the tiles after random sequences of every
-edit, undo and redo, at two levels, against tiles drawn from scratch.
+edit, undo and redo, at two levels, against tiles drawn from scratch. `LiveHandOffTests` checks NOT-110's
+hand-off: a stroke of every bundled brush written through the live layer and committed fills no tile at its own
+level (multiply ink does), and every tile matches one filled from scratch; the same zoomed in at an odd scale;
+a stroke running off screen filled only where the live layer never drew it; and live tiles on the committed grid.
 
 `StrokeIndexTests` checks the spatial index: grid queries against a scan (z-order, huge, empty and off-page
 rects, renumbering), that a stroke's reach holds its ink for every bundled brush, and the page's index against

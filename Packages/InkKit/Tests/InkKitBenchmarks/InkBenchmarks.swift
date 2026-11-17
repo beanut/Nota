@@ -135,7 +135,7 @@ final class InkBenchmarks: XCTestCase {
     // MARK: Stamp brushes
 
     /// The stamp path's benchmark brush (NOT-16): a dry brush, with bristles and every kind of jitter,
-    /// sized from each recorded stroke's width. It has no budget yet; these numbers are its baseline.
+    /// sized from each recorded stroke's width. Held to the live budget like any brush (NOT-110).
     static func stampBrush(width: CGFloat) -> BrushDescriptor {
         BrushDescriptor(name: "Benchmark Dry Brush", size: width * 0.5 ... width * 2,
                         texture: .bristle(count: 8, spread: 0.9), spacing: 0.3,
@@ -186,8 +186,9 @@ final class InkBenchmarks: XCTestCase {
         }
         let stats = Stats(events)
         BenchResults.record("live_event.stamp.p50_ms", stats.median, unit: "ms")
-        BenchResults.record("live_event.stamp.p95_ms", stats.p95, unit: "ms")
-        BenchResults.record("live_event.stamp.p99_ms", stats.p99, unit: "ms")
+        BenchResults.record("live_event.stamp.p95_ms", stats.p95, unit: "ms", budget: Self.liveEventBudgetMs)
+        BenchResults.record("live_event.stamp.p99_ms", stats.p99, unit: "ms", budget: Self.liveEventBudgetMs)
+        check(stats.p95, under: Self.liveEventBudgetMs, "Live-stroke work per touch event with a stamp brush (p95)")
     }
 
     // MARK: Raster brush

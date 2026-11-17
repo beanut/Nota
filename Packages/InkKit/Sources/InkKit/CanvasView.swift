@@ -241,6 +241,7 @@ final class CanvasView: UIView {
         templateTiles.onPublish = { [weak self] in self?.vectorTilesDidPublish() }
         objectTiles.onPublish = { [weak self] in self?.vectorTilesDidPublish() }
         liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
+        liveView.waxDidLand = { [weak self] _ in self?.coordinator.schedulePendingCommit() }
         inkClipView.addSubview(liveView)
         addSubview(tapeView)
 
@@ -952,6 +953,14 @@ extension CanvasView: RenderCoordinatorHost {
 
     func hasOutstandingEstimates(for strokeID: UUID) -> Bool {
         input.estimates.isOutstanding(strokeID)
+    }
+
+    func bakedInk(of stroke: LiveStroke) -> LiveInkView.BakedInk? {
+        liveView.bakedInk(of: stroke)
+    }
+
+    func isBakingLive(_ stroke: LiveStroke) -> Bool {
+        stroke.stroke.brush.isRaster && liveView.isWaxPending(for: stroke)
     }
 
     func renderCoordinatorNeedsLayout() {

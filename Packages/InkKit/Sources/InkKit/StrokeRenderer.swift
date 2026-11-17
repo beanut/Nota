@@ -1020,6 +1020,8 @@ final class LiveStroke {
     private struct Chunk {
         var bounds: CGRect = .null
         var runs: [StrokeRun]?
+        /// Each run's path bounds, built with `runs`.
+        var runBounds: [CGRect] = []
     }
 
     private var chunks: [Chunk] = []
@@ -1265,12 +1267,23 @@ final class LiveStroke {
         return max(settled, finalized.count - Self.maxUnsettledSegments) / Self.chunkSize
     }
 
+    /// Chunks so far, the last one possibly short of `chunkSize` segments.
+    var chunkCount: Int {
+        chunks.count
+    }
+
     func chunkBounds(_ c: Int) -> CGRect {
         chunks[c].bounds
     }
 
     func chunkRuns(_ c: Int) -> [StrokeRun] {
         ensureChunkRuns(c)
+    }
+
+    /// The path bounds of each of `chunkRuns(c)`.
+    func chunkRunBounds(_ c: Int) -> [CGRect] {
+        _ = ensureChunkRuns(c)
+        return chunks[c].runBounds
     }
 
     /// Bounds of each chunk plus the tail: where the stroke has ink, without the empty space a single
@@ -1299,6 +1312,30 @@ final class LiveStroke {
             result.append(contentsOf: StrokeRenderer.runs(from: tail))
         }
 
+        return result
+    }
+
+    /// `runs(intersecting:fromChunk:)` less the runs whose own bounds miss `rect`: all that filling clipped to
+    /// `rect` needs, since a run outside the clip changes no pixel in it. A stamp brush's chunk is dozens of
+    /// runs (a jittered opacity starts a new one at almost every stamp), and a live redraw is clipped to the few
+    /// points the newest ink covers, so this skips most of them (NOT-110).
+    /// With `firstRun`, chunk `first`'s runs before it are left out too (the live layer bakes a chunk a few
+    /// runs at a time).
+    func runs(within rect: CGRect, fromChunk first: Int = 0, run firstRun: Int = 0) -> [StrokeRun] {
+        var result: [StrokeRun] = []
+        for c in first ..< max(first, chunks.count) {
+            guard chunks[c].bounds.intersects(rect) else { continue }
+            let runs = ensureChunkRuns(c)
+            let bounds = chunks[c].runBounds
+            for i in (c == first ? min(firstRun, runs.count) : 0) ..< runs.count where bounds[i].intersects(rect) {
+                result.append(runs[i])
+            }
+        }
+        if tailBounds.intersects(rect) {
+            for run in StrokeRenderer.runs(from: tail) where run.path.boundingBox.intersects(rect) {
+                result.append(run)
+            }
+        }
         return result
     }
 
@@ -1336,6 +1373,7 @@ final class LiveStroke {
         }
         let runs = StrokeRenderer.runs(from: finalized[startSeg ..< endSeg].joined())
         chunks[c].runs = runs
+        chunks[c].runBounds = runs.map(\.path.boundingBox)
         return runs
     }
 }

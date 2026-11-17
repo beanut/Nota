@@ -33,10 +33,24 @@ protocol RenderCoordinatorHost: AnyObject {
     /// True while the page isn't on screen yet but is about to be (continuous scrolling's prefetch): its
     /// tiles are filled behind those of every page on screen.
     var rendersAhead: Bool { get }
+    /// The finished stroke's pixels as the live layer baked them, for the committed tiles at its level to
+    /// take instead of drawing the stroke again (NOT-110); nil if it has none to give.
+    func bakedInk(of stroke: LiveStroke) -> LiveInkView.BakedInk?
+    /// Whether the live layer is still getting the finished stroke's pixels (a raster brush's wax on the GPU):
+    /// it's drawn into the committed ink once they're in, so they can be handed over.
+    func isBakingLive(_ stroke: LiveStroke) -> Bool
 }
 
 extension RenderCoordinatorHost {
     var rendersAhead: Bool {
+        false
+    }
+
+    func bakedInk(of _: LiveStroke) -> LiveInkView.BakedInk? {
+        nil
+    }
+
+    func isBakingLive(_: LiveStroke) -> Bool {
         false
     }
 }
@@ -73,6 +87,10 @@ struct FillStats: Equatable {
     var tilesRestored = 0
     /// Tiles brought up to date by refilling only the part an edit changed (NOT-104); also in `tilesFilled`.
     var tilesRefilledInPart = 0
+    /// Cached tiles a finished stroke was drawn into by filling it (rasterizing it again).
+    var finishedStrokeFills = 0
+    /// Cached tiles that took a finished stroke's pixels from the live layer instead (NOT-110).
+    var finishedStrokeCopies = 0
     /// Wall time during which any of the coordinator's tile fills was running, in milliseconds.
     var milliseconds = 0.0
     /// Every fill's own time added up (more than `milliseconds` when fills ran side by side), in milliseconds.
@@ -1165,7 +1183,8 @@ final class RenderCoordinator {
                 continue
             }
             let hasEstimates = host?.hasOutstandingEstimates(for: item.live.stroke.id) ?? false
-            let ready = !hasEstimates || now >= item.deadline
+            let baking = host?.isBakingLive(item.live) ?? false
+            let ready = !hasEstimates && !baking || now >= item.deadline
             if ready {
                 submitPendingStroke(item)
             } else {
@@ -1194,17 +1213,22 @@ final class RenderCoordinator {
         drawSubmittedStrokes()
     }
 
-    /// A finished stroke as its job draws it.
+    /// A finished stroke as its job draws it: from the live layer's pixels where it has them at the tile's
+    /// level, else from its geometry.
     private struct SentStroke {
         let stroke: TileStroke
         let log: LoggedStroke
+        let baked: LiveInkView.BakedInk?
     }
 
-    /// What a finished-stroke job did to one tile: the tile it started from, and the tile with the strokes.
+    /// What a finished-stroke job did to one tile: the tile it started from, and the tile with the strokes,
+    /// and how many strokes it filled and copied from the live layer.
     private struct StrokeDraw {
         let key: TileKey
         let base: Tile
         let drawn: Tile
+        var fills = 0
+        var copies = 0
     }
 
     /// Draws the finished strokes sent to be drawn into every cached tile of the page they reach, at every
@@ -1218,11 +1242,14 @@ final class RenderCoordinator {
         guard !batch.isEmpty else { return }
         drawing = batch
         let strokes = batch.map { item in
-            SentStroke(stroke: TileStroke(geometry: item.geometry, brush: item.live.stroke.brush,
-                                          color: item.live.stroke.color),
-                       log: LoggedStroke(from: item.revisionBefore,
-                                         to: item.revisionAfter >= 0 ? item.revisionAfter : Tile.unknownRevision,
-                                         reach: item.geometry.bounds.insetBy(dx: -3, dy: -3)))
+            // Estimates still to come would change the stroke the live layer baked: draw it from its geometry.
+            let settled = !(host?.hasOutstandingEstimates(for: item.live.stroke.id) ?? false)
+            return SentStroke(stroke: TileStroke(geometry: item.geometry, brush: item.live.stroke.brush,
+                                                 color: item.live.stroke.color),
+                              log: LoggedStroke(from: item.revisionBefore,
+                                                to: item.revisionAfter >= 0 ? item.revisionAfter : Tile.unknownRevision,
+                                                reach: item.geometry.bounds.insetBy(dx: -3, dy: -3)),
+                              baked: settled ? host?.bakedInk(of: item.live) : nil)
         }
         let reach = strokes.reduce(CGRect.null) { $0.union($1.log.reach) }
         let reached = cache.tiles(page: page).filter { $0.key.rect.intersects(reach) }
@@ -1230,6 +1257,7 @@ final class RenderCoordinator {
         let job = RenderJob(priority: .underPencil, cancellation: lifetime, work: { _ -> [StrokeDraw]? in
             reached.compactMap { key, base -> StrokeDraw? in
                 var tile = base
+                var fills = 0, copies = 0
                 for s in strokes where s.log.reach.intersects(key.rect) {
                     // Filled after the stroke was added (before it was sent): it's in there already.
                     if s.log.to != Tile.unknownRevision, tile.revision >= s.log.to {
@@ -1240,11 +1268,23 @@ final class RenderCoordinator {
                         tile = Tile(image: nil, revision: revision)
                         continue
                     }
+                    // At the level it was written at, the live layer has the stroke's pixels: lay them on.
+                    if let pixels = s.baked?.pixels(for: key) {
+                        copies += 1
+                        guard let pixels else {
+                            tile = Tile(image: tile.image, revision: revision) // it leaves no pixel here
+                            continue
+                        }
+                        guard let image = TileBitmap.composite(pixels, over: tile.image) else { return nil }
+                        tile = Tile(image: image, revision: revision)
+                        continue
+                    }
                     guard let ctx = TileBitmap.context(for: key, startingFrom: tile.image) else { return nil }
                     filler.fill(key, region: nil, strokes: [s.stroke], into: ctx)
+                    fills += 1
                     tile = Tile(image: ctx.makeImage(), revision: revision)
                 }
-                return StrokeDraw(key: key, base: base, drawn: tile)
+                return StrokeDraw(key: key, base: base, drawn: tile, fills: fills, copies: copies)
             }
         }, publish: { [weak self] (draws: [StrokeDraw]?) in
             self?.strokesDidLand(batch, draws: draws ?? [], log: strokes.map(\.log))
@@ -1256,6 +1296,8 @@ final class RenderCoordinator {
                                 log: [LoggedStroke]) {
         drawing = []
         for draw in draws {
+            fillStats.finishedStrokeFills += draw.fills
+            fillStats.finishedStrokeCopies += draw.copies
             // A fill published since the job read the tile: keep it if it has the strokes, else mark it stale.
             let held = cache.tile(for: draw.key)
             if held?.revision == draw.base.revision, held?.image === draw.base.image {
