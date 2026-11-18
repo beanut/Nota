@@ -4,13 +4,16 @@ import UIKit
 /// Raw-touch drawing surface.
 ///
 /// Layers, bottom to top:
-///  1. `pageLayer` and `templateView` – the paper and its template (the background).
-///  2. `objectLayer` – the page's objects (see `PageObject`), drawn as vectors at the current transform.
-///  3. `coordinator.layer` – the committed ink: finished strokes, drawn off the main thread by the
-///     `RenderCoordinator` (coalesced full re-renders and incremental commits).
+///  1. `pageLayer` and `templateTiles` – the paper and its template (the background).
+///  2. `objectTiles` – the page's objects (see `PageObject`), then `objectFloat`, the ones being moved or drawn.
+///     The template and objects are page-space tiles like the ink, drawn off the main thread into the
+///     shared `TileCache` (`VectorTileLayer`, NOT-109).
+///  3. `coordinator.layer` – the committed ink: finished strokes in page-space tiles, filled off the main
+///     thread by the `RenderCoordinator` into the shared `TileCache`.
 ///  4. `liveView` – the in-progress stroke and pending strokes awaiting background rasterization and
 ///     late estimated property updates, in a grid of tile layers (see `LiveInkView`).
-///  5. `tapeLayer` – the page's tape, which covers the ink (`TapeObject`), then the laser (`LaserView`).
+///  5. `tapeView` – the page's tape, which covers the ink (`TapeObject`): `tapeTiles` and `tapeFloat`; then
+///     the laser (`LaserView`).
 ///  6. `lassoOverlayView` – the lasso, the selection box and its handles (the overlay), then the ruler.
 final class CanvasView: UIView {
     /// The page, the desk around it and the lasso's accent, from the editor's `InkTheme` (see `apply(_:)`).
@@ -20,13 +23,30 @@ final class CanvasView: UIView {
     private var shadowColor = InkTheme.standard.shadow
     private(set) var paperTheme = InkTheme.standard
 
-    let document: CanvasDocument
+    /// The page shown. An embedded canvas is handed another page as pages scroll in and out of view
+    /// (`show(_:)`, NOT-107); otherwise it's the page the view was made with.
+    private(set) var document: CanvasDocument
     /// True when the view is one page among several in continuous scrolling (`ContinuousCanvasView`): the
     /// host places the page (`place(_:settled:)`) and does the scrolling and zooming, and the view is
     /// transparent outside its page so the pages around it show through.
     let isEmbedded: Bool
     /// Where the host has put the page, while embedded.
     var placement = ViewTransform()
+    /// While embedded, whether the host is still moving the page (`place(_:settled:)`).
+    var placementMoving = false
+    /// While embedded, true when the page isn't on screen yet but is about to be: the host gave it a
+    /// canvas ahead of the scroll, and its tiles fill behind those of the pages on screen.
+    var isAhead = false {
+        didSet {
+            if isAhead != oldValue {
+                coordinator.rendersAheadDidChange()
+            }
+        }
+    }
+
+    /// The scale whose tiles the committed layer keeps while zoomed (set by a host that zooms the page
+    /// itself, as continuous scrolling does); nil: the fitted page's.
+    var restingScaleOverride: CGFloat?
     weak var controller: CanvasController? {
         didSet { pencilSettingsDidChange() }
     }
@@ -42,9 +62,11 @@ final class CanvasView: UIView {
     }
 
     /// The committed ink: its surface, geometry cache, strokes waiting to be drawn and render requests.
-    let coordinator: RenderCoordinator
-    /// True when the committed layer shows the page as it is, sharp at the current transform: no render,
-    /// raster restore or finished stroke on its way. What the canvas benchmarks wait for after an edit,
+    /// One per page shown: an embedded canvas handed another page gets a new one, over the same layers.
+    private(set) var coordinator: RenderCoordinator
+    /// True when the committed layer shows the page as it is, sharp at the current transform: its tiles in
+    /// view are at the transform's own level and the page's revision, and no fill of a tile in view or
+    /// finished stroke is on its way (the margin around the view may still be filling). What the canvas benchmarks wait for after an edit,
     /// a gesture or a page entering view.
     var rendersSettled: Bool {
         coordinator.isSettled
@@ -54,7 +76,11 @@ final class CanvasView: UIView {
     var settleLink: CADisplayLink?
 
     private let pageLayer = CALayer()
-    private let templateView = TemplateView()
+    /// The paper and template shown, and the tiles they're drawn into.
+    private(set) var paper = TemplatePaper()
+    let templateTiles = VectorTileLayer()
+    /// Holds the template and object layers, under the ink.
+    private let underInkView = UIView()
     /// Holds the ink layers; masked to the page so strokes running off the edge are clipped.
     private let inkClipView = UIView()
     private let inkMask = CAShapeLayer()
@@ -108,9 +134,13 @@ final class CanvasView: UIView {
     var lassoSession: LassoSession?
     var selection = PageSelection.empty
     var selectionBox: SelectionBox? // canvas space; nil when nothing is selected
-    let objectLayer = ObjectLayerView()
-    /// Tape: objects drawn over the ink (`PageObject.drawsOverInk`).
-    let tapeLayer = ObjectLayerView()
+    /// The page's objects under the ink, in tiles; the ones being moved or drawn float over them.
+    let objectTiles = VectorTileLayer()
+    let objectFloat = FloatingObjectsLayer()
+    /// Tape: objects drawn over the ink (`PageObject.drawsOverInk`), in tiles and floating, in `tapeView`.
+    let tapeTiles = VectorTileLayer()
+    let tapeFloat = FloatingObjectsLayer()
+    let tapeView = UIView()
     let lassoOverlayView = LassoOverlayView()
     /// How many times each clip has been pasted on this page in its own place, so the next paste of it
     /// lands a step further along (see `PastePlacement`).
@@ -150,8 +180,8 @@ final class CanvasView: UIView {
     var zoomBoxView: ZoomBoxOverlayView?
     var zoomGeneration: UInt64 = 0
     var zoomRenderScheduled = false
-    var zoomRenderInFlight = false
-    var zoomRenderRequested = false
+    /// The newest render of the panel shown so far: an older one landing later is dropped.
+    var zoomShownGeneration: UInt64 = 0
     /// Strokes that ended while the panel was showing, kept on the panel's live layer until a render of
     /// the box includes them, so they never blink out.
     var zoomHeld: [LiveStroke] = []
@@ -181,8 +211,16 @@ final class CanvasView: UIView {
         pageLayer.shadowRadius = 6
         pageLayer.shadowOffset = CGSize(width: 0, height: 2)
         layer.addSublayer(pageLayer)
-        addSubview(templateView)
-        addSubview(objectLayer)
+        for view in [underInkView, tapeView] {
+            view.isUserInteractionEnabled = false
+            view.backgroundColor = .clear
+        }
+        underInkView.layer.addSublayer(templateTiles.layer)
+        underInkView.layer.addSublayer(objectTiles.layer)
+        underInkView.layer.addSublayer(objectFloat.layer)
+        tapeView.layer.addSublayer(tapeTiles.layer)
+        tapeView.layer.addSublayer(tapeFloat.layer)
+        addSubview(underInkView)
 
         inkClipView.isUserInteractionEnabled = false
         inkClipView.backgroundColor = .clear
@@ -191,12 +229,21 @@ final class CanvasView: UIView {
 
         inkClipView.layer.addSublayer(coordinator.layer)
 
-        templateView.provideBackdrop(for: liveView) { [weak self] ctx, transform, rect in
-            self?.objectLayer.drawObjects(at: transform, viewRect: rect, in: ctx)
+        // The opaque backdrop the live layer previews multiply ink over: the paper, then the template and
+        // objects as their tiles show them.
+        liveView.drawPaper = { [weak self] ctx, transform, rect in
+            guard let self else { return }
+            ctx.setFillColor(paper.palette.surface)
+            ctx.fill(transform.toView(document.pageBounds).intersection(rect))
+            templateTiles.draw(in: ctx, at: transform, viewRect: rect)
+            objectTiles.draw(in: ctx, at: transform, viewRect: rect)
         }
+        templateTiles.onPublish = { [weak self] in self?.vectorTilesDidPublish() }
+        objectTiles.onPublish = { [weak self] in self?.vectorTilesDidPublish() }
         liveView.entries = { [weak self] in self?.liveEntries() ?? [] }
+        liveView.waxDidLand = { [weak self] _ in self?.coordinator.schedulePendingCommit() }
         inkClipView.addSubview(liveView)
-        addSubview(tapeLayer)
+        addSubview(tapeView)
 
         lassoOverlayView.canvas = self
         addSubview(lassoOverlayView)
@@ -206,6 +253,21 @@ final class CanvasView: UIView {
         pencil.delegate = self
         addInteraction(pencil)
 
+        observeDocument()
+        applyPaper()
+        refreshObjects()
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground),
+                                               name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(imageDidLoad(_:)),
+                                               name: ImageAssets.didLoadImageNotification, object: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func observeDocument() {
         document.addObserver(self, onChange: { [weak self] change in
             self?.documentDidChange(change)
         }, onPageSizeChange: { [weak self] in
@@ -215,14 +277,76 @@ final class CanvasView: UIView {
         }, onTemplateChange: { [weak self] in
             self?.applyPaper()
         })
-        applyPaper()
-        refreshObjects()
     }
 
-    @available(*, unavailable)
-    required init?(coder _: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+    /// Embedded: the page left view, and the canvas waits to be handed another (`show(_:)`), hidden. What
+    /// belonged to the page (a text box being edited, a picture being cropped, the selection) is finished,
+    /// its tiles are left with it (`captureTileRaster`, NOT-106), and its coordinator stops: nothing of the
+    /// page is held on screen or filled any more. Never while the page is taking ink.
+    func leavePage() {
+        guard isEmbedded, !hasLeftPage, !isInking else { return }
+        endEditingText()
+        finishImageCrop(commit: true)
+        clearSelection()
+        dismissEditMenu()
+        coordinator.captureTileRaster()
+        coordinator.retire()
+        document.removeObserver(self)
+        hasLeftPage = true
+        isHidden = true
+        // Hidden, its layers hold nothing: the next page's tiles are shown (or drawn) when it comes.
+        for tiles in [templateTiles, objectTiles, tapeTiles] {
+            tiles.clear()
+        }
+        for float in [objectFloat, tapeFloat] {
+            float.show([])
+        }
+        lassoOverlayView.layer.contents = nil
     }
+
+    /// Embedded: shows `newDocument` in place of the page shown, keeping the view, its layers, gestures and
+    /// interactions, as continuous scrolling hands a canvas from a page leaving view to one entering it
+    /// (NOT-107). The page shown is left first (`leavePage()`) if it hasn't been. The committed ink gets a
+    /// new coordinator for the new page, over the old one's layers.
+    func show(_ newDocument: CanvasDocument) {
+        guard isEmbedded, newDocument !== document || hasLeftPage, !isInking else { return }
+        leavePage()
+        let old = coordinator
+        document = newDocument
+        coordinator = RenderCoordinator(document: newDocument, embedded: true, reusingLayersOf: old)
+        coordinator.host = self
+        observeDocument()
+        hasLeftPage = false
+        isHidden = false
+        // Nothing of the old page's input, selection or placement carries over.
+        live = nil
+        eraseSession = nil
+        lassoSession = nil
+        lassoPending = false
+        shapeSnap = nil
+        rulerSnap = nil
+        textGesture = nil
+        toolGesture = nil
+        strokeGroup = nil
+        joinedStroke = false
+        selection = .empty
+        selectionBox = nil
+        pasteCounts = [:]
+        pendingPastePoint = nil
+        input = CanvasInput()
+        placement = ViewTransform()
+        placementMoving = false
+        isAhead = false
+        fittedBoundsSize = .zero
+        applyPaper()
+        refreshObjects()
+        invalidateAllLive()
+        updateLassoOverlay()
+        setNeedsLayout()
+    }
+
+    /// Set by `leavePage()` until the canvas is handed a page again.
+    private(set) var hasLeftPage = false
 
     /// Disable the system's three-finger undo/redo/copy gestures; we drive undo ourselves.
     override var canBecomeFirstResponder: Bool {
@@ -235,14 +359,18 @@ final class CanvasView: UIView {
 
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
-        // Before leaving the window, while the fitted transform still sees the real safe area.
-        // Embedded pages come and go as they scroll by, at whatever transform they were at: no raster.
+        // Before leaving the window, while the fitted transform still sees the real safe area. Embedded
+        // pages too, as they scroll away: they leave their tiles at the column's zoom 1 (NOT-106).
         if newWindow == nil, window != nil {
             endEditingText()
+            coordinator.captureTileRaster()
         }
-        if newWindow == nil, window != nil, !isEmbedded {
-            coordinator.saveCommittedRaster()
-        }
+    }
+
+    /// The app may be ended in the background: leaves the page's tiles for it to keep (NOT-106).
+    @objc func appDidEnterBackground() {
+        guard window != nil else { return }
+        coordinator.captureTileRaster()
     }
 
     override func didMoveToWindow() {
@@ -273,7 +401,10 @@ final class CanvasView: UIView {
 
     /// Colours the page with its template's paper and shows the template.
     private func applyPaper() {
-        let surface = templateView.show(document, theme: paperTheme)
+        paper = TemplatePaper(template: document.template, artwork: document.templateArtwork,
+                              palette: paperTheme.palette(for: document.template.paper), pageSize: document.pageSize)
+        templateTiles.show(paper.tileContent())
+        let surface = paper.palette.surface
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pageLayer.backgroundColor = surface
@@ -285,16 +416,17 @@ final class CanvasView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         inkClipView.frame = bounds
-        templateView.frame = bounds
-        objectLayer.frame = bounds
-        tapeLayer.frame = bounds
+        underInkView.frame = bounds
+        tapeView.frame = bounds
         liveView.frame = bounds
         lassoOverlayView.frame = bounds
         layoutZoomPanel()
         if bounds.size != fittedBoundsSize, bounds.width > 0, bounds.height > 0 {
-            // First layout or a rotation / split-view resize: show the whole page again.
+            // First layout or a rotation / split-view resize: show the whole page again. Embedded, the host
+            // places the page: a canvas resized mid-pinch (or made for a page entering view) stays where it
+            // was put, rather than drawing its page fitted to its new size over the pages around it.
             fittedBoundsSize = bounds.size
-            viewTransform = fittedTransform()
+            viewTransform = isEmbedded ? placement : fittedTransform()
             liveView.settle(at: viewTransform)
             coordinator.updateLayerTransform()
             reportZoom()
@@ -302,6 +434,7 @@ final class CanvasView: UIView {
         updateZoomWindow()
         updatePageChrome()
         coordinator.resize(to: bounds, scale: displayScale)
+        updateVectorLayers()
     }
 
     /// Device pixels per point the view draws at.
@@ -314,6 +447,19 @@ final class CanvasView: UIView {
         coordinator.dropPending(notIn: strokeIDs)
         pruneSelection(strokeIDs: strokeIDs)
         zoomHeld.removeAll { !strokeIDs.contains($0.stroke.id) }
+        invalidateAllLive()
+        updateLassoOverlay()
+    }
+
+    /// `dropOrphanedPendingStrokes()` when the strokes that left the page are known (live erasing), so the
+    /// rest of the page isn't looked at.
+    func dropOrphanedPendingStrokes(removed: Set<UUID>) {
+        coordinator.dropPending(removed)
+        if !selection.strokeIDs.isDisjoint(with: removed) {
+            selection.strokeIDs.subtract(removed)
+            updateSelectionBox()
+        }
+        zoomHeld.removeAll { removed.contains($0.stroke.id) }
         invalidateAllLive()
         updateLassoOverlay()
     }
@@ -331,15 +477,88 @@ final class CanvasView: UIView {
 
     // MARK: - Object layer
 
-    /// Shows the document's objects as they are now.
+    /// Shows the document's objects as they are now: in their tiles, but for those being moved (a selection
+    /// dragged) or drawn (a shape, tape), which float over them until they're back in their tiles.
     func refreshObjects() {
         let preview: [any PageObject] = (shapeSnap.map { [$0.shape] } ?? []) + toolGesturePreview
         // The box being edited is shown by its text view instead.
         let editing = textEditor?.objectID ?? imageCropView?.objectID
-        let objects = editing.map { id in document.objects.filter { $0.id != id } } ?? document.objects
-        let layers = (objects + preview).splitByInkLayer
-        objectLayer.show(layers.under, pageBounds: document.pageBounds)
-        tapeLayer.show(layers.over, pageBounds: document.pageBounds)
+        var lifted: [any PageObject] = [], moved = CGAffineTransform.identity
+        if case let .transforming(drag)? = lassoSession {
+            lifted = drag.session.objects
+            moved = drag.transform
+        }
+        let liftedIDs = Set(lifted.map(\.id))
+        let objects = document.objects.filter { $0.id != editing && !liftedIDs.contains($0.id) }
+        let layers = objects.splitByInkLayer
+        objectTiles.show(document.objectTileHistory.content(for: layers.under, pageBounds: document.pageBounds))
+        tapeTiles.show(document.tapeTileHistory.content(for: layers.over, pageBounds: document.pageBounds))
+        let floating = (lifted.isEmpty ? preview : lifted).splitByInkLayer
+        if lifted.isEmpty {
+            moved = .identity
+        }
+        float(floating.under, moved: moved, on: objectFloat, over: objectTiles)
+        float(floating.over, moved: moved, on: tapeFloat, over: tapeTiles)
+        placeFloatingObjects()
+    }
+
+    /// Shows `objects` floating over `tiles`. When they go (back into their tiles, or dropped), they stay
+    /// until the tiles are drawn, so an object put down never blinks out.
+    private func float(_ objects: [any PageObject], moved: CGAffineTransform, on float: FloatingObjectsLayer,
+                       over tiles: VectorTileLayer) {
+        guard objects.isEmpty, float.isShowing else {
+            float.show(objects, moved: moved)
+            return
+        }
+        let generation = float.generation
+        tiles.whenSettled { [weak self, weak float] in
+            guard let self, let float, float.generation == generation else { return }
+            float.show([])
+            placeFloatingObjects()
+        }
+    }
+
+    private func placeFloatingObjects() {
+        for float in [objectFloat, tapeFloat] {
+            float.place(at: viewTransform, pageBounds: document.pageBounds, viewBounds: bounds, scale: displayScale)
+        }
+    }
+
+    /// Lays the template, object and tape tiles and the floating objects out at the current transform.
+    func updateVectorLayers() {
+        let moving = isMoving, resting = restingScale
+        for tiles in [templateTiles, objectTiles, tapeTiles] {
+            tiles.update(transform: viewTransform, size: bounds.size, scale: displayScale, moving: moving,
+                         restingScale: resting)
+        }
+        placeFloatingObjects()
+    }
+
+    /// True when the template, object and tape tiles show the page as it is, sharp at the current transform.
+    var vectorLayersSettled: Bool {
+        templateTiles.isSettled && objectTiles.isSettled && tapeTiles.isSettled
+    }
+
+    /// The template or objects on screen changed: the live layer's multiply backdrop is drawn from them.
+    private func vectorTilesDidPublish() {
+        guard !liveView.underlay.isEmpty else { return }
+        liveView.underlay = coordinator.underlay
+    }
+
+    /// A picture finished decoding at a size the page's tiles want: where it's drawn, they're drawn again.
+    @objc private func imageDidLoad(_ note: Notification) {
+        guard let id = note.userInfo?["id"] as? ImageAssetID else { return }
+        var changed = false
+        for history in [document.objectTileHistory, document.tapeTileHistory] {
+            let rect = history.reach(ofObjectsUsing: [id])
+            if !rect.isNull {
+                history.invalidate(rect)
+                changed = true
+            }
+        }
+        if changed {
+            refreshObjects()
+        }
     }
 
     /// Drops the stroke being drawn without committing it (it became a shape or a selection).
@@ -458,7 +677,7 @@ final class CanvasView: UIView {
 
     func resetView() {
         updateZoomWindow()
-        viewTransform = fittedTransform()
+        viewTransform = isEmbedded ? placement : fittedTransform() // embedded, the host places the page
         liveView.settle(at: viewTransform)
         coordinator.updateLayerTransform()
         updatePageChrome()
@@ -481,9 +700,7 @@ final class CanvasView: UIView {
         CATransaction.setDisableActions(true)
         pageLayer.frame = frame
         pageLayer.shadowPath = CGPath(rect: CGRect(origin: .zero, size: frame.size), transform: nil)
-        templateView.follow(viewTransform)
-        objectLayer.follow(viewTransform)
-        tapeLayer.follow(viewTransform)
+        updateVectorLayers()
         placeTextEditor()
         placeImageCrop()
         inkMask.frame = inkClipView.bounds
@@ -710,36 +927,52 @@ extension CanvasView: RenderCoordinatorHost {
         viewTransform
     }
 
+    var isMoving: Bool {
+        isEmbedded ? placementMoving : viewport.activeGestureCount > 0 || settleLink != nil
+    }
+
+    var restingScale: CGFloat {
+        restingScaleOverride ?? fittedTransform().scale
+    }
+
     var renderBounds: CGRect {
         bounds
+    }
+
+    var rendersAhead: Bool {
+        isAhead
     }
 
     var isEditingInk: Bool {
         eraseSession != nil || lassoSession != nil
     }
 
-    var hasLiveStroke: Bool {
-        live != nil
+    var pencilLocation: CGPoint? {
+        live?.stroke.points.last?.location
     }
 
     func hasOutstandingEstimates(for strokeID: UUID) -> Bool {
         input.estimates.isOutstanding(strokeID)
     }
 
+    func bakedInk(of stroke: LiveStroke) -> LiveInkView.BakedInk? {
+        liveView.bakedInk(of: stroke)
+    }
+
+    func isBakingLive(_ stroke: LiveStroke) -> Bool {
+        stroke.stroke.brush.isRaster && liveView.isWaxPending(for: stroke)
+    }
+
     func renderCoordinatorNeedsLayout() {
         setNeedsLayout()
     }
 
-    func renderCoordinator(didPublish image: CGImage) {
-        liveView.underlay = image
+    func renderCoordinatorDidPublish() {
+        liveView.underlay = coordinator.underlay
         scheduleZoomRender()
     }
 
     func renderCoordinatorDidDrawPending(canvasRect: CGRect) {
         invalidateLive(canvasRect: canvasRect)
-    }
-
-    func renderCoordinatorDidRedraw() {
-        liveView.invalidateAll()
     }
 }

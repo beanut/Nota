@@ -4,14 +4,14 @@ import Metal
 import simd
 
 /// Draws raster brushes (a `wax` texture, the crayon) with Metal, wherever strokes are drawn: the live
-/// layer, the committed bitmap and its bands, page images, thumbnails and exports all go through
+/// layer, the committed tiles and their dirty regions, page images, thumbnails and exports all go through
 /// `StrokeRenderer.draw`, which hands raster strokes here.
 ///
 /// For the part of the stroke inside the context's clip, in the context's own pixels:
 /// 1. the stroke's nib stamps are drawn as instanced ellipses into a wax field, max-blended. Each stamp
 ///    lays wax on a tooth computed from the page position (the paper's, which every stroke shares) and
 ///    the stamp's own offset into the crayon's texture (`RasterStamp.grain`), so the grain doesn't shimmer
-///    as the stroke grows, any split of the work (tiles, bands, the live layer's dirty rects) gives the
+///    as the stroke grows, any split of the work (tiles, regions, the live layer's dirty rects) gives the
 ///    same pixels, and a pass back over ink fills in some of the paper it left;
 /// 2. a compute pass colours the wax;
 /// 3. the result is drawn into the context as an image, with the brush's blend mode.

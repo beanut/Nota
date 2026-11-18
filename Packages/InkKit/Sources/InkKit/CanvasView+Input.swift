@@ -184,10 +184,10 @@ extension CanvasView {
             } else if let pendingStroke = coordinator.awaitingStroke(ref.strokeID),
                       pendingStroke.live.stroke.points.indices.contains(ref.index) {
                 apply(&pendingStroke.live.stroke.points[ref.index])
-                let wasCurrent = pendingStroke.revisionAfter == document.revision
+                let wasCurrent = pendingStroke.revisionAfter == document.inkVersion
                 _ = editDocument { document.updatePoint(strokeID: ref.strokeID, index: ref.index, apply) }
                 // Only while nothing else changed since: otherwise drawing it can't bring the bitmap level.
-                pendingStroke.revisionAfter = wasCurrent ? document.revision : -1
+                pendingStroke.revisionAfter = wasCurrent ? document.inkVersion : -1
                 let r = pendingStroke.live.refreshPoint(ref.index)
                 liveView.geometryChanged(of: pendingStroke.live, fromSegment: ref.index - 1, canvasRect: r.dirty)
                 zoomPanel?.liveView.geometryChanged(of: pendingStroke.live, fromSegment: ref.index - 1,
@@ -379,7 +379,7 @@ extension CanvasView {
                 coordinator.cache(geom, for: live.stroke.id)
                 let splits = live.stroke.brush.erases
                     ? splits(cutBy: live.stroke, hulls: live.allHulls) : []
-                let revisionBefore = document.revision
+                let revisionBefore = document.inkVersion
                 editDocument { document.add(live.stroke, splits: splits) }
                 coordinator.strokeCommitted(live, geometry: geom, revisionBefore: revisionBefore)
                 if !live.stroke.brush.erases {

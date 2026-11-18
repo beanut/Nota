@@ -19,9 +19,11 @@ private func finishedStroke(y: CGFloat, brush: BrushDescriptor = .pen) -> LiveSt
     return live
 }
 
-/// Lets the main queue run until `done`, or fails after `timeout`.
+/// Lets the main queue run until `done`, or fails after `timeout`. The timeout is long: in a full parallel
+/// run other suites hold the main actor for seconds at a time (a page settling took 12 s once), and these
+/// tests check what the coordinator does, not how fast.
 @MainActor
-private func waitUntil(timeout: TimeInterval = 10, _ done: () -> Bool) async throws {
+private func waitUntil(timeout: TimeInterval = 60, _ done: () -> Bool) async throws {
     let deadline = Date(timeIntervalSinceNow: timeout)
     while !done() {
         guard Date() < deadline else {
@@ -67,6 +69,10 @@ struct RenderCoordinatorTests {
         canvas = CanvasView(frame: Self.bounds, document: document)
         canvas.traitOverrides.displayScale = 2
         canvas.layoutIfNeeded()
+        // These tests pinch at their own pace. In a full parallel run a step can wait on the main actor past
+        // the 100 ms that makes a scale held, and that level would be filled: only the test of holding a
+        // scale holds one (`aPinchHeldAtAScaleFillsThatLevelBeforeItEnds`).
+        canvas.coordinator.steadyDelay = 600
     }
 
     private var coordinator: RenderCoordinator {
@@ -75,39 +81,38 @@ struct RenderCoordinatorTests {
 
     /// The page drawn from scratch at the canvas's transform.
     private func reference() throws -> CGImage {
-        let items = document.strokes.map {
-            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0)
-        }
-        let ctx = try #require(CommittedRenderer.makeBitmap(pixelSize: coordinator.pixelSize, scale: 2))
-        CommittedRenderer.render(items, into: ctx, bounds: Self.bounds, transform: canvas.viewTransform)
-        return try #require(ctx.makeImage())
+        try #require(wholePageImage(of: document.strokes, bounds: Self.bounds, transform: canvas.viewTransform,
+                                    scale: 2))
     }
 
-    @Test func aNewCanvasSettlesWithAPublishedImageOfItsSurface() async throws {
-        try await waitUntil { coordinator.isSettled }
+    @Test func aNewCanvasSettlesShowingItsOwnLevel() async throws {
+        document.add(finishedStroke(y: 300).stroke)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         #expect(canvas.rendersSettled)
-        let image = try #require(coordinator.publishedImage)
+        let image = try #require(coordinator.composedImage())
         #expect(CGFloat(image.width) == coordinator.pixelSize.width)
         #expect(CGFloat(image.height) == coordinator.pixelSize.height)
         #expect(coordinator.pixelSize == CGSize(width: 1200, height: 1600))
         #expect(coordinator.displayedTransform == canvas.viewTransform)
-        #expect(canvas.liveView.underlay === image)
+        #expect(coordinator.displayedLevel == coordinator.level(for: canvas.viewTransform))
+        #expect(!canvas.liveView.underlay.isEmpty)
+        #expect(try differingFraction(image, reference()) < 0.002)
     }
 
     @Test func aCommittedStrokeIsDrawnIntoThePublishedImage() async throws {
-        try await waitUntil { coordinator.isSettled }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         let live = finishedStroke(y: 200)
         let geometry = live.geometry()
-        let before = document.revision
+        let before = document.inkVersion
         document.add(live.stroke)
         coordinator.strokeCommitted(live, geometry: geometry, revisionBefore: before)
         #expect(!coordinator.isSettled) // waiting to be drawn
         #expect(coordinator.pending.count == 1)
-        try await waitUntil { coordinator.isSettled }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         #expect(coordinator.pending.isEmpty)
-        #expect(coordinator.geometryCache[live.stroke.id] != nil)
-        let shown = try #require(coordinator.publishedImage)
-        #expect(try differingFraction(shown, reference()) < 0.001)
+        #expect(document.geometry.isKept(live.stroke.id))
+        let shown = try #require(coordinator.composedImage())
+        #expect(try differingFraction(shown, reference()) < 0.002)
     }
 
     @Test func invalidatingARectRedrawsThePageAsItIs() async throws {
@@ -115,37 +120,245 @@ struct RenderCoordinatorTests {
         document.add(first.stroke)
         document.add(second.stroke)
         coordinator.invalidateAll()
-        try await waitUntil { coordinator.isSettled }
-        #expect(try differingFraction(#require(coordinator.publishedImage), reference()) < 0.001)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
 
-        let bounds = coordinator.geometry(for: first.stroke).bounds
+        let bounds = coordinator.bounds(of: first.stroke)
         coordinator.forgetGeometry(first.stroke.id)
         _ = document.remove(ids: [first.stroke.id])
         coordinator.invalidate(rect: bounds)
         #expect(!coordinator.isSettled)
-        try await waitUntil { coordinator.isSettled }
-        #expect(try differingFraction(#require(coordinator.publishedImage), reference()) < 0.001)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
     }
 
     @Test func aRenderDiscardedInFlightStillSettlesOnTheNextOne() async throws {
-        try await waitUntil { coordinator.isSettled }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         document.add(finishedStroke(y: 300).stroke)
         coordinator.invalidateAll()
         coordinator.discardInFlight()
         coordinator.requestRender()
-        try await waitUntil { coordinator.isSettled }
-        #expect(try differingFraction(#require(coordinator.publishedImage), reference()) < 0.001)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
     }
 
     @Test func movingTheViewUnsettlesItUntilARenderAtTheNewTransformLands() async throws {
-        try await waitUntil { coordinator.isSettled }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         canvas.gestureBegan()
         canvas.zoom(by: 2, about: CGPoint(x: 300, y: 400))
         #expect(!coordinator.isSettled)
         canvas.gestureEnded()
-        try await waitUntil { coordinator.isSettled }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
         #expect(coordinator.displayedTransform == canvas.viewTransform)
-        #expect(coordinator.targetTransform == canvas.viewTransform)
+        #expect(coordinator.displayedLevel == coordinator.level(for: canvas.viewTransform))
+    }
+
+    @Test func aPanAtTheSameLevelFillsOnlyTilesNotCachedYet() async throws {
+        for y in stride(from: 100, through: 700, by: 120) {
+            document.add(finishedStroke(y: CGFloat(y)).stroke)
+        }
+        canvas.gestureBegan()
+        canvas.zoom(by: 3, about: CGPoint(x: 300, y: 400))
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let start = canvas.viewTransform
+        canvas.gestureBegan()
+        canvas.pan(by: CGPoint(x: -90, y: -60))
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let afterFirst = coordinator.fillStats.tilesFilled
+        // Back and out again: every tile on the way is cached now.
+        canvas.gestureBegan()
+        canvas.pan(by: CGPoint(x: 90, y: 60))
+        canvas.pan(by: CGPoint(x: -90, y: -60))
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.fillStats.tilesFilled == afterFirst)
+        #expect(canvas.viewTransform != start)
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
+    }
+
+    @Test func aPinchFillsNothingUntilItEndsThenShowsTheNewLevel() async throws {
+        document.add(finishedStroke(y: 300).stroke)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let fitted = coordinator.displayedLevel
+        let filled = coordinator.fillStats.tilesFilled
+        canvas.gestureBegan()
+        for _ in 0 ..< 5 {
+            canvas.zoom(by: 1.2, about: CGPoint(x: 300, y: 300))
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(coordinator.fillStats.tilesFilled == filled)
+        #expect(!coordinator.isFilling)
+        #expect(coordinator.displayedLevel == fitted) // scaled until the fingers lift
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.fillStats.tilesFilled > filled)
+        #expect(coordinator.displayedLevel == coordinator.level(for: canvas.viewTransform))
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
+    }
+
+    /// A pinch at 2×, then on to 3×: once it ends the 3× level is the displayed one at once, its tiles shown
+    /// as they land over the 2× level's, which goes once they cover the view (NOT-105).
+    @Test func aNewLevelShowsAsItsTilesLandOverTheLevelBefore() async throws {
+        for y in stride(from: 100, through: 700, by: 120) {
+            document.add(finishedStroke(y: CGFloat(y)).stroke)
+        }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        canvas.gestureBegan()
+        canvas.zoom(by: 2, about: CGPoint(x: 300, y: 400))
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let two = try #require(coordinator.displayedLevel)
+        canvas.gestureBegan()
+        canvas.zoom(by: 1.5, about: CGPoint(x: 300, y: 400))
+        #expect(coordinator.displayedLevel == two) // scaled mid-pinch
+        canvas.gestureEnded()
+        #expect(coordinator.displayedLevel == coordinator.level(for: canvas.viewTransform))
+        #expect(coordinator.underLevel == two)
+        #expect(!coordinator.isSettled)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.underLevel == nil)
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
+    }
+
+    @Test func zoomingBackOutToCachedLevelsFillsNothing() async throws {
+        for y in stride(from: 100, through: 700, by: 120) {
+            document.add(finishedStroke(y: CGFloat(y)).stroke)
+        }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let fitted = canvas.viewTransform
+        let focus = CGPoint(x: 300, y: 400)
+        canvas.gestureBegan()
+        canvas.zoom(by: 2, about: focus)
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let two = canvas.viewTransform
+        canvas.gestureBegan()
+        canvas.zoom(by: 3, about: focus)
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let filled = coordinator.fillStats.tilesFilled
+        canvas.gestureBegan()
+        canvas.zoom(by: 1 / 3, about: focus)
+        canvas.gestureEnded()
+        #expect(canvas.viewTransform.scale == two.scale)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.fillStats.tilesFilled == filled, "the 2× level was cached")
+        canvas.gestureBegan()
+        canvas.zoom(by: 0.5, about: focus)
+        canvas.gestureEnded()
+        #expect(canvas.viewTransform.scale == fitted.scale)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.fillStats.tilesFilled == filled, "the fitted level is kept while zoomed in")
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
+    }
+
+    /// A pinch that holds a scale fills that level under it, so lifting the fingers there finds it filled.
+    @Test func aPinchHeldAtAScaleFillsThatLevelBeforeItEnds() async throws {
+        coordinator.steadyDelay = 0.1
+        document.add(finishedStroke(y: 300).stroke)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let fitted = coordinator.displayedLevel
+        canvas.gestureBegan()
+        canvas.zoom(by: 1.8, about: CGPoint(x: 300, y: 300))
+        let held = coordinator.level(for: canvas.viewTransform)
+        try await waitUntil {
+            let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: held)
+            return !coordinator.isFilling && TileCache.shared.tiles(for: keys).allSatisfy { $0 != nil }
+        }
+        #expect(coordinator.displayedLevel == fitted) // still scaled until the fingers lift
+        let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: held)
+        let filled = TileCache.shared.tiles(for: keys)
+        canvas.gestureEnded()
+        #expect(coordinator.level(for: canvas.viewTransform) == held)
+        try await waitUntil { coordinator.isSettled }
+        #expect(coordinator.underLevel == nil)
+        let shown = TileCache.shared.tiles(for: keys)
+        #expect(zip(filled, shown).allSatisfy { $0?.image === $1?.image }, "the tiles in view weren't filled again")
+    }
+
+    /// Pinching out from a zoom whose tiles cover only part of the view, with the resting level's tiles
+    /// gone from the cache: those are filled mid-pinch, so the page never shows blank.
+    @Test func aPinchOutPastTheTilesDrawnFillsTheRestingLevel() async throws {
+        for y in stride(from: 100, through: 700, by: 120) {
+            document.add(finishedStroke(y: CGFloat(y)).stroke)
+        }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        canvas.gestureBegan()
+        canvas.zoom(by: 4, about: CGPoint(x: 300, y: 400))
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let four = try #require(coordinator.displayedLevel)
+        TileCache.shared.removeAll(page: document.cacheID, except: four)
+        canvas.gestureBegan()
+        canvas.zoom(by: 0.3, about: CGPoint(x: 300, y: 400))
+        let resting = coordinator.restingLevel
+        try await waitUntil {
+            let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: resting)
+            return !coordinator.isFilling && TileCache.shared.tiles(for: keys).allSatisfy { $0 != nil }
+        }
+        #expect(coordinator.displayedLevel == four) // nothing at the moving scale
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+    }
+
+    @Test func aGestureEndingNearACachedLevelSnapsToItAndFillsNothing() async throws {
+        document.add(finishedStroke(y: 300).stroke)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let fitted = canvas.viewTransform.scale
+        canvas.gestureBegan()
+        canvas.zoom(by: 2, about: CGPoint(x: 300, y: 300))
+        canvas.gestureEnded()
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let filled = coordinator.fillStats.tilesFilled
+        // Back out to just short of the fitted page: within 2%, so it lands on the fitted level exactly.
+        canvas.gestureBegan()
+        canvas.zoom(by: 0.5 * 1.015, about: CGPoint(x: 300, y: 300))
+        canvas.gestureEnded()
+        #expect(canvas.viewTransform.scale == fitted)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(coordinator.fillStats.tilesFilled == filled)
+    }
+
+    @Test func midEraseTheTilesSettleOnEachChangeWithoutARevision() async throws {
+        let first = finishedStroke(y: 150), second = finishedStroke(y: 400)
+        document.add(first.stroke)
+        document.add(second.stroke)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        let revision = document.revision
+        canvas.eraseSession = CanvasView.EraseSession(target: .all, before: nil)
+        _ = document.remove(ids: [first.stroke.id]) // live erasing: the revision doesn't move
+        coordinator.invalidateAll()
+        #expect(document.revision == revision)
+        #expect(!coordinator.isSettled)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
+        _ = document.remove(ids: [second.stroke.id])
+        coordinator.invalidateAll()
+        #expect(!coordinator.isSettled)
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        #expect(try differingFraction(#require(coordinator.composedImage()), reference()) < 0.002)
+    }
+
+    @Test func aReopenedPageRestoresItsTilesInsteadOfFillingThem() async throws {
+        for y in stride(from: 100, through: 700, by: 150) {
+            document.add(finishedStroke(y: CGFloat(y), brush: .pencil).stroke)
+        }
+        try await waitUntil { coordinator.isSettled && !coordinator.isFilling }
+        coordinator.captureTileRaster()
+        // Compressed in the background at utility priority: slow while other tests fill every core.
+        try await waitUntil(timeout: 60) { document.tileRaster != nil }
+        let shown = try #require(coordinator.composedImage())
+        TileCache.shared.removeAll(page: document.cacheID) // as if the cache let them go
+        let reopened = CanvasView(frame: Self.bounds, document: document)
+        reopened.traitOverrides.displayScale = 2
+        reopened.layoutIfNeeded()
+        try await waitUntil { reopened.coordinator.isSettled }
+        #expect(reopened.coordinator.fillStats.tilesFilled == 0)
+        #expect(reopened.coordinator.fillStats.tilesRestored > 0)
+        let image = try #require(reopened.coordinator.composedImage())
+        #expect(image.dataProvider?.data == shown.dataProvider?.data)
     }
 
     @Test func theVisibleRectIsTheSurfaceInPagePoints() {
@@ -160,8 +373,8 @@ struct RenderCoordinatorTests {
         var snapshot: CGImage?
         var done = false
         let transform = ViewTransform(scale: 3, offset: CGPoint(x: -150, y: -500))
-        coordinator.renderSnapshot(bounds: CGRect(x: 0, y: 0, width: 200, height: 100), transform: transform) {
-            snapshot = $0
+        coordinator.renderSnapshot(bounds: CGRect(x: 0, y: 0, width: 200, height: 100), transform: transform) { image, _ in
+            snapshot = image
             done = true
         }
         try await waitUntil { done }

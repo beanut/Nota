@@ -6,8 +6,10 @@ import UIKit
 enum PencilTexture {
     static let patternSize = 64
     private static let lock = NSLock()
-    private static var cache: [CacheKey: CGColor] = [:]
     private static var heightMaps: [UInt32: [Float]] = [:]
+
+    /// Where a thread keeps its own pattern colours (`fillColor`).
+    private static let threadColorsKey = "InkKit.PencilTexture.colors"
 
     /// A grain's parameters (see `BrushDescriptor.Texture.grain`).
     struct Grain: Hashable {
@@ -130,6 +132,16 @@ enum PencilTexture {
         ctx.setPatternPhase(CGSize(width: px, height: py))
     }
 
+    /// Pins the grain to the page: anchors the pattern at the device pixel where `ctx`'s current user
+    /// space (page points) puts the page's origin. The pattern is anchored at the bitmap's bottom-left
+    /// corner in device pixels, so every bitmap that sets this, whatever part of the page it covers and
+    /// wherever it sits on screen (a committed tile, a live tile, a pan later), shows the same grain on the
+    /// same page pixel. The phase isn't reduced modulo the 64-pixel cell: a scaled grain's cell isn't 64.
+    static func pinToPage(_ ctx: CGContext) {
+        let origin = CGPoint.zero.applying(ctx.ctm)
+        ctx.setPatternPhase(CGSize(width: origin.x, height: origin.y))
+    }
+
     /// Returns a seamless pattern CGColor representing the graphite stroke texture
     /// for the given base color, run alpha and grain.
     static func fillColor(for color: RGBA, alpha: CGFloat, grain: Grain = .pencil) -> CGColor {
@@ -145,12 +157,16 @@ enum PencilTexture {
             grain: grain
         )
 
-        lock.lock()
-        if let cached = cache[key] {
-            lock.unlock()
+        // Each thread makes and keeps pattern colours of its own, images and all. Core Graphics caches what
+        // it rasterized of a pattern's image for a context's scale and phase, and one pattern image filling
+        // contexts at different levels on several threads at once left a few pixels of one thread's
+        // rasterization in another's tile, so tile fills running side by side weren't the pixels a fill
+        // alone gives (NOT-112). A pattern is 16 KB; a thread uses a handful.
+        let local = Thread.current.threadDictionary
+        var colors = local[threadColorsKey] as? [CacheKey: CGColor] ?? [:]
+        if let cached = colors[key] {
             return cached
         }
-        lock.unlock()
 
         let w = patternSize
         let h = patternSize
@@ -205,11 +221,8 @@ enum PencilTexture {
         let uiImage = grain.scale == 1 ? UIImage(cgImage: cgImage)
             : UIImage(cgImage: cgImage, scale: 1 / grain.scale, orientation: .up)
         let patternColor = UIColor(patternImage: uiImage).cgColor
-
-        lock.lock()
-        cache[key] = patternColor
-        lock.unlock()
-
+        colors[key] = patternColor
+        local[threadColorsKey] = colors
         return patternColor
     }
 }

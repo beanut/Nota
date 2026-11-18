@@ -55,21 +55,30 @@ extension CanvasView {
     func gestureEnded() {
         viewport.activeGestureCount = max(0, viewport.activeGestureCount - 1)
         guard !viewport.isCancellingGesture, viewport.activeGestureCount == 0 else { return }
-        if viewport.settleOnPixelGrid(displayScale: displayScale) {
-            coordinator.updateLayerTransform()
-            updatePageChrome()
+        // Ending within 2% of a zoom already drawn (the fitted page, the last zoom) snaps to it, so its
+        // tiles are reused rather than a level a hair away filled from scratch.
+        var moved = false
+        if let cached = coordinator.cachedScale(near: viewTransform.scale), cached != viewTransform.scale {
+            viewport.zoom(by: cached / viewTransform.scale, about: CGPoint(x: bounds.midX, y: bounds.midY),
+                          fitted: fittedTransform(), displayScale: displayScale)
+            // Exactly the level's scale: a hair off (`scale × ratio` rounds) is another level, filled afresh.
+            viewTransform.scale = cached
+            moved = true
+        }
+        let settled = viewport.settleOnPixelGrid(displayScale: displayScale) || moved
+        // Also draws the template and objects sharp again, scaled until now like the ink.
+        updatePageChrome()
+        if settled {
             updateLassoOverlay()
+            controller?.zoomDidChange(viewTransform.scale)
         }
         liveView.settle(at: viewTransform)
-        if coordinator.targetTransform != viewTransform || coordinator.displayedTransform != viewTransform {
-            coordinator.requestRender()
-        }
+        coordinator.requestRender()
     }
 
     /// The view transform changed under a gesture: moves the layers and asks for a render at it.
     func transformDidChange() {
         viewport.didTransformInTouchSequence = true
-        coordinator.updateLayerTransform()
         updatePageChrome()
         liveView.follow(viewTransform)
         updateLassoOverlay()
@@ -184,7 +193,7 @@ extension CanvasView {
     }
 
     /// Cancels any incidental pan/pinch from multi-finger taps or swipes and restores the transform from
-    /// before them. Returns true if the transform was reverted and needs a full render when undo/redo is a no-op.
+    /// before them. Returns true if the transform was reverted and needs its tiles laid out again when undo/redo is a no-op.
     func cancelIncidentalPanZoom() -> Bool {
         guard viewport.activeGestureCount > 0 || viewport.didTransformInTouchSequence else { return false }
         viewport.isCancellingGesture = true
@@ -201,6 +210,6 @@ extension CanvasView {
         updatePageChrome()
         liveView.settle(at: viewTransform)
         controller?.zoomDidChange(viewTransform.scale)
-        return coordinator.targetTransform != viewTransform || coordinator.displayedTransform != viewTransform
+        return !coordinator.isSettled
     }
 }

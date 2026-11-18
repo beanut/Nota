@@ -14,7 +14,7 @@ enum WaxShaders {
     //    the same one, misses different bits of paper, so layering fills the holes in, as wax does.
     //    Stamps are drawn into a single-channel half-float texture with MAX blending: a pixel keeps the most
     //    wax any stamp left there. Max is order-free, so the field is the same however the stamps are
-    //    batched or split, and every region, tile, band and zoom sees the same paper.
+    //    batched or split, and every region, tile and zoom sees the same paper.
     // 2. Field → colour: the wax times the ink.
 
     #include <metal_stdlib>
@@ -114,7 +114,7 @@ enum WaxShaders {
             discard_fragment();
         }
         // Pixel (i, j), row 0 at the top, is device pixel (origin.x + i, origin.y - 1 - j). The page position
-        // comes from the device pixel alone, so every region, tile and band computes the same tooth there.
+        // comes from the device pixel alone, so every region and tile computes the same tooth there.
         const int2 pixel = int2(in.position.xy);
         const float2 onDevice = float2(u.origin.x + pixel.x, u.origin.y - 1 - pixel.y) + 0.5;
         const float2 page = u.pageAt0 + onDevice.x * u.pageFromX + onDevice.y * u.pageFromY;

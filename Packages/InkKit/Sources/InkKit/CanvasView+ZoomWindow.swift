@@ -8,7 +8,7 @@ import UIKit
 /// the line, and at the end of the line on to the next (`ZoomWindow`).
 ///
 /// The panel shows the box's ink the way the canvas shows the page's: a committed image, rendered off the
-/// main thread whenever the page's committed bitmap changes, under a live layer for the stroke being written.
+/// main thread whenever the page's committed tiles change, under a live layer for the stroke being written.
 extension CanvasView {
     /// Space between the panel and the page above it, and the panel's inset from the sides.
     static let zoomPanelGap: CGFloat = 16
@@ -66,6 +66,7 @@ extension CanvasView {
             zoomTouch = nil
             zoomDrag = nil
             zoomGeneration &+= 1
+            zoomShownGeneration = zoomGeneration // renders of the closed panel never land
             coordinator.releaseSnapshots()
             controller?.zoomWindowDidChange(controlsFrame: nil, canGoBack: false)
         }
@@ -177,14 +178,10 @@ extension CanvasView {
         }
     }
 
-    /// Renders the box's ink into the panel soon, once per run-loop turn and one render at a time.
+    /// Renders the box's ink into the panel soon, once per run-loop turn. Renders go through the render
+    /// scheduler, where a newer one supersedes one that hasn't started.
     func scheduleZoomRender() {
-        guard zoomPanel != nil else { return }
-        if zoomRenderInFlight {
-            zoomRenderRequested = true
-            return
-        }
-        guard !zoomRenderScheduled else { return }
+        guard zoomPanel != nil, !zoomRenderScheduled else { return }
         zoomRenderScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -196,25 +193,18 @@ extension CanvasView {
     private func renderZoomPanel() {
         guard let panel = zoomPanel, zoomWindow != nil else { return }
         zoomGeneration &+= 1
-        zoomRenderInFlight = true
         let generation = zoomGeneration
         let transform = panel.inkTransform
         let bounds = CGRect(origin: .zero, size: panel.inkFrame.size)
         let included = Set(zoomHeld.map { ObjectIdentifier($0) })
 
-        coordinator.renderSnapshot(bounds: bounds, transform: transform) { [weak self] image in
-            guard let self else { return }
-            zoomRenderInFlight = false
-            if generation == zoomGeneration, let panel = zoomPanel {
-                panel.publish(image, transform: transform)
-                if !included.isEmpty {
-                    zoomHeld.removeAll { included.contains(ObjectIdentifier($0)) }
-                    panel.liveView.invalidateAll()
-                }
-            }
-            if zoomRenderRequested {
-                zoomRenderRequested = false
-                scheduleZoomRender()
+        coordinator.renderSnapshot(bounds: bounds, transform: transform) { [weak self] image, drawnAt in
+            guard let self, generation > zoomShownGeneration, let panel = zoomPanel else { return }
+            zoomShownGeneration = generation
+            panel.publish(image, transform: drawnAt)
+            if !included.isEmpty {
+                zoomHeld.removeAll { included.contains(ObjectIdentifier($0)) }
+                panel.liveView.invalidateAll()
             }
         }
     }

@@ -20,6 +20,8 @@ final class InkBenchmarks: XCTestCase {
     /// `.ink` file for a 5k-stroke page: under 1 MB, decoded in under 50 ms (NOT-5).
     static let inkFileBudgetKB = 1024.0
     static let inkDecodeBudgetMs = 50.0
+    /// A 5k-stroke page open at 6× while writing: its geometry, the screen's bitmap and the live layer (NOT-108).
+    static let memory6xBudgetMB = 80.0
 
     private var corpus: Corpus {
         Corpus.shared
@@ -133,7 +135,7 @@ final class InkBenchmarks: XCTestCase {
     // MARK: Stamp brushes
 
     /// The stamp path's benchmark brush (NOT-16): a dry brush, with bristles and every kind of jitter,
-    /// sized from each recorded stroke's width. It has no budget yet; these numbers are its baseline.
+    /// sized from each recorded stroke's width. Held to the live budget like any brush (NOT-110).
     static func stampBrush(width: CGFloat) -> BrushDescriptor {
         BrushDescriptor(name: "Benchmark Dry Brush", size: width * 0.5 ... width * 2,
                         texture: .bristle(count: 8, spread: 0.9), spacing: 0.3,
@@ -184,8 +186,9 @@ final class InkBenchmarks: XCTestCase {
         }
         let stats = Stats(events)
         BenchResults.record("live_event.stamp.p50_ms", stats.median, unit: "ms")
-        BenchResults.record("live_event.stamp.p95_ms", stats.p95, unit: "ms")
-        BenchResults.record("live_event.stamp.p99_ms", stats.p99, unit: "ms")
+        BenchResults.record("live_event.stamp.p95_ms", stats.p95, unit: "ms", budget: Self.liveEventBudgetMs)
+        BenchResults.record("live_event.stamp.p99_ms", stats.p99, unit: "ms", budget: Self.liveEventBudgetMs)
+        check(stats.p95, under: Self.liveEventBudgetMs, "Live-stroke work per touch event with a stamp brush (p95)")
     }
 
     // MARK: Raster brush
@@ -283,91 +286,104 @@ final class InkBenchmarks: XCTestCase {
                                             pressureExponent: BrushDescriptor.neutralPressureExponent, tilt: true)
     }
 
-    /// Redrawing a page of 500 crayon strokes into a screen-sized committed bitmap (an undo or the end of
-    /// a zoom), one GPU pass per stroke and band. No budget: page open restores the `CommittedRaster`.
-    func testCrayonPageRedraw() throws {
+    /// Filling every tile of a fitted page of 500 crayon strokes, geometry cached, on every core: a new
+    /// level near the fitted zoom, one GPU pass per stroke and tile. No budget: a page reopened restores
+    /// its `TileRaster`, and an edit refills only what it reached.
+    func testCrayonPageRedraw() {
         let page = corpus.distinctPage(strokes: 500).map { stroke in
             var stroke = stroke
             stroke.brush = Self.crayon(width: stroke.brush.maxWidth)
             return stroke
         }
-        let cache = Dictionary(uniqueKeysWithValues: page.map { ($0.id, StrokeRenderer.geometry(for: $0)) })
+        let ink = snapshot(page, geometry: StrokeRenderer.geometries(for: page))
         let transform = Bench.fittedTransform(for: corpus.pageSize)
-        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color,
-                                                      geometry: cache[$0.id], stroke: nil) }
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
         let times = timed(iterations: 5) {
-            CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
-            _ = ctx.makeImage()
+            _ = screenTiles(of: ink, at: transform)
         }
         BenchResults.record("full_redraw.crayon_500_ms", Stats(times).median, unit: "ms")
     }
 
+    /// `strokes` and their geometry as a tile fill takes them.
+    private func snapshot(_ strokes: [Stroke], geometry: [StrokeGeometry]) -> InkSnapshot {
+        InkSnapshot(strokes: strokes, index: StrokeIndex(strokes: strokes),
+                    geometry: Dictionary(uniqueKeysWithValues: zip(strokes.map(\.id), geometry)), skipped: [])
+    }
+
+    /// The tiles of the corpus page in view of the screen at `transform`, filled from `ink` on every core,
+    /// all at once (the canvas's jobs, without the scheduler's limits).
+    private func screenTiles(of ink: InkSnapshot, at transform: ViewTransform) -> [(key: TileKey, image: CGImage?)] {
+        let level = TileLevel(transform, displayScale: Bench.displayScale)
+        let keys = TileKey.keys(covering: transform.toCanvas(Bench.screenBounds).intersection(corpus.pageSize.bounds),
+                                page: UUID(), level: level)
+        var images = [CGImage?](repeating: nil, count: keys.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: keys.count) { i in
+            let image = RenderCoordinator.draw(keys[i], from: ink, revision: 1, filler: CoreGraphicsTileFiller()).image
+            lock.withLock { images[i] = image }
+        }
+        return Array(zip(keys, images)).map { (key: $0.0, image: $0.1) }
+    }
+
     // MARK: Page open
 
-    /// Opening a page the canvas has shown before: a fresh screen-sized committed bitmap and the page's
-    /// `CommittedRaster` (what the canvas left with the document when the page closed) decompressed into
-    /// it, exactly as `CanvasView` does instead of a full render. This is the budgeted page open.
-    /// Ink isn't stored on disk yet; decoding it, and the raster with it, joins this measurement when it is.
+    /// Opening a page the canvas has shown before, in this launch or an earlier one, once the tile cache
+    /// has let its tiles go (or never had them): the page's `TileRaster` (its fitted-level tiles,
+    /// compressed) read from the file an app keeps it in (mapped, as `DocumentStore` reads it), then
+    /// decompressed tile by tile, exactly as the canvas's render jobs do instead of filling them. This is
+    /// the budgeted page open; with the tiles still cached, opening fills and restores nothing.
     func testPageOpen5k() throws {
-        let (shown, transform) = try fittedPage(strokes: 5000)
-        let saved = try XCTUnwrap(CommittedRaster(image: shown, revision: 1, transform: transform,
-                                                  scale: Bench.displayScale))
-        let pixels = Bench.pixelSize
-        var restored: CGImage?
+        let (tiles, level) = try fittedTiles(strokes: 5000)
+        let saved = try XCTUnwrap(TileRaster(tiles: tiles, revision: 1, level: level, pageSize: corpus.pageSize.size))
+        let url = FileManager.default.temporaryDirectory.appending(path: "page-open-\(UUID().uuidString).tiles")
+        try saved.data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var restored: [Tile?] = []
         let times = timed {
-            guard let ctx = CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale),
-                  saved.matches(revision: 1, pixelSize: pixels, scale: Bench.displayScale, transform: transform),
-                  saved.restore(into: ctx)
-            else {
-                return XCTFail("Couldn't restore the page raster")
-            }
-            restored = ctx.makeImage()
+            guard let data = try? Data(contentsOf: url, options: .alwaysMapped),
+                  let raster = TileRaster(data: data, revision: 0)
+            else { return XCTFail("The kept tiles didn't read back") }
+            restored = tiles.map { key, _ in raster.holds(key) ? raster.restore(key) : nil }
         }
-        let image = try XCTUnwrap(restored)
-        XCTAssertEqual(image.dataProvider?.data as Data?, shown.dataProvider?.data as Data?,
-                       "The reopened page must be pixel for pixel the page that was shown")
+        for ((_, image), tile) in zip(tiles, restored) {
+            XCTAssertEqual(tile?.image?.dataProvider?.data as Data?, image?.dataProvider?.data as Data?,
+                           "The reopened page must be pixel for pixel the page that was shown")
+        }
         BenchResults.record("page_open.5k_ms", Stats(times).median, unit: "ms", budget: Self.pageOpenBudgetMs)
         check(Stats(times).median, under: Self.pageOpenBudgetMs, "Page open with 5000 strokes (median)")
     }
 
-    /// Leaving a page: compressing the 5k-stroke page's committed layer into its `CommittedRaster`. Runs
-    /// in the background after the page closes, so it has no budget, but it bounds how soon a page
-    /// reopened straight away can be restored rather than drawn.
+    /// Leaving a page: compressing the 5k-stroke page's fitted-level tiles into its `TileRaster`. Runs in
+    /// the background after the page closes, so it has no budget, but it bounds how soon a page reopened
+    /// straight away (and evicted from the cache) can be restored rather than drawn. Leaving it again after
+    /// an edit compresses only the tiles the edit reached; the rest are carried over.
     func testPageRasterCapture5k() throws {
-        let (shown, transform) = try fittedPage(strokes: 5000)
-        var raster: CommittedRaster?
+        let (tiles, level) = try fittedTiles(strokes: 5000)
+        var raster: TileRaster?
         let times = timed(iterations: 3) {
-            raster = CommittedRaster(image: shown, revision: 1, transform: transform, scale: Bench.displayScale)
+            raster = TileRaster(tiles: tiles, revision: 1, level: level, pageSize: corpus.pageSize.size)
         }
         let saved = try XCTUnwrap(raster)
         BenchResults.record("page_raster.capture_5k_ms", Stats(times).median, unit: "ms")
-        BenchResults.record("page_raster.5k_kb", Double(saved.compressed.count) / 1024, unit: "KB")
+        BenchResults.record("page_raster.5k_kb", Double(saved.byteCount) / 1024, unit: "KB")
     }
 
-    /// A page of `count` strokes drawn fitted into a committed bitmap, as the canvas shows it.
-    private func fittedPage(strokes count: Int) throws -> (CGImage, ViewTransform) {
+    /// A page of `count` strokes as the fitted canvas's tiles, filled on every core.
+    private func fittedTiles(strokes count: Int) throws -> ([(key: TileKey, image: CGImage?)], TileLevel) {
         let page = corpus.page(strokes: count)
-        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0) }
         let transform = Bench.fittedTransform(for: corpus.pageSize)
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
-        CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
-        return try (XCTUnwrap(ctx.makeImage()), transform)
+        let tiles = screenTiles(of: snapshot(page, geometry: StrokeRenderer.geometries(for: page)), at: transform)
+        return (tiles, TileLevel(transform, displayScale: Bench.displayScale))
     }
 
-    /// Opening a page with no raster to restore (the first time it's shown at this size): a fresh
-    /// committed bitmap, every stroke's geometry built (nothing is cached yet), and the whole page drawn
-    /// at the fitted zoom, exactly as `CanvasView`'s first full render.
+    /// Opening a page with no raster to restore (the first time it's ever shown): every stroke's geometry
+    /// built (nothing is kept yet) and every tile of the fitted page filled, on every core. The canvas does
+    /// the same through the scheduler, which keeps a core back and builds only the geometry its tiles
+    /// reach (`scroll.page_enter_first_5k_ms` times that through a real canvas).
     private func pageOpenCold(strokes count: Int, iterations: Int) {
         let page = corpus.page(strokes: count)
-        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0) }
         let transform = Bench.fittedTransform(for: corpus.pageSize)
         let times = timed(iterations: iterations) {
-            guard let ctx = CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale) else {
-                return XCTFail("Couldn't make the committed bitmap")
-            }
-            CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
-            _ = ctx.makeImage()
+            _ = screenTiles(of: snapshot(page, geometry: StrokeRenderer.geometries(for: page)), at: transform)
         }
         BenchResults.record("page_open_cold.\(count / 1000)k_ms", Stats(times).median, unit: "ms")
     }
@@ -414,50 +430,103 @@ final class InkBenchmarks: XCTestCase {
 
     // MARK: Full-page redraw
 
-    /// Redrawing a 5k-stroke page into the existing bitmap with every stroke's geometry cached: what undo,
-    /// erase and the end of a zoom or pan cost.
-    func testFullPageRedraw5k() throws {
+    /// Filling every tile of a fitted 5k-stroke page with every stroke's geometry cached, on every core:
+    /// what a new zoom level near the fitted one costs (the canvas fills it progressively, centre-out, over
+    /// the scaled tiles of the last). Undo, erase and pans no longer redraw the page (NOT-102, NOT-104).
+    func testFullPageRedraw5k() {
         let page = corpus.page(strokes: 5000)
-        let items = page.map {
-            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color,
-                                   geometry: StrokeRenderer.geometry(for: $0), stroke: nil)
-        }
+        let ink = snapshot(page, geometry: StrokeRenderer.geometries(for: page))
         let transform = Bench.fittedTransform(for: corpus.pageSize)
-        let pixels = Bench.pixelSize
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale))
         let times = timed(iterations: 3) {
-            CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
-            _ = ctx.makeImage()
+            _ = screenTiles(of: ink, at: transform)
         }
         BenchResults.record("full_redraw.5k_ms", Stats(times).median, unit: "ms")
     }
 
+    // MARK: Stroke index
+
+    /// Building a 20k-stroke page's `StrokeIndex` from scratch, as opening it does (off the main actor).
+    func testStrokeIndexBuild20k() {
+        let page = corpus.page(strokes: 20000)
+        var index: StrokeIndex?
+        let times = timed(iterations: 5) {
+            index = StrokeIndex(strokes: page)
+        }
+        XCTAssertEqual(index?.strokeCount, 20000)
+        BenchResults.record("index.build_20k_ms", Stats(times).median, unit: "ms")
+    }
+
+    /// A tile-sized query (128 pt, a 256-pixel tile at 2×) costs the same on a 5k-stroke page and on a
+    /// 20k-stroke one holding the same 5k strokes plus 15k elsewhere: it depends on what's near, not on the
+    /// page's size. A scan of every stroke's rect, what culling did before the index, is there to compare.
+    func testStrokeIndexTileQuery() {
+        let near = corpus.page(strokes: 5000)
+        let far = corpus.page(strokes: 15000).map { $0.applying(CGAffineTransform(translationX: 0, y: 5000)) }
+        let size = corpus.pageSize
+        let tiles = stride(from: 0, to: size.height, by: 128).flatMap { y in
+            stride(from: 0, to: size.width, by: 128).map { x in CGRect(x: x, y: y, width: 128, height: 128) }
+        }
+        // Timed by hand: `measure` can run only once per test, and this times three things.
+        func perQuery(_ body: (CGRect) -> Int) -> Double {
+            var found = 0, times: [Double] = []
+            for _ in 0 ..< Bench.iterations + 1 {
+                let start = Bench.now()
+                for _ in 0 ..< 10 {
+                    for tile in tiles {
+                        found &+= body(tile)
+                    }
+                }
+                times.append(Bench.milliseconds(since: start))
+            }
+            XCTAssertGreaterThan(found, 0)
+            return Stats(Array(times.dropFirst())).median * 1000 / Double(10 * tiles.count)
+        }
+        let index5k = StrokeIndex(strokes: near), index20k = StrokeIndex(strokes: near + far)
+        let reaches20k = (near + far).map(StrokeIndex.reach(of:))
+        BenchResults.record("index.query_tile_5k_us", perQuery { index5k.strokes(in: $0).count }, unit: "us")
+        BenchResults.record("index.query_tile_20k_us", perQuery { index20k.strokes(in: $0).count }, unit: "us")
+        BenchResults.record("index.scan_tile_20k_us", perQuery { tile in
+            reaches20k.reduce(0) { $0 + ($1.intersects(tile) ? 1 : 0) }
+        }, unit: "us")
+        // The whole page (the fitted page's query), which walks the strokes instead of the cells.
+        let page = size.bounds
+        BenchResults.record("index.query_page_5k_us", perQuery { _ in index5k.strokes(in: page).count }, unit: "us")
+    }
+
     // MARK: Memory
 
-    /// Memory with a 5k-stroke page open at 6× zoom (the maximum) while writing: the cached geometry of
-    /// every stroke, the committed bitmap drawn at 6×, and the live layer's tiles and baked tile bitmaps
-    /// as the corpus is replayed on top. Peak footprint over the baseline before the page was opened.
-    /// The baseline is taken with free memory handed back first, so the earlier benchmarks' leftovers
-    /// can't be reused and make the page look cheaper than it is (they made `geometry_mb` read half).
-    func testMemoryAt6xZoom() throws {
+    /// Memory with a 5k-stroke page open at 6× zoom (the maximum) while writing: the page's stroke geometry,
+    /// the tiles in view filled at 6×, and the live layer's tiles and baked tile bitmaps as the corpus is
+    /// replayed on top. Peak footprint over the baseline before the page was opened.
+    ///
+    /// The geometry is every stroke's, built once as filling the whole fitted page does, and kept as the page
+    /// keeps it (NOT-108): packed, in an app-wide cache under `GeometryCache.shared`'s budget
+    /// (`geometry_packed_mb` is what that budget counts). `geometry_mb` is the heap it holds; before NOT-108
+    /// every canvas kept every stroke's `CGPath`s, ~295 MB of heap (108 MB by the footprint this measured
+    /// then). The footprint baseline is taken with free memory handed back first, so the earlier benchmarks'
+    /// leftovers can't be reused and make the page look cheaper than it is.
+    func testMemoryAt6xZoom() {
         let page = corpus.page(strokes: 5000)
         let before = Bench.settledFootprint()
+        let heapBefore = Bench.heapInUse()
         var peak = before
 
-        var cache: [UUID: StrokeGeometry] = [:]
+        let cache = GeometryCache(budget: GeometryCache.shared.budget,
+                                  unpackedBudget: GeometryCache.shared.unpackedBudget)
+        let geometry = PageGeometry(cache: cache)
         for stroke in page {
-            cache[stroke.id] = StrokeRenderer.geometry(for: stroke)
+            _ = geometry.geometry(for: stroke)
         }
-        let geometryBytes = Bench.footprint().subtractingClamped(before)
+        let geometryBytes = Bench.heapInUse().subtractingClamped(heapBefore)
+        peak = max(peak, Bench.footprint())
 
         let box = corpus.inkBounds
         let transform = Bench.zoomedTransform(for: corpus.pageSize, zoom: ViewTransform.maxZoomFactor,
                                               centredOn: CGPoint(x: box.midX, y: box.midY))
-        let pixels = Bench.pixelSize
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: pixels, scale: Bench.displayScale))
-        let items = page.map { CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: cache[$0.id], stroke: nil) }
-        CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
-        let image = ctx.makeImage()
+        // The tiles in view filled, from the strokes in view unpacked to draw, as the canvas fills them.
+        let inView = transform.toCanvas(Bench.screenBounds)
+        let shown = page.filter { geometry.bounds(for: $0).intersects(inView) }
+        let tiles = screenTiles(of: snapshot(shown, geometry: shown.map { geometry.geometry(for: $0) }), at: transform)
         peak = max(peak, Bench.footprint())
 
         let replayer = InputReplayer(viewSize: Bench.screen, transform: transform, displayScale: Bench.displayScale)
@@ -468,13 +537,16 @@ final class InkBenchmarks: XCTestCase {
                 peak = max(peak, Bench.footprint())
             }
         }
-        XCTAssertNotNil(image)
+        XCTAssertTrue(tiles.contains { $0.image != nil })
 
         let mb = { (bytes: UInt64) in Double(bytes) / 1_048_576 }
-        BenchResults.record("memory.6x.peak_mb", mb(peak.subtractingClamped(before)), unit: "MB")
+        BenchResults.record("memory.6x.peak_mb", mb(peak.subtractingClamped(before)), unit: "MB",
+                            budget: Self.memory6xBudgetMB)
         BenchResults.record("memory.6x.geometry_mb", mb(geometryBytes), unit: "MB")
+        BenchResults.record("memory.6x.geometry_packed_mb", mb(UInt64(cache.byteCount)), unit: "MB")
+        BenchResults.record("memory.6x.geometry_unpacked_mb", mb(UInt64(cache.unpackedByteCount)), unit: "MB")
         BenchResults.record("memory.6x.live_tiles_peak_mb", mb(UInt64(tilesPeak)), unit: "MB")
-        withExtendedLifetime((cache, image)) {}
+        withExtendedLifetime((geometry, tiles)) {}
     }
 }
 

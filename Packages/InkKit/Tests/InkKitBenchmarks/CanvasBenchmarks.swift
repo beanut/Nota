@@ -81,6 +81,12 @@ final class CanvasBenchmarks: XCTestCase {
         try waitUntil(timeout: timeout) { canvas.rendersSettled }
     }
 
+    /// Runs the main run loop until `canvas` has settled and the tiles around its view are filled too
+    /// (`rendersSettled` doesn't wait for those): what fill counts are read after.
+    private func waitUntilIdle(_ canvas: CanvasView, timeout: TimeInterval = 30) throws {
+        try waitUntil(timeout: timeout) { canvas.rendersSettled && !canvas.coordinator.isFilling }
+    }
+
     @discardableResult
     private func waitUntil(timeout: TimeInterval, _ done: () -> Bool) throws -> Double {
         let start = Bench.now()
@@ -101,14 +107,29 @@ final class CanvasBenchmarks: XCTestCase {
     }
 
     /// The fraction of pixels in what `canvas` shows that differ from the page drawn from scratch at the
-    /// same transform: 0 when its pixels are correct.
+    /// same transform: 0 when its pixels are correct. The reference is drawn through the tile path from
+    /// scratch (every tile in view filled again, no cache, all geometry rebuilt) and assembled the same
+    /// way, since tiles differ from one whole-screen draw in about 0.1% of pixels (NOT-99), which would
+    /// hide a stale tile.
     private func mismatch(of canvas: CanvasView) throws -> Double {
-        let shown = try XCTUnwrap(canvas.coordinator.publishedImage, "the canvas published no image")
-        let items = canvas.document.strokes.map {
-            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color, geometry: nil, stroke: $0)
+        let coordinator = canvas.coordinator
+        let shown = try XCTUnwrap(coordinator.composedImage(), "the canvas shows no tiles")
+        let strokes = canvas.document.strokes
+        let ink = InkSnapshot(strokes: strokes, index: StrokeIndex(strokes: strokes),
+                              geometry: Dictionary(uniqueKeysWithValues: zip(strokes.map(\.id),
+                                                                             strokes.map(StrokeRenderer.keptGeometry))),
+                              skipped: [])
+        let keys = coordinator.visibleKeys(at: canvas.viewTransform, level: coordinator.level(for: canvas.viewTransform))
+        var tiles: [(key: TileKey, image: CGImage)] = []
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: keys.count) { i in
+            let tile = RenderCoordinator.draw(keys[i], from: ink, revision: 0, filler: CoreGraphicsTileFiller())
+            if let image = tile.image {
+                lock.withLock { tiles.append((keys[i], image)) }
+            }
         }
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
-        CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: canvas.viewTransform)
+        let ctx = try XCTUnwrap(TileBitmap.viewBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
+        TileBitmap.compose(tiles, at: canvas.viewTransform, in: ctx)
         let reference = try XCTUnwrap(ctx.makeImage())
         return Self.differingFraction(shown, reference)
     }
@@ -248,25 +269,49 @@ final class CanvasBenchmarks: XCTestCase {
     /// A pinch from the fitted page to 6× over half a second, about the middle of a 5k-stroke page's
     /// ink: main-thread work per frame, and how long after the fingers lift the ink is sharp at 6×.
     func testPinch1xTo6x() throws {
+        try pinch1xTo6x(name: "zoom.pinch_1x_6x", holding: 0)
+    }
+
+    /// The same pinch, with the fingers held still at 6× for 150 ms before they lift, as a pinch usually
+    /// ends: the level it holds is filled meanwhile (NOT-105), so less is left once they lift.
+    func testPinch1xTo6xHeld() throws {
+        try pinch1xTo6x(name: "zoom.pinch_1x_6x_held", holding: 0.15)
+    }
+
+    private func pinch1xTo6x(name: String, holding: TimeInterval) throws {
         let (canvas, _) = try denseCanvas()
         let k = pow(ViewTransform.maxZoomFactor, 1 / CGFloat(Self.gestureFrames))
         var frames: [Double] = []
         var sharp: [Double] = []
+        var fillWork: [Double] = [], tiles: [Double] = []
         for _ in 0 ..< 3 {
             canvas.resetView()
             try waitUntilSettled(canvas)
+            // Each pinch ends at a level not drawn yet: returning to a cached one fills nothing.
+            canvas.coordinator.cache.removeAll(page: canvas.document.cacheID, except: canvas.coordinator.restingLevel)
             let focus = canvas.viewTransform.toView(inkCentre)
             canvas.gestureBegan()
             frames += paced(frames: Self.gestureFrames) { _ in canvas.zoom(by: k, about: focus) }
+            if holding > 0 {
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: holding))
+            }
             let start = Bench.now()
+            let before = canvas.coordinator.fillStats
             canvas.gestureEnded()
             try waitUntilSettled(canvas)
             sharp.append(Bench.milliseconds(since: start))
+            let after = canvas.coordinator.fillStats
+            fillWork.append(after.fillMilliseconds - before.fillMilliseconds)
+            tiles.append(Double(after.tilesFilled - before.tilesFilled))
         }
         XCTAssertEqual(canvas.viewTransform.scale / canvas.fittedTransform().scale, ViewTransform.maxZoomFactor,
                        accuracy: 0.01)
         try assertCorrectPixels(canvas, "At 6× after the pinch")
-        recordGesture("zoom.pinch_1x_6x", frames: frames, sharp: sharp)
+        recordGesture(name, frames: frames, sharp: sharp)
+        // What getting sharp costs once the fingers lift: the tiles filled by then, and their fill times added
+        // up, which time to sharp spreads over the workers.
+        BenchResults.record("\(name).tiles_filled", Stats(tiles).median, unit: "tiles")
+        BenchResults.record("\(name).fill_cpu_ms", Stats(fillWork).median, unit: "ms")
     }
 
     /// Panning at 6× across the middle of a 5k-stroke page's ink, 10 pt a frame for half a second.
@@ -275,10 +320,11 @@ final class CanvasBenchmarks: XCTestCase {
         canvas.gestureBegan()
         canvas.zoom(by: ViewTransform.maxZoomFactor, about: canvas.viewTransform.toView(inkCentre))
         canvas.gestureEnded()
-        try waitUntilSettled(canvas)
+        try waitUntilIdle(canvas)
         let start6x = canvas.viewTransform
         var frames: [Double] = []
         var sharp: [Double] = []
+        let before = canvas.coordinator.fillStats
         for _ in 0 ..< 3 {
             canvas.gestureBegan()
             frames += paced(frames: Self.gestureFrames) { n in
@@ -290,29 +336,29 @@ final class CanvasBenchmarks: XCTestCase {
             try waitUntilSettled(canvas)
             sharp.append(Bench.milliseconds(since: start))
         }
+        try waitUntilIdle(canvas)
+        let fill = canvas.coordinator.fillStats
         XCTAssertNotEqual(canvas.viewTransform, start6x)
         try assertCorrectPixels(canvas, "At 6× after the pan")
         recordGesture("pan.6x_dense", frames: frames, sharp: sharp)
 
-        // What each pan step asks the renderer for today: the screen at the new 6× transform, every
-        // stroke's geometry cached. Timed on its own, as it runs off the main thread.
-        let items = canvas.document.strokes.map {
-            CommittedRenderer.Item(id: $0.id, brush: $0.brush, color: $0.color,
-                                   geometry: canvas.coordinator.geometryCache[$0.id], stroke: nil)
-        }
-        let ctx = try XCTUnwrap(CommittedRenderer.makeBitmap(pixelSize: Bench.pixelSize, scale: Bench.displayScale))
-        var transform = start6x
-        var steps: [Double] = []
-        for _ in 0 ..< 20 {
-            transform.offset.x -= 10
-            let start = Bench.now()
-            CommittedRenderer.render(items, into: ctx, bounds: Bench.screenBounds, transform: transform)
-            _ = ctx.makeImage()
-            steps.append(Bench.milliseconds(since: start))
-        }
-        let step = Stats(steps).median
+        // The render work each pan step costs, off the main thread: the tiles the pans uncovered (with a
+        // tile's margin ahead of the view) filled, spread over their frames.
+        let step = (fill.milliseconds - before.milliseconds) / Double(3 * Self.gestureFrames)
         BenchResults.record("pan.6x_dense.step_render_ms", step, unit: "ms", budget: Self.panStepRenderBudgetMs)
-        check(step, under: Self.panStepRenderBudgetMs, "Render work per pan step at 6× (ms, median)")
+        BenchResults.record("pan.6x_dense.tiles_filled", Double(fill.tilesFilled - before.tilesFilled), unit: "tiles")
+        check(step, under: Self.panStepRenderBudgetMs, "Render work per pan step at 6× (ms, mean)")
+
+        // Back the way the last pass came (untimed): every tile on the way is cached, so nothing is filled.
+        canvas.gestureBegan()
+        _ = paced(frames: Self.gestureFrames) { n in
+            canvas.pan(by: CGPoint(x: n < Self.gestureFrames / 2 ? -10 : 10, y: 3))
+        }
+        canvas.gestureEnded()
+        try waitUntilIdle(canvas)
+        let refilled = canvas.coordinator.fillStats.tilesFilled - fill.tilesFilled
+        BenchResults.record("pan.6x_dense.cached_tiles_filled", Double(refilled), unit: "tiles")
+        XCTAssertEqual(refilled, 0, "a pan over cached tiles filled some again")
     }
 
     private func recordGesture(_ name: String, frames: [Double], sharp: [Double]) {
@@ -327,9 +373,14 @@ final class CanvasBenchmarks: XCTestCase {
 
     // MARK: Continuous scrolling
 
-    /// A 5k-stroke page scrolling into view in continuous mode: `ContinuousCanvasView` gives it a fresh
-    /// embedded canvas, places it and lays it out (`makeCanvas`, `place(_:settled:)`, `layoutIfNeeded`);
-    /// timed until its ink is drawn. Pages never restore a `CommittedRaster` while embedded today.
+    /// A 5k-stroke page scrolling into view in continuous mode: `ContinuousCanvasView` hands it a pooled
+    /// embedded canvas another page left (`show(_:)`, NOT-107), places it and lays it out
+    /// (`place(_:settled:)`, `layoutIfNeeded`); timed until its ink is drawn. The budgeted case
+    /// (`scroll.page_enter_5k_ms`) is a page seen before, in this launch or an earlier one (NOT-106): the
+    /// page read from its file again (nothing of it in the tile cache) and the tiles it left read back from
+    /// the file an app keeps them in (mapped, as `DocumentStore` reads them), then restored. The first time
+    /// a page is ever shown (on a new canvas), its tiles in view are filled: `scroll.page_enter_first_5k_ms`,
+    /// no budget.
     func testPageEnter5k() throws {
         let suite = "CanvasBenchmarks.\(UUID().uuidString)"
         let controller = try CanvasController(settingsStore: XCTUnwrap(UserDefaults(suiteName: suite)),
@@ -343,34 +394,72 @@ final class CanvasBenchmarks: XCTestCase {
         let window = ContinuousPageLayout.renderWindow(forPage: page, viewport: viewport, current: nil)
         let placement = ViewTransform(scale: layout.scale,
                                       offset: CGPoint(x: page.minX - window.minX, y: page.minY - window.minY))
-        var times: [Double] = []
-        for _ in 0 ..< 3 {
-            let file = InkPageFile(pageID: UUID(), strokes: corpus.page(strokes: 5000))
-            let document = CanvasDocument(file: file, pageSize: corpus.pageSize)
-            let start = Bench.now()
-            let canvas = CanvasView(frame: window, document: document, embedded: true)
+        let file = InkPageFile(pageID: UUID(), strokes: corpus.page(strokes: 5000))
+        func enter(_ document: CanvasDocument, on pooled: CanvasView? = nil) throws -> CanvasView {
+            let canvas = pooled ?? CanvasView(frame: window, document: document, embedded: true)
+            pooled?.show(document)
             canvas.traitOverrides.displayScale = Bench.displayScale
             canvas.controller = controller
+            canvas.restingScaleOverride = layout.scale // as `ContinuousCanvasView` sets it
             canvas.place(placement, settled: true)
             canvas.layoutIfNeeded()
             try waitUntilSettled(canvas, timeout: 60)
+            return canvas
+        }
+
+        // First sight: filled. Then the page scrolls away, leaving its tiles, which the app keeps.
+        let first = CanvasDocument(file: file, pageSize: corpus.pageSize)
+        let start = Bench.now()
+        let shown = try enter(first)
+        BenchResults.record("scroll.page_enter_first_5k_ms", Bench.milliseconds(since: start), unit: "ms")
+        try waitUntilIdle(shown)
+        shown.coordinator.captureTileRaster()
+        try waitUntil(timeout: 60) { first.committedTiles != nil }
+        let tiles = try XCTUnwrap(first.committedTiles)
+        let url = FileManager.default.temporaryDirectory.appending(path: "page-enter-\(UUID().uuidString).tiles")
+        try tiles.data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        var times: [Double] = []
+        for _ in 0 ..< 3 {
+            let document = CanvasDocument(file: file, pageSize: corpus.pageSize)
+            let start = Bench.now()
+            let data = try Data(contentsOf: url, options: .alwaysMapped)
+            XCTAssertTrue(document.restoreCommittedTiles(data))
+            let canvas = try enter(document, on: shown)
             times.append(Bench.milliseconds(since: start))
+            XCTAssertEqual(canvas.coordinator.fillStats.tilesFilled, 0, "a page seen before filled tiles")
         }
         let median = Stats(times).median
         BenchResults.record("scroll.page_enter_5k_ms", median, unit: "ms", budget: Self.pageEnterBudgetMs)
         check(median, under: Self.pageEnterBudgetMs, "A 5000-stroke page entering view (ms, median)")
     }
 
-    /// Scrolling a 20-page note of 5k-stroke pages from the first page to the last in continuous mode, a
-    /// page at a time, letting each page's ink draw: the peak footprint the canvases add over the note
-    /// itself (its strokes in memory, measured as `model_mb`), from a settled baseline.
+    /// A 20-page note of 5k-stroke pages in continuous scrolling, as the app shows it: in a window (so
+    /// pages leaving view leave their tiles, and drawn layers are drawn), with each page's tiles written to a
+    /// file and swapped for the mapped file as `DocumentStore` does (NOT-106).
+    ///
+    /// 1. **Memory** (`memory.continuous_20_pages_mb`): scrolled from the first page to the last a page at
+    ///    a time, each page's ink drawn for the first time: the peak footprint over a settled baseline taken
+    ///    before the note was made, less the note itself (its strokes in memory, `model_mb`). The note is
+    ///    counted as the heap it holds, not as the footprint it added: making it reuses whatever memory
+    ///    malloc kept from the benchmarks before, so its footprint (and with it a footprint-only split)
+    ///    swings by 70 MB from run to run while the peak doesn't (NOT-112).
+    /// 2. **A fling** (`scroll.fling_20_pages.*`, NOT-107) back to the top and down to the bottom again at
+    ///    6,000 points a second (50 a frame at 120 Hz), every page seen before: main-thread work per
+    ///    frame, and the frames on which a page on screen showed paper where its ink belongs (a tile in view
+    ///    not laid out, with no resting-level tile under it). Canvases made during the fling are counted
+    ///    too: the pool should make none.
     func testMemoryContinuous20Pages() throws {
         let start = Bench.settledFootprint()
+        let heapStart = Bench.heapInUse()
         let pages = (0 ..< 20).map { _ in
             CanvasDocument(file: InkPageFile(pageID: UUID(), strokes: corpus.page(strokes: 5000)),
                            pageSize: corpus.pageSize)
         }
         let notebook = InkNotebook(pages: pages, defaultPageSize: corpus.pageSize)
+        let kept = try KeptTiles(pages: pages)
+        let model = Bench.heapInUse().subtractingClamped(heapStart)
         let before = Bench.settledFootprint()
         var peak = before
 
@@ -380,21 +469,106 @@ final class CanvasBenchmarks: XCTestCase {
         let view = ContinuousCanvasView(notebook: notebook, controller: controller, telemetry: PencilTelemetry())
         view.traitOverrides.displayScale = Bench.displayScale
         view.frame = Bench.screenBounds
+        let window = UIWindow(frame: Bench.screenBounds)
+        window.addSubview(view)
+        window.isHidden = false
         view.layoutIfNeeded()
+        func settled() -> Bool {
+            !view.liveCanvases.isEmpty && view.liveCanvases.allSatisfy { $0.rendersSettled && !$0.coordinator.isFilling }
+        }
         for index in pages.indices {
             view.scroll(toPage: index, animated: false)
             view.layoutIfNeeded()
             try waitUntil(timeout: 120) {
                 peak = max(peak, Bench.footprint())
-                return !view.liveCanvases.isEmpty && view.liveCanvases.allSatisfy(\.rendersSettled)
+                return settled()
             }
         }
         let mb = { (bytes: UInt64) in Double(bytes) / 1_048_576 }
-        let added = mb(peak.subtractingClamped(before))
+        let added = mb(peak.subtractingClamped(start).subtractingClamped(model))
         BenchResults.record("memory.continuous_20_pages_mb", added, unit: "MB", budget: Self.continuousMemoryBudgetMB)
-        BenchResults.record("memory.continuous_20_pages.model_mb", mb(before.subtractingClamped(start)), unit: "MB")
+        BenchResults.record("memory.continuous_20_pages.model_mb", mb(model), unit: "MB")
         check(added, under: Self.continuousMemoryBudgetMB, "Scrolling a 20-page note (MB over the note)")
-        withExtendedLifetime((view, notebook)) {}
+
+        // The fling: up to the top, then down to the bottom, every page seen before.
+        try waitUntil(timeout: 60) { kept.isIdle }
+        let speed: CGFloat = 50 // content points a frame
+        let bottom = view.contentOffsetForTesting
+        var blankFrames = 0, blankTiles = 0
+        func blank() -> Int {
+            view.pagesInView.map { index -> Int in
+                guard let canvas = view.canvas(showing: pages[index].id) else { return 1 }
+                let onScreen = canvas.convert(view.bounds, from: view)
+                return canvas.coordinator.blankTiles(in: canvas.viewTransform.toCanvas(onScreen))
+            }
+            .reduce(0, +)
+        }
+        var maxPeak = before
+        func step(to y: CGFloat) {
+            view.scrollForTesting(toY: y)
+            let b = blank()
+            blankTiles += b
+            blankFrames += b > 0 ? 1 : 0
+            maxPeak = max(maxPeak, Bench.footprint())
+        }
+        let count = Int((bottom / speed).rounded(.up))
+        var frames = paced(frames: count) { n in step(to: bottom - CGFloat(n + 1) * speed) }
+        // The pool has as many canvases as a fling needs now: the way back down makes none.
+        let madeGoingUp = view.canvasesMade
+        frames += paced(frames: count) { n in step(to: CGFloat(n + 1) * speed) }
+        view.endScrollingForTesting()
+        let f = Stats(frames)
+        BenchResults.record("scroll.fling_20_pages.frame_p50_ms", f.median, unit: "ms")
+        BenchResults.record("scroll.fling_20_pages.frame_p95_ms", f.p95, unit: "ms", budget: Self.gestureFrameBudgetMs)
+        BenchResults.record("scroll.fling_20_pages.frame_max_ms", f.max, unit: "ms", budget: Self.gestureFrameBudgetMs)
+        BenchResults.record("scroll.fling_20_pages.blank_frames", Double(blankFrames), unit: "frames", budget: 0.5)
+        BenchResults.record("scroll.fling_20_pages.blank_tiles", Double(blankTiles), unit: "tiles")
+        BenchResults.record("scroll.fling_20_pages.canvases_made", Double(view.canvasesMade - madeGoingUp),
+                            unit: "canvases")
+        BenchResults.record("scroll.fling_20_pages.peak_mb", mb(maxPeak.subtractingClamped(start).subtractingClamped(model)),
+                            unit: "MB")
+        check(f.p95, under: Self.gestureFrameBudgetMs, "Fling through 20 pages: main-thread work per frame (ms, p95)")
+        XCTAssertEqual(view.canvasesMade, madeGoingUp, "the fling made canvases instead of reusing them")
+        withExtendedLifetime((view, notebook, window, kept)) {}
+    }
+}
+
+/// What the app does with the tiles a page leaves (`DocumentStore`, NOT-106), for the continuous
+/// scrolling benchmark: each capture is written to a file off the main thread and the page swaps its copy
+/// in memory for the mapped file, so kept tiles cost what they cost in the app.
+@MainActor
+final class KeptTiles {
+    private let folder: URL
+    private let queue = DispatchQueue(label: "KeptTiles")
+    private var writing = 0
+
+    init(pages: [CanvasDocument]) throws {
+        folder = FileManager.default.temporaryDirectory.appending(path: "kept-tiles-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for page in pages {
+            page.observeCommittedTiles(self) { [weak self, weak page] in
+                guard let self, let page, let tiles = page.committedTiles else { return }
+                let url = folder.appending(path: "\(page.id.uuidString).tiles")
+                writing += 1
+                queue.async {
+                    let mapped = (try? tiles.data.write(to: url)).flatMap { try? Data(contentsOf: url, options: .alwaysMapped) }
+                    DispatchQueue.main.async {
+                        self.writing -= 1
+                        if let mapped {
+                            page.adoptPersistedTiles(mapped, for: tiles)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    var isIdle: Bool {
+        writing == 0
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: folder)
     }
 }
 

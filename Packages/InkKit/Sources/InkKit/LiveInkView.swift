@@ -14,6 +14,11 @@ import UIKit
 ///
 /// A redraw touches only the tiles under the new ink, and in each one blits the baked bitmap and fills the
 /// hot runs. That is bounded by tile size and chunk size, not by how long the stroke is.
+///
+/// The tiles sit on the committed layer's pixel grid (NOT-110): each is 2 × 2 committed tiles of the page at
+/// the level the view is settled at, so when a stroke is committed at that level its baked bitmaps are the
+/// pixels the committed tiles need, and `bakedInk(of:)` hands them over instead of the stroke being drawn
+/// again.
 final class LiveInkView: UIView {
     struct Entry {
         let stroke: LiveStroke
@@ -21,8 +26,8 @@ final class LiveInkView: UIView {
         let previewFill: CGColor?
     }
 
-    /// Tile edge in view points. 256 pt is 512 px at 2×: about 1 MB per tile.
-    static let tileSize: CGFloat = 256
+    /// Tile edge in device pixels: two committed tiles (`TileKey.side`) across, 256 pt at 2×, about 1 MB.
+    static let tilePixels = 2 * InkKit.TileKey.side
 
     /// Strokes to show, bottom to top. Pulled at draw time so the view never holds stale state.
     var entries: () -> [Entry] = { [] }
@@ -34,15 +39,23 @@ final class LiveInkView: UIView {
     /// rect. Without it the backdrop is plain `paperColor`.
     var drawPaper: ((CGContext, ViewTransform, CGRect) -> Void)?
 
-    /// The committed image. Multiply ink needs the real backdrop to preview what will be committed.
-    var underlay: CGImage? {
+    /// The committed ink under the live layer, as images of page rects (the committed tiles on screen).
+    /// Multiply ink needs the real backdrop to preview what will be committed.
+    var underlay: [(pageRect: CGRect, image: CGImage)] = [] {
         didSet { for tile in tiles.values where tile.drewBackdrop {
             tile.setNeedsDisplay()
         } }
     }
 
+    /// Called when a finished raster stroke's last wax is back from the GPU: it can be handed over now.
+    var waxDidLand: ((LiveStroke) -> Void)?
+
     /// Canvas → view transform the tiles are rasterized at.
     private var bakeTransform = ViewTransform()
+    /// Where tile (0, 0) starts, in view points: the page origin's device pixel. Tile (col, row) then covers
+    /// the page's pixels [col, col + 1) × [row, row + 1) × `tilePixels` at the bake level, as committed tiles
+    /// (2col ... 2col + 1, 2row ... 2row + 1) do, whenever the page origin sits on a whole device pixel.
+    private var gridOrigin = CGPoint.zero
     private var scale: CGFloat = 2
     private let tileHost = CALayer()
     private var tiles: [TileKey: Tile] = [:]
@@ -50,7 +63,8 @@ final class LiveInkView: UIView {
     private let cursorHalo = CAShapeLayer()
     private let cursorLine = CAShapeLayer()
 
-    private struct TileKey: Hashable { let col: Int, row: Int }
+    /// A live tile, in tiles from `gridOrigin`.
+    struct TileKey: Hashable { let col: Int, row: Int }
 
     /// One stroke's baked ink inside one tile.
     private final class BakedTile {
@@ -61,8 +75,12 @@ final class LiveInkView: UIView {
         var waxPending = CGRect.null
         var waxInFlight = false
         var waxFailed = false
-        /// Chunks below this index have been considered for this tile (and drawn if they reach it).
+        /// Chunks below this index have been considered for this tile (and drawn if they reach it), and the
+        /// first `bakedRuns` runs of the next one (`bake` draws a few runs at a time).
         var bakedThrough = 0
+        var bakedRuns = 0
+        /// The whole finished stroke is baked, its last chunk and tail too (`bakedInk(of:)`): nothing is hot.
+        var complete = false
         /// Snapshot of `context`, made on demand and dropped whenever the context is drawn into.
         private var snapshot: CGImage?
 
@@ -124,6 +142,7 @@ final class LiveInkView: UIView {
         let newScale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
         if newScale != scale {
             scale = newScale
+            gridOrigin = Self.gridOrigin(for: bakeTransform, scale: scale)
             removeAllTiles()
             invalidateAll()
         }
@@ -170,14 +189,25 @@ final class LiveInkView: UIView {
     }
 
     private func tileKeys(under viewRect: CGRect) -> [TileKey] {
-        let size = Self.tileSize
+        let size = tileSide
+        let rect = viewRect.offsetBy(dx: -gridOrigin.x, dy: -gridOrigin.y)
         var keys: [TileKey] = []
-        for row in Int(viewRect.minY / size) ... Int((viewRect.maxY - 0.001) / size) {
-            for col in Int(viewRect.minX / size) ... Int((viewRect.maxX - 0.001) / size) {
+        for row in Int((rect.minY / size).rounded(.down)) ... Int(((rect.maxY - 0.001) / size).rounded(.down)) {
+            for col in Int((rect.minX / size).rounded(.down)) ... Int(((rect.maxX - 0.001) / size).rounded(.down)) {
                 keys.append(TileKey(col: col, row: row))
             }
         }
         return keys
+    }
+
+    /// Tile edge in view points.
+    private var tileSide: CGFloat {
+        CGFloat(Self.tilePixels) / scale
+    }
+
+    /// The page origin's device pixel at `transform`, in view points.
+    private static func gridOrigin(for transform: ViewTransform, scale: CGFloat) -> CGPoint {
+        CGPoint(x: (transform.offset.x * scale).rounded() / scale, y: (transform.offset.y * scale).rounded() / scale)
     }
 
     /// Call after `LiveStroke.refreshPoint` changed already-finalized segments: baked pixels under
@@ -186,8 +216,11 @@ final class LiveInkView: UIView {
         guard !canvasRect.isNull, let baked = rasters[ObjectIdentifier(stroke)] else { return }
         let chunk = max(segment, 0) / LiveStroke.chunkSize
         let rect = bakeTransform.toView(canvasRect).insetBy(dx: -3, dy: -3)
-        for (key, tile) in baked where tile.bakedThrough > chunk && frame(of: key).intersects(rect) {
+        for (key, tile) in baked where tile.bakedThrough > chunk || tile.bakedThrough == chunk && tile.bakedRuns > 0 || tile.complete {
+            guard frame(of: key).intersects(rect) else { continue }
             tile.bakedThrough = 0
+            tile.bakedRuns = 0
+            tile.complete = false
             if tile.field != nil {
                 // A raster tile keeps showing its wax; its field is rebuilt and the dirty rect redrawn.
                 tile.field = nil
@@ -203,6 +236,7 @@ final class LiveInkView: UIView {
         guard transform != bakeTransform else { return }
         guard !tiles.isEmpty else {
             bakeTransform = transform
+            gridOrigin = Self.gridOrigin(for: transform, scale: scale)
             return
         }
         let k = transform.scale / bakeTransform.scale
@@ -215,6 +249,7 @@ final class LiveInkView: UIView {
     func settle(at transform: ViewTransform) {
         guard transform != bakeTransform else { return }
         bakeTransform = transform
+        gridOrigin = Self.gridOrigin(for: transform, scale: scale)
         removeAllTiles()
         invalidateAll()
     }
@@ -229,8 +264,7 @@ final class LiveInkView: UIView {
 
     /// Bytes held by the tiles' backing stores and the baked per-stroke tile bitmaps.
     var tileMemory: Int {
-        let tilePixels = Int((Self.tileSize * scale).rounded(.up))
-        let tileBytes = tilePixels * tilePixels * 4
+        let tileBytes = Self.tilePixels * Self.tilePixels * 4
         let bakedCount = rasters.values.reduce(0) { $0 + $1.values.filter { $0.context != nil }.count }
         let fieldBytes = rasters.values.reduce(0) { $0 + $1.values.reduce(0) { $0 + ($1.field?.bytes ?? 0) } }
         return (tiles.count + bakedCount) * tileBytes + fieldBytes
@@ -244,8 +278,9 @@ final class LiveInkView: UIView {
     // MARK: Tiles
 
     private func frame(of key: TileKey) -> CGRect {
-        let size = Self.tileSize
-        return CGRect(x: CGFloat(key.col) * size, y: CGFloat(key.row) * size, width: size, height: size)
+        let size = tileSide
+        return CGRect(x: gridOrigin.x + CGFloat(key.col) * size, y: gridOrigin.y + CGFloat(key.row) * size,
+                      width: size, height: size)
     }
 
     private func tile(at key: TileKey) -> Tile {
@@ -295,14 +330,14 @@ final class LiveInkView: UIView {
         if let ctx = baked.context {
             return ctx
         }
-        let pixels = Int((Self.tileSize * scale).rounded(.up))
+        let pixels = Self.tilePixels
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: pixels, height: pixels, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: space,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                                       | CGBitmapInfo.byteOrder32Little.rawValue)
         else { return nil }
-        // Same pixel grid and antialiasing as the committed bitmap, addressed in canvas space.
+        // Same pixel grid and antialiasing as the committed tiles, addressed in canvas space.
         ctx.translateBy(x: 0, y: CGFloat(pixels))
         ctx.scaleBy(x: scale, y: -scale)
         ctx.translateBy(x: -tileFrame.minX, y: -tileFrame.minY)
@@ -396,6 +431,9 @@ final class LiveInkView: UIView {
             if !baked.waxFailed, !baked.waxPending.isNull, waxTile(stroke, key: key, wax: wax) != nil {
                 submitWax(stroke, key: key, baked: baked, wax: wax)
             }
+            if stroke.isFinished, !isWaxPending(for: stroke) {
+                waxDidLand?(stroke)
+            }
         }
         if !baked.waxInFlight {
             baked.waxFailed = true
@@ -403,30 +441,63 @@ final class LiveInkView: UIView {
         }
     }
 
-    /// Rasterizes any newly settled chunks of `entry` that reach this tile. Each chunk is drawn once.
+    /// Runs a tile draw bakes at most, so a chunk settling (or several at once, when late estimates come in)
+    /// doesn't land its whole rasterization on one touch event: a stamp brush's chunk is around a hundred
+    /// runs, about a millisecond to bake (NOT-110). What isn't baked yet is drawn hot, clipped to the redraw.
+    static let bakeBudget = 64
+
+    /// Rasterizes newly settled chunks of `entry` that reach this tile, up to `bakeBudget` runs. Each run is
+    /// drawn once. With `whole` (a finished stroke handed to the committed layer), every chunk and the tail
+    /// are baked, and the tile has nothing hot left.
     /// Not for a raster brush, whose settled chunks go to the GPU instead (`waxTile`): drawing them here would
     /// mark them done, so the tile's field would never get them.
-    private func bake(_ entry: Entry, key: TileKey, tileFrame: CGRect, clip: CGRect) -> BakedTile? {
+    private func bake(_ entry: Entry, key: TileKey, tileFrame: CGRect, clip: CGRect, whole: Bool = false) -> BakedTile? {
         let stroke = entry.stroke
         let id = ObjectIdentifier(stroke)
-        let limit = stroke.bakeableChunkCount
+        let limit = whole ? stroke.chunkCount : stroke.bakeableChunkCount
         var baked = rasters[id]?[key]
-        guard (baked?.bakedThrough ?? 0) < limit else { return baked }
+        if baked?.complete == true {
+            return baked
+        }
+        guard whole || (baked?.bakedThrough ?? 0) < limit else { return baked }
         if baked == nil {
             let fresh = BakedTile()
             rasters[id, default: [:]][key] = fresh
             baked = fresh
         }
         guard let baked else { return nil }
-        for chunk in baked.bakedThrough ..< limit where stroke.chunkBounds(chunk).intersects(clip) {
-            guard let ctx = makeBakeContext(baked, for: tileFrame) else { break }
+        var runs: [StrokeRun] = []
+        var budget = whole ? Int.max : Self.bakeBudget
+        while baked.bakedThrough < limit, budget > 0 {
+            let chunk = baked.bakedThrough
+            if stroke.chunkBounds(chunk).intersects(clip) {
+                let chunkRuns = stroke.chunkRuns(chunk), bounds = stroke.chunkRunBounds(chunk)
+                var i = baked.bakedRuns
+                while i < chunkRuns.count, budget > 0 {
+                    if bounds[i].intersects(clip) {
+                        runs.append(chunkRuns[i])
+                        budget -= 1
+                    }
+                    i += 1
+                }
+                if i < chunkRuns.count {
+                    baked.bakedRuns = i
+                    break
+                }
+            }
+            baked.bakedThrough += 1
+            baked.bakedRuns = 0
+        }
+        if whole {
+            runs.append(contentsOf: stroke.runs(intersecting: clip, fromChunk: stroke.chunkCount)) // the tail
+        }
+        if !runs.isEmpty, let ctx = makeBakeContext(baked, for: tileFrame) {
             let brush = stroke.stroke.brush
             let color = stroke.stroke.color
             if brush.usesPattern {
-                PencilTexture.prepareContext(ctx, phase: CGPoint(x: bakeTransform.offset.x - tileFrame.minX,
-                                                                 y: bakeTransform.offset.y - tileFrame.minY))
+                PencilTexture.pinToPage(ctx) // the bake context is in canvas space
             }
-            for run in stroke.chunkRuns(chunk) {
+            for run in runs {
                 let fill = entry.previewFill ?? StrokeRenderer.fillColor(for: brush, color: color, alpha: run.alpha)
                 ctx.setFillColor(fill)
                 ctx.addPath(run.path)
@@ -434,8 +505,80 @@ final class LiveInkView: UIView {
             }
             baked.invalidateImage()
         }
-        baked.bakedThrough = limit
+        baked.complete = whole
         return baked
+    }
+
+    // MARK: Hand-off to the committed layer
+
+    /// A finished stroke's pixels as the live layer baked them, by live tile, for the committed tiles at
+    /// `level` (NOT-110). Live tile (col, row) holds what drawing the stroke alone into committed tiles
+    /// (2col ... 2col + 1, 2row ... 2row + 1) gives; nil there means the stroke leaves no pixel in it. A
+    /// committed tile in none of `tiles` isn't covered (off screen, or its wax isn't back yet): fill it.
+    struct BakedInk: @unchecked Sendable { // immutable images
+        let level: TileLevel
+        let tiles: [TileKey: CGImage?]
+
+        /// The stroke's own pixels for committed tile `key` (nil: it leaves none there), or nil when the live
+        /// layer doesn't cover the tile.
+        func pixels(for key: InkKit.TileKey) -> CGImage?? {
+            guard key.level == level else { return nil }
+            let per = LiveInkView.tilePixels / InkKit.TileKey.side
+            let col = Int((Double(key.col) / Double(per)).rounded(.down))
+            let row = Int((Double(key.row) / Double(per)).rounded(.down))
+            guard let entry = tiles[TileKey(col: col, row: row)] else { return nil }
+            guard let image = entry else { return .some(nil) }
+            let side = CGFloat(InkKit.TileKey.side)
+            let crop = CGRect(x: CGFloat(key.col - col * per) * side, y: CGFloat(key.row - row * per) * side,
+                              width: side, height: side)
+            return .some(image.cropping(to: crop))
+        }
+    }
+
+    /// The pixels of `stroke`, finished and shown by this layer, that the committed tiles at the view's level
+    /// can take as they are instead of drawing the stroke again: what the committed path would draw, alone,
+    /// over transparency. Only for ink composited with a normal blend (multiply and erasers need what's under
+    /// them), with the page origin on a whole device pixel, so a live pixel is a committed one.
+    ///
+    /// Path brushes bake whatever is still hot (their last chunk and tail) into the tiles, which then show
+    /// it as baked. A raster brush gives the wax its tiles hold once the GPU has sent all of it back.
+    func bakedInk(of stroke: LiveStroke) -> BakedInk? {
+        guard let entry = entries().first(where: { $0.stroke === stroke }), entry.previewFill == nil,
+              stroke.isFinished, stroke.stroke.brush.blend == .normal, !stroke.stroke.brush.erases,
+              abs(bakeTransform.offset.x * scale - gridOrigin.x * scale) < 0.001,
+              abs(bakeTransform.offset.y * scale - gridOrigin.y * scale) < 0.001
+        else { return nil }
+        let pieces = stroke.pieceBounds
+        let reach = pieces.reduce(CGRect.null) { $0.union($1) }.insetBy(dx: -3, dy: -3)
+        guard !reach.isNull else { return nil }
+        let viewReach = bakeTransform.toView(reach)
+        let raster = stroke.stroke.brush.isRaster
+        let id = ObjectIdentifier(stroke)
+        var tiles: [TileKey: CGImage?] = [:]
+        for key in tileKeys(under: viewReach) {
+            let tileFrame = frame(of: key)
+            let tileClip = bakeTransform.toCanvas(tileFrame).insetBy(dx: -1, dy: -1)
+            guard pieces.contains(where: { $0.intersects(tileClip) }) else {
+                tiles[key] = .some(nil)
+                continue
+            }
+            // Off screen the layer never baked the stroke: those committed tiles are filled.
+            guard tileFrame.intersects(bounds) else { continue }
+            if raster {
+                guard let baked = rasters[id]?[key], baked.field != nil, !baked.waxFailed, !baked.waxInFlight,
+                      baked.waxPending.isNull else { continue }
+                tiles[key] = .some(baked.image)
+            } else {
+                let baked = bake(entry, key: key, tileFrame: tileFrame, clip: tileClip, whole: true)
+                tiles[key] = .some(baked?.image)
+            }
+        }
+        return BakedInk(level: TileLevel(bakeTransform, displayScale: scale), tiles: tiles)
+    }
+
+    /// Whether a raster stroke's wax is still on its way back from the GPU (`bakedInk(of:)` can't hand it over).
+    func isWaxPending(for stroke: LiveStroke) -> Bool {
+        rasters[ObjectIdentifier(stroke)]?.values.contains { $0.waxInFlight || !$0.waxPending.isNull } ?? false
     }
 
     private func draw(_ tile: Tile, in ctx: CGContext) {
@@ -463,7 +606,7 @@ final class LiveInkView: UIView {
                         items.append(Item(entry: entry, baked: image, hot: []))
                     }
                 } else {
-                    let hot = entry.stroke.runs(intersecting: clip)
+                    let hot = entry.stroke.runs(within: clip)
                     if !hot.isEmpty {
                         items.append(Item(entry: entry, baked: nil, hot: hot))
                     }
@@ -471,7 +614,9 @@ final class LiveInkView: UIView {
                 continue
             }
             let baked = bake(entry, key: tile.key, tileFrame: tileFrame, clip: tileClip)
-            let hot = entry.stroke.runs(intersecting: clip, fromChunk: entry.stroke.bakeableChunkCount)
+            // Everything this tile hasn't baked is hot, clipped to the redraw.
+            let hot = baked?.complete == true ? []
+                : entry.stroke.runs(within: clip, fromChunk: baked?.bakedThrough ?? 0, run: baked?.bakedRuns ?? 0)
             if baked?.image != nil || !hot.isEmpty {
                 items.append(Item(entry: entry, baked: baked?.image, hot: hot))
             }
@@ -485,7 +630,7 @@ final class LiveInkView: UIView {
         if dirty.contains(tileFrame) {
             tile.drewBackdrop = false
         }
-        if let underlay, items.contains(where: { $0.entry.stroke.stroke.brush.blend == .multiply }) {
+        if !underlay.isEmpty, items.contains(where: { $0.entry.stroke.stroke.brush.blend == .multiply }) {
             tile.drewBackdrop = true
             if let drawPaper {
                 drawPaper(ctx, bakeTransform, tileFrame)
@@ -493,8 +638,12 @@ final class LiveInkView: UIView {
                 ctx.setFillColor(paperColor)
                 ctx.fill(tileFrame)
             }
-            let size = CGSize(width: CGFloat(underlay.width) / scale, height: CGFloat(underlay.height) / scale)
-            drawImage(underlay, in: CGRect(origin: .zero, size: size), ctx: ctx)
+            for (pageRect, image) in underlay {
+                let rect = bakeTransform.toView(pageRect)
+                if rect.intersects(tileFrame) {
+                    drawImage(image, in: rect, ctx: ctx)
+                }
+            }
         }
 
         for item in items {
@@ -517,8 +666,7 @@ final class LiveInkView: UIView {
                     ctx.setBlendMode(.copy)
                 }
                 if stroke.brush.usesPattern {
-                    PencilTexture.prepareContext(ctx, phase: CGPoint(x: bakeTransform.offset.x - tileFrame.minX,
-                                                                     y: bakeTransform.offset.y - tileFrame.minY))
+                    PencilTexture.pinToPage(ctx) // now in canvas space
                 }
                 for run in item.hot {
                     let fill = preview ?? StrokeRenderer.fillColor(for: stroke.brush, color: stroke.color,

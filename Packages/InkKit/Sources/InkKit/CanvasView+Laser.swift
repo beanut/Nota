@@ -14,7 +14,7 @@ extension CanvasView {
         let view = LaserView(frame: bounds)
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.pageTransform = { [weak self] in self?.viewTransform ?? ViewTransform() }
-        insertSubview(view, aboveSubview: tapeLayer)
+        insertSubview(view, aboveSubview: tapeView)
         return view
     }
 

@@ -124,9 +124,7 @@ struct PenCase: View {
                     }
                 }
             }
-            Button { controller.resetZoom() } label: {
-                Label("Fit Page · \(Int((controller.zoom * 100).rounded()))%", systemImage: "arrow.up.left.and.arrow.down.right")
-            }
+            FitPageButton(readout: controller.zoomReadout) { controller.resetZoom() }
             if controller.pageLayout == .paged || !controller.allowsContinuousLayout {
                 Toggle(isOn: $controller.zoomWindowVisible) {
                     Label("Zoom Window", systemImage: "rectangle.and.text.magnifyingglass")
@@ -190,6 +188,19 @@ struct PenCase: View {
             TextField("Title", text: $draftTitle)
             Button("Cancel", role: .cancel) {}
             Button("Rename") { title?.wrappedValue = draftTitle }
+        }
+    }
+}
+
+/// The More menu's Fit Page item, showing the zoom. It alone watches the zoom, so a pinch updates this item
+/// and not the whole Pen Case.
+private struct FitPageButton: View {
+    @ObservedObject var readout: ZoomReadout
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label("Fit Page · \(Int((readout.zoom * 100).rounded()))%", systemImage: "arrow.up.left.and.arrow.down.right")
         }
     }
 }

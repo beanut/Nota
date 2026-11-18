@@ -122,8 +122,9 @@ private struct PageMirrorRepresentable: UIViewRepresentable {
 }
 
 /// Draws the presented page, fitted, and the laser over it. The page is rendered in the background with
-/// `PageRenderer` (template, objects, ink and tape, as a thumbnail is) each time it changes, a render at a
-/// time; the laser has its own layer and follows every move.
+/// `PageRenderer` (template, objects, ink and tape, as a thumbnail is) each time it changes, through the
+/// render scheduler, where a newer render supersedes one that hasn't started; the laser has its own layer
+/// and follows every move.
 final class PageMirrorView: UIView {
     private let presentation: InkPresentation
     private var theme: InkTheme
@@ -132,10 +133,7 @@ final class PageMirrorView: UIView {
     private var observation: AnyCancellable?
     private var laserObserver: NSObjectProtocol?
     private weak var page: CanvasDocument?
-    private var renderInFlight = false
-    private var renderRequested = false
     private var renderedSize = CGSize.zero
-    private let renderQueue = DispatchQueue(label: "InkPresentation.render", qos: .userInitiated)
 
     init(presentation: InkPresentation, theme: InkTheme) {
         self.presentation = presentation
@@ -216,40 +214,22 @@ final class PageMirrorView: UIView {
     }
 
     private func requestRender() {
-        guard page != nil, bounds.width > 0, bounds.height > 0 else { return }
-        if renderInFlight {
-            renderRequested = true
-        } else {
-            startRender()
-        }
-    }
-
-    private func startRender() {
-        guard let page else { return }
+        guard let page, bounds.width > 0, bounds.height > 0 else { return }
         let snapshot = page.snapshot()
         let transform = pageTransform
         let size = transform.toView(page.pageBounds).size
         let scale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
         let width = PageMirrorLayout.pixelWidth(page: page.pageBounds, transform: transform, displayScale: scale)
         let palette = theme.palette(for: snapshot.template.paper)
-        renderInFlight = true
-        renderQueue.async { [weak self] in
-            let image = PageRenderer.image(of: snapshot, pixelWidth: width) { _ in palette }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                renderInFlight = false
-                if let image, self.page?.id == snapshot.pageID {
-                    CATransaction.begin()
-                    CATransaction.setDisableActions(true)
-                    pageLayer.contents = image
-                    CATransaction.commit()
-                    renderedSize = size
-                }
-                if renderRequested {
-                    renderRequested = false
-                    startRender()
-                }
-            }
-        }
+        RenderScheduler.shared.submit(RenderJob(priority: .margin, coalescingKey: ObjectIdentifier(self), work: { _ in
+            PageRenderer.image(of: snapshot, pixelWidth: width) { _ in palette }
+        }, publish: { [weak self] (image: CGImage?) in
+            guard let self, let image, self.page?.id == snapshot.pageID else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            pageLayer.contents = image
+            CATransaction.commit()
+            renderedSize = size
+        }))
     }
 }

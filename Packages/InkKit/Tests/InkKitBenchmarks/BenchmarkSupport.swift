@@ -14,7 +14,7 @@ enum Bench {
         CGRect(origin: .zero, size: screen)
     }
 
-    /// The committed bitmap's size for `screen`.
+    /// `screen` in device pixels: what the tiles in view are assembled into for the pixel checks.
     static var pixelSize: CGSize {
         CGSize(width: screen.width * displayScale, height: screen.height * displayScale)
     }
@@ -53,6 +53,14 @@ enum Bench {
     static func settledFootprint() -> UInt64 {
         malloc_zone_pressure_relief(nil, 0)
         return footprint()
+    }
+
+    /// The bytes malloc has handed out and not had back: unlike the footprint, it doesn't count freed memory
+    /// malloc still holds, nor lose memory freed by work done before, so it measures what a structure keeps.
+    static func heapInUse() -> UInt64 {
+        var stats = malloc_statistics_t()
+        malloc_zone_statistics(nil, &stats)
+        return UInt64(stats.size_in_use)
     }
 
     /// The process's physical footprint (what jetsam counts), in bytes.

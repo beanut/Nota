@@ -141,7 +141,7 @@ extension CanvasView {
 
     func restyleSelection(strokes: (Stroke) -> Stroke, objects: (any PageObject) -> any PageObject) {
         guard !selection.isEmpty else { return }
-        coordinator.dropPending(selection.strokeIDs) // the full render draws them restyled
+        coordinator.dropPending(selection.strokeIDs) // their tiles are refilled restyled
         let inkRevision = document.revision
         editDocument { document.restyle(selection, strokes: strokes, objects: objects) }
         redrawFromDocument(ink: document.revision != inkRevision)

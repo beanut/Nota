@@ -27,6 +27,7 @@ TEST_RUNNER_INK_BENCH_RESULTS="$out/results.json" xcodebuild test \
     -configuration Release \
     -only-testing:InkKitBenchmarks/InkBenchmarks \
     -only-testing:InkKitBenchmarks/CanvasBenchmarks \
+    -only-testing:InkKitBenchmarks/ObjectLayerBenchmarks \
     -resultBundlePath "$out/Benchmarks.xcresult" \
     -skipPackagePluginValidation \
     ENABLE_TESTABILITY=YES \
