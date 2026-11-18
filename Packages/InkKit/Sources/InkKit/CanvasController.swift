@@ -60,7 +60,13 @@ final class CanvasController: ObservableObject {
 
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
-    @Published private(set) var zoom: CGFloat = 1
+    /// The zoom shown in the More menu. It changes on every frame of a pinch, so it lives in its own object:
+    /// published here, it re-rendered every view watching the controller (the whole Pen Case) each frame.
+    let zoomReadout = ZoomReadout()
+    var zoom: CGFloat {
+        zoomReadout.zoom
+    }
+
     /// Set by a Pencil double-tap or squeeze; location is in canvas-view (= full-screen) coordinates.
     @Published var quickPaletteLocation: CGPoint?
     /// Apple Pencil gestures, finger drawing, palm rejection and handedness. Saved to `UserDefaults`,
@@ -453,8 +459,8 @@ final class CanvasController: ObservableObject {
     func zoomDidChange(_ scale: CGFloat) {
         rulerView?.pageScaleDidChange()
         let rounded = (scale * 100).rounded() / 100
-        if rounded != zoom {
-            zoom = rounded
+        if rounded != zoomReadout.zoom {
+            zoomReadout.zoom = rounded
         }
     }
 
@@ -868,4 +874,11 @@ final class CanvasController: ObservableObject {
     var simulatedAltitude: CGFloat {
         CGFloat(simulatedAltitudeDegrees) * .pi / 180
     }
+}
+
+/// The canvas's zoom (1 = 100%, rounded to whole percent) for the More menu's Fit Page item, which alone
+/// watches it, so a pinch doesn't re-render the rest of the chrome on every frame.
+@MainActor
+final class ZoomReadout: ObservableObject {
+    @Published fileprivate(set) var zoom: CGFloat = 1
 }

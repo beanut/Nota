@@ -13,9 +13,11 @@ struct InsertMenu: View {
     @State private var showCamera = false
     @State private var showStickers = false
 
-    /// The camera is there on an iPad, never in the simulator.
+    /// The camera is there on an iPad, never in the simulator. Asked once: the answer comes from MobileGestalt,
+    /// slow enough to show when the menu's body runs often.
+    private static let hasCamera = UIImagePickerController.isSourceTypeAvailable(.camera)
     private var hasCamera: Bool {
-        UIImagePickerController.isSourceTypeAvailable(.camera)
+        Self.hasCamera
     }
 
     var body: some View {
