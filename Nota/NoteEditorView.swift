@@ -5,8 +5,9 @@ import NotaUI
 import SwiftData
 import SwiftUI
 
-/// A note opened for writing: the InkKit canvas under a navigation bar. The title is shown and renamed
-/// from the Pen Case's More menu rather than in the bar.
+/// A note opened for writing: the InkKit canvas under its own floating chrome. The system navigation bar is
+/// hidden; the editor draws the back (or close) button, the title menu — Rename and the recent notes, which
+/// switch notes in place — and the trailing actions, whose More menu also holds the window items.
 ///
 /// The note's pages are read from its package while the paper shows. From then on `DocumentStore` saves
 /// them by itself shortly after each change, and again when the editor closes; the app saves every open
@@ -24,7 +25,11 @@ struct NoteEditorView: View {
     var workspace: Binding<NoteWorkspace>?
     /// Where links between notes have led in this window, for Back.
     @Binding var trail: LinkTrail
-    /// Shows another note in this one's place, when a link to it is followed or Back returns to it.
+    /// The editor's leading button: Back out of the library's stack, or Close for a window or split side.
+    var leading: EditorNavigation.Leading?
+    var leadingAction: () -> Void = {}
+    /// Shows another note in this one's place, when a link to it is followed, Back returns to it, or it's
+    /// picked from the title menu's recent notes.
     var openNote: (UUID) -> Void
     @Environment(DocumentStore.self) private var documents
     @Environment(ThumbnailStore.self) private var thumbnails
@@ -36,7 +41,8 @@ struct NoteEditorView: View {
         Group {
             if let notebook {
                 InkCanvasEditor(notebook: notebook, title: $note.title,
-                                pageDestinations: pageDestinations, sendPages: sendPages, links: links)
+                                pageDestinations: pageDestinations, sendPages: sendPages, links: links,
+                                navigation: navigation)
                     .inkTheme(.nota)
             } else {
                 // Reading the note's pages; usually too quick to notice.
@@ -44,16 +50,7 @@ struct NoteEditorView: View {
                     .ignoresSafeArea()
             }
         }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(NotaColor.bgApp, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .toolbar {
-            if let workspace {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NoteWindowMenu(note: note, workspace: workspace)
-                }
-            }
-        }
+        .toolbar(.hidden, for: .navigationBar)
         .task(id: note.id) {
             let opened = await documents.beginEditing(note)
             if Task.isCancelled {
@@ -74,6 +71,26 @@ struct NoteEditorView: View {
 }
 
 extension NoteEditorView {
+    /// The back button, the title menu's recent notes, and the window items for the More menu.
+    private var navigation: EditorNavigation {
+        let recents = Library.recentNotes(allNotes).map { recent in
+            RecentNote(id: recent.id, title: recent.title, subtitle: Library.recentNoteSubtitle(recent),
+                       thumbnail: thumbnails.cachedImage(for: recent.id))
+        }
+        return EditorNavigation(
+            leading: leading,
+            leadingAction: leadingAction,
+            currentNoteID: note.id,
+            recentNotes: recents,
+            openNote: { id in
+                if id != note.id, noteToOpen(id) != nil {
+                    openNote(id)
+                }
+            },
+            moreMenuItems: workspace.map { AnyView(NoteWindowMenuItems(note: note, workspace: $0)) }
+        )
+    }
+
     private var pageDestinations: [PageDestination] {
         Library.notesToSendPagesTo(allNotes, from: note.id).map { PageDestination(id: $0.id, title: $0.title) }
     }
@@ -129,40 +146,35 @@ extension NoteEditorView {
     }
 }
 
-/// Opening the note in a new window, another note beside it, or swapping the sides of a split.
-private struct NoteWindowMenu: View {
+/// Opening the note in a new window, another note beside it, or swapping the sides of a split: items at the
+/// top of the editor's More menu.
+private struct NoteWindowMenuItems: View {
     let note: Note
     @Binding var workspace: NoteWorkspace
     @Environment(\.openWindow) private var openWindow
     @Query(sort: \Note.modifiedAt, order: .reverse) private var allNotes: [Note]
 
     var body: some View {
+        Button {
+            openWindow(id: NoteWindow.sceneID, value: note.id)
+        } label: {
+            Label("Open in New Window", systemImage: "macwindow.badge.plus")
+        }
         Menu {
-            Button {
-                openWindow(id: NoteWindow.sceneID, value: note.id)
-            } label: {
-                Label("Open in New Window", systemImage: "macwindow.badge.plus")
-            }
-            Menu {
-                ForEach(Library.notesToOpenBeside(allNotes, excluding: workspace.noteIDs)) { other in
-                    Button(other.title) {
-                        withAnimation { workspace.openBeside(other.id) }
-                    }
-                }
-            } label: {
-                Label(workspace.isSplit ? "Replace Note Beside" : "Open Beside", systemImage: "rectangle.split.2x1")
-            }
-            if workspace.isSplit {
-                Button {
-                    withAnimation { workspace.swapSides() }
-                } label: {
-                    Label("Swap Notes", systemImage: "arrow.left.arrow.right")
+            ForEach(Library.notesToOpenBeside(allNotes, excluding: workspace.noteIDs)) { other in
+                Button(other.title) {
+                    withAnimation { workspace.openBeside(other.id) }
                 }
             }
         } label: {
-            NotaIconView(.split)
+            Label(workspace.isSplit ? "Replace Note Beside" : "Open Beside", systemImage: "rectangle.split.2x1")
         }
-        .buttonStyle(.notaIcon(selected: workspace.isSplit))
-        .accessibilityLabel("Windows")
+        if workspace.isSplit {
+            Button {
+                withAnimation { workspace.swapSides() }
+            } label: {
+                Label("Swap Notes", systemImage: "arrow.left.arrow.right")
+            }
+        }
     }
 }

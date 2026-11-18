@@ -52,6 +52,11 @@ public enum InkIcon: String, CaseIterable, Sendable {
     case tape, laser, ruler
     /// Links, bookmarks, the outline panel and going back after following a link (NOT-31).
     case link, bookmark, outline, back
+    /// The editor's trailing actions: search, the AI assistant (drawn in its own colours, not
+    /// template-rendered) and share. `.pages` opens the pages panel.
+    case search, ai, share
+    /// The current note in the title menu.
+    case check
 }
 
 /// How InkKit's editor looks: the colours, fonts and icons of its chrome, the paper and desk the page sits
@@ -134,6 +139,22 @@ public struct InkTheme {
     /// with each link.
     public var link: InkColor
 
+    // MARK: Floating chrome
+
+    /// Tint over Liquid Glass (iOS 26 and later) on the tool picker, the navigation capsules and the pages
+    /// panel.
+    public var glassTint: UIColor
+    /// The same chrome before iOS 26: a blur under this tint, with a `blurBorder` hairline.
+    public var blurTint: UIColor
+    public var blurBorder: UIColor
+    /// The pill behind the selected tool in the tool picker.
+    public var selectionPill: UIColor
+    /// The Add buttons in the tool picker's Plus popover.
+    public var addTint: UIColor
+    /// The tool picker's artwork for each tool, drawn at 34 × 34 pt. Nil for a tool falls back to its
+    /// glyph from `icon`.
+    public var toolArt: (PickerTool) -> AnyView?
+
     public init(textPrimary: UIColor, textSecondary: UIColor, textTertiary: UIColor, textSelected: UIColor,
                 accent: UIColor, surfaceRaised: UIColor, surfaceFill: UIColor, surfaceSelected: UIColor,
                 border: UIColor, separator: UIColor, shadow: UIColor, swatchOutline: UIColor,
@@ -146,7 +167,13 @@ public struct InkTheme {
                 highlighterInks: [InkColor] = InkTheme.standardHighlighterInks,
                 tapeInks: [InkColor] = InkTheme.standardTapeInks,
                 laser: InkColor = InkTheme.standardLaser,
-                link: InkColor = InkTheme.standardLink) {
+                link: InkColor = InkTheme.standardLink,
+                glassTint: UIColor = InkTheme.standardGlassTint,
+                blurTint: UIColor = InkTheme.standardBlurTint,
+                blurBorder: UIColor = InkTheme.standardBlurBorder,
+                selectionPill: UIColor = InkTheme.standardSelectionPill,
+                addTint: UIColor = .systemGreen,
+                toolArt: @escaping (PickerTool) -> AnyView? = { _ in nil }) {
         self.textPrimary = textPrimary
         self.textSecondary = textSecondary
         self.textTertiary = textTertiary
@@ -173,6 +200,12 @@ public struct InkTheme {
         self.tapeInks = tapeInks
         self.laser = laser
         self.link = link
+        self.glassTint = glassTint
+        self.blurTint = blurTint
+        self.blurBorder = blurBorder
+        self.selectionPill = selectionPill
+        self.addTint = addTint
+        self.toolArt = toolArt
     }
 
     /// The colours `paper` is drawn in.
@@ -235,8 +268,19 @@ public extension InkTheme {
         case .bookmark: "bookmark"
         case .outline: "list.bullet.indent"
         case .back: "chevron.backward"
+        case .search, .ai, .share, .check: navigationSymbol(icon)
         }
         return Image(systemName: name)
+    }
+
+    /// The editor's trailing actions and the title menu's check.
+    private static func navigationSymbol(_ icon: InkIcon) -> String {
+        switch icon {
+        case .search: "magnifyingglass"
+        case .ai: "wand.and.sparkles"
+        case .share: "square.and.arrow.up"
+        default: "checkmark"
+        }
     }
 
     /// The Pen Case's tools and its Insert menu.
@@ -266,6 +310,28 @@ public extension InkTheme {
         InkColor(name: "Blush", hex: 0xF0BCC8),
         InkColor(name: "Slate", hex: 0x9EA3B2)
     ]
+
+    /// Figma `material/glass-tint`: white 10%, black 32% in dark mode.
+    static let standardGlassTint = UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(white: 0, alpha: 0.32) : UIColor(white: 1, alpha: 0.10)
+    }
+
+    /// Figma `material/blur-tint`: #F2F2F7 or #1C1C1E at 72%.
+    static let standardBlurTint = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, alpha: 0.72)
+            : UIColor(red: 0xF2 / 255, green: 0xF2 / 255, blue: 0xF7 / 255, alpha: 0.72)
+    }
+
+    /// Figma `material/blur-border`: black 8%, white 10% in dark mode.
+    static let standardBlurBorder = UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.10) : UIColor(white: 0, alpha: 0.08)
+    }
+
+    /// Figma `material/selection-pill`: white 75%, white 14% in dark mode.
+    static let standardSelectionPill = UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.14) : UIColor(white: 1, alpha: 0.75)
+    }
 
     static let standardLaser = InkColor(name: "Laser", hex: 0xF0308A)
     static let standardLink = InkColor(name: "Link", hex: 0x3345D9)

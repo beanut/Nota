@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 /// the visible part of the page, selected with the lasso.
 struct InsertMenu: View {
     @ObservedObject var controller: CanvasController
+    /// The menu's button; the photo glyph in an icon button when nil (the tool picker passes its artwork).
+    var label: AnyView?
     @State private var showPhotos = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var showFiles = false
@@ -41,10 +43,10 @@ struct InsertMenu: View {
                 Label("Stickers…", systemImage: "star.square.on.square")
             }
         } label: {
-            InkIconView(.photo)
+            label ?? AnyView(InkIconView(.photo))
         }
         .menuStyle(.button)
-        .buttonStyle(.inkIcon(selected: showStickers))
+        .modifier(InsertMenuStyle(isPlain: label != nil, isSelected: showStickers))
         .accessibilityLabel("Insert")
         .accessibilityHint("Adds a photo, an image file or a sticker to the page.")
         .photosPicker(isPresented: $showPhotos, selection: $photoItems, maxSelectionCount: 10, matching: .images,
@@ -86,6 +88,20 @@ struct InsertMenu: View {
         }
         .popover(isPresented: $showStickers, arrowEdge: .top) {
             StickerPicker(controller: controller, stickers: controller.stickers) { showStickers = false }
+        }
+    }
+}
+
+/// An icon button, or a plain one around custom artwork.
+private struct InsertMenuStyle: ViewModifier {
+    let isPlain: Bool
+    let isSelected: Bool
+
+    func body(content: Content) -> some View {
+        if isPlain {
+            content.buttonStyle(.plain)
+        } else {
+            content.buttonStyle(.inkIcon(selected: isSelected))
         }
     }
 }

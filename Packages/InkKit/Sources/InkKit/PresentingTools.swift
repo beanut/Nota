@@ -51,34 +51,6 @@ struct LaserOptions: View {
     }
 }
 
-/// The Pen Case's ruler button, after the tools: shows or hides the ruler. Touch and hold it to choose the
-/// straight ruler or the protractor.
-struct RulerButton: View {
-    @ObservedObject var controller: CanvasController
-
-    var body: some View {
-        Button { controller.rulerVisible.toggle() } label: { InkIconView(.ruler) }
-            .buttonStyle(.inkIcon(selected: controller.rulerVisible))
-            .accessibilityLabel(controller.rulerMode == .ruler ? "Ruler" : "Protractor")
-            .accessibilityAddTraits(controller.rulerVisible ? .isSelected : [])
-            .accessibilityHint("Touch and hold to choose the ruler or the protractor.")
-            .contextMenu {
-                Picker("Ruler", selection: Binding(get: { controller.rulerMode }, set: { mode in
-                    controller.rulerMode = mode
-                    controller.rulerVisible = true
-                })) {
-                    Label("Ruler", systemImage: "ruler").tag(Ruler.Mode.ruler)
-                    Label("Protractor", systemImage: "angle").tag(Ruler.Mode.protractor)
-                }
-                if controller.rulerVisible {
-                    Button { controller.rulerVisible = false } label: {
-                        Label("Hide Ruler", systemImage: "eye.slash")
-                    }
-                }
-            }
-    }
-}
-
 /// Shown over the editor while an external display mirrors the page, so it's clear what the audience sees.
 struct PresentingBadge: View {
     @ObservedObject var presentation: InkPresentation

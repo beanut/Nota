@@ -62,6 +62,13 @@ public enum NotaColor {
 
     /// Shadow colour for every elevation (a cool near-black, never pure black).
     public static let shadow = Color(uiColor: NotaUIColor.shadow)
+
+    // Floating chrome
+    public static let materialGlassTint = Color(uiColor: NotaUIColor.materialGlassTint)
+    public static let materialBlurTint = Color(uiColor: NotaUIColor.materialBlurTint)
+    public static let materialBlurBorder = Color(uiColor: NotaUIColor.materialBlurBorder)
+    public static let materialSelectionPill = Color(uiColor: NotaUIColor.materialSelectionPill)
+    public static let signalAdd = Color(uiColor: NotaUIColor.signalAdd)
     /// Hairline around ink swatches, so dark inks stay visible on dark chrome.
     public static let inkOutline = Color(uiColor: NotaUIColor.inkOutline)
 }
@@ -103,6 +110,32 @@ public enum NotaUIColor {
     public static let paperDarkLabel = UIColor(hex: 0x7D838E)
 
     public static let shadow = UIColor(light: 0x1A1A33, dark: 0x000000)
+
+    // MARK: Floating chrome (Figma `material/*`, Floating Tool Picker)
+
+    /// Tint over Liquid Glass (iOS 26+): white 10%, black 32% in dark mode.
+    public static let materialGlassTint = UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(white: 0, alpha: 0.32) : UIColor(white: 1, alpha: 0.10)
+    }
+
+    /// Tint over the blur before iOS 26: #F2F2F7 or #1C1C1E at 72%.
+    public static let materialBlurTint = UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(hex: 0x1C1C1E, alpha: 0.72) : UIColor(hex: 0xF2F2F7, alpha: 0.72)
+    }
+
+    /// The blur material's 0.5 pt inside border.
+    public static let materialBlurBorder = UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.10) : UIColor(white: 0, alpha: 0.08)
+    }
+
+    /// The pill behind the selected tool: white 75%, white 14% in dark mode.
+    public static let materialSelectionPill = UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.14) : UIColor(white: 1, alpha: 0.75)
+    }
+
+    /// Add buttons (the tool picker's Plus popover).
+    public static let signalAdd = UIColor(light: 0x34C759, dark: 0x30D158)
+
     public static let inkOutline = UIColor { trait in
         trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.32) : UIColor(white: 0, alpha: 0.06)
     }

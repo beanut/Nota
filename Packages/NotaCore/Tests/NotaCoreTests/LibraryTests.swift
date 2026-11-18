@@ -260,3 +260,37 @@ struct FolderOrderingTests {
         #expect(list.sorted { $0.sortIndex < $1.sortIndex }.map(\.name) == ["Work", "Personal", "Courses"])
     }
 }
+
+@Suite("Recent notes")
+@MainActor
+struct RecentNotesTests {
+    @Test func newestFirstWithoutDeletedNotesAndCapped() throws {
+        let context = try makeContext()
+        let notes = (0 ..< 7).map { Note(title: "Note \($0)", modifiedAt: Clock.daysAgo($0)) }
+        notes.forEach(context.insert)
+        notes[1].moveToRecentlyDeleted(at: Clock.now)
+        let recent = Library.recentNotes(notes.reversed())
+        #expect(recent.map(\.title) == ["Note 0", "Note 2", "Note 3", "Note 4", "Note 5"])
+    }
+
+    @Test func fewerNotesThanTheLimit() throws {
+        let context = try makeContext()
+        let notes = [Note(title: "Only", modifiedAt: Clock.now)]
+        notes.forEach(context.insert)
+        #expect(Library.recentNotes(notes).map(\.title) == ["Only"])
+    }
+
+    @Test func subtitleNamesTheFolderOrUnfiled() throws {
+        let context = try makeContext()
+        let folder = Folder(name: "Linear Algebra", color: .blue, sortIndex: 0)
+        context.insert(folder)
+        let filed = Note(title: "Week 6", modifiedAt: Clock.now, folder: folder)
+        let loose = Note(title: "Study plan", modifiedAt: Clock.daysAgo(1))
+        context.insert(filed)
+        context.insert(loose)
+        #expect(Library.recentNoteSubtitle(filed, now: Clock.now, calendar: Clock.calendar, locale: Clock.locale)
+            == "Linear Algebra · Today")
+        #expect(Library.recentNoteSubtitle(loose, now: Clock.now, calendar: Clock.calendar, locale: Clock.locale)
+            == "Unfiled · Yesterday")
+    }
+}

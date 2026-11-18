@@ -51,7 +51,8 @@ Next, in order:
 3. [NOT-85](https://linear.app/nota-on-inkkit/issue/NOT-85) · Decide the minimum iPadOS version and supported devices.
 
 Also open: the editor redesign in progress outside the milestones,
-[NOT-86](https://linear.app/nota-on-inkkit/issue/NOT-86) and [NOT-87](https://linear.app/nota-on-inkkit/issue/NOT-87).
+[NOT-86](https://linear.app/nota-on-inkkit/issue/NOT-86), [NOT-87](https://linear.app/nota-on-inkkit/issue/NOT-87) and
+[NOT-97](https://linear.app/nota-on-inkkit/issue/NOT-97) (the floating tool picker, title menu and pages panel, in review).
 
 M1's first issues, the data-driven brush engine ([NOT-16](https://linear.app/nota-on-inkkit/issue/NOT-16)),
 the built-in brush set ([NOT-17](https://linear.app/nota-on-inkkit/issue/NOT-17), pending tuning on a
