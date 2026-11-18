@@ -8,7 +8,8 @@ struct NotaApp: App {
     /// One store, document cache and thumbnail cache for every window, so a note open in two windows is
     /// the same notebook in both and an edit in one shows in the other.
     private let container: ModelContainer
-    @State private var documents = DocumentStore()
+    /// Pages' tiles are kept between launches in the caches directory (NOT-106).
+    @State private var documents = DocumentStore(tileCache: PageTileCache())
     @State private var thumbnails = ThumbnailStore()
     @Environment(\.scenePhase) private var scenePhase
     /// Gives an external display or AirPlay screen the presentation scene (`PresentationScene`).

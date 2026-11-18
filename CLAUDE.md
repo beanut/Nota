@@ -60,19 +60,38 @@ SwiftLint runs with `--strict`, so warnings fail CI.
 
 ## Performance gate
 
-Ink must not get slower. Budgets (from NOT-13), measured on a simulated iPad Pro 13-inch:
+Ink must not get slower. Budgets (NOT-13 for ink, NOT-98 for the canvas), measured on a simulated iPad Pro
+13-inch. **Enforced** (the committed baseline meets them, so missing one fails the compare):
 
-- **Live stroke:** p95 < 2 ms of work per touch event, and it mustn't grow with stroke length.
-- **Page open:** < 150 ms to reopen a 5k-stroke page.
+- **Live stroke:** p95 < 2 ms of work per touch event for every brush (stamp brushes' p99 too), and it mustn't
+  grow with stroke length.
+- **Page open:** < 150 ms to reopen a 5k-stroke page; a 5k-stroke page decodes in < 50 ms.
+- **Pixel erase** on a 5k-stroke page shows correct pixels in < 16 ms.
+- **Gestures:** main-thread work per frame p95 < 8 ms during a pinch, a pan, a fling through 20 pages and over a
+  page of objects; < 8 ms of render work per pan step at 6×; ink sharp < 150 ms after a pan; no blank frame in
+  the fling; the template and objects sharp < 150 ms after a zoom.
+- **Continuous scrolling:** a 5k-stroke page seen before entering view has its ink in < 50 ms; scrolling a
+  20-page note of 5k-stroke pages adds < 300 MB.
+- **Memory:** a 5k-stroke page at 6× while writing peaks < 80 MB.
 
-If you touch anything on the ink path (InkKit input, smoothing, geometry, rendering, rasters, page
-open/close), run the benchmarks in Release and compare with a baseline before and after:
+**Known misses** (in the baseline as missed, so they don't fail a run but show how far over they are): undo
+(~45 ms) and stroke erase (~0.55 s) on the 5k page, ink sharp after a pinch to a new level (~0.2 s, ~0.17 s if
+the pinch is held), the 5k page's `.ink` file size (1.9 MB against 1 MB), and single-frame worsts (`*_max_ms`),
+which swing with one scheduler hiccup on the simulator and never fail a run. The time-based misses are bound by
+Core Graphics drawing strokes (InkKit README › Rendering pipeline › Why tiles). None of these budgets has been
+confirmed on a physical iPad yet.
+
+If you touch anything on the ink path (InkKit input, smoothing, geometry, rendering, tiles, rasters, page
+open/close), run the benchmarks in Release and compare with the baseline before and after:
 
 ```bash
 scripts/run-benchmarks.sh bench-output
 scripts/bench-compare.py bench-output/results.json \
   --baseline Packages/InkKit/Benchmarks/baselines/apple-m1-pro-simulator.json
 ```
+
+`--only zoom. pan. edit. scroll. memory.continuous` compares a run of just
+`-only-testing:InkKitBenchmarks/CanvasBenchmarks`.
 
 It fails on a > 10% regression or on a budget the baseline met and this run misses. The committed baseline
 was recorded on an M1 Pro, and simulator numbers are noisy: run on an idle Mac (not straight after other

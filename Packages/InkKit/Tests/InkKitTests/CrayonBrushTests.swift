@@ -133,7 +133,7 @@ struct CrayonBrushTests {
         #expect(diff.differingPixels == 0)
     }
 
-    /// The grain is fixed to the page: drawing the page in pieces (as the committed layer draws in bands
+    /// The grain is fixed to the page: drawing the page in pieces (as the committed layer draws in tiles
     /// and the live layer in dirty tiles) gives the pixels drawing it whole does, so the texture can't
     /// shimmer as a stroke grows or move when it's committed.
     @Test(.enabled(if: hasMetal, "needs a Metal device"))

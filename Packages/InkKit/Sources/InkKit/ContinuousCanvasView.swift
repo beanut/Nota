@@ -5,14 +5,19 @@ import UIKit
 /// Continuous vertical scrolling: every page of a notebook in one column (`ContinuousPageLayout`).
 ///
 /// A `UIScrollView` does the scrolling and zooming with the system's physics; it scrolls an empty stand-in
-/// for the column. Only the pages in or near the view are real: each gets an embedded `CanvasView`
+/// for the column. Only the pages in or near the view are real: each is shown by an embedded `CanvasView`
 /// covering its render window (`ContinuousPageLayout.renderWindow`: the whole page at zoom 1, the
 /// viewport plus a margin when zoomed in), placed (`CanvasView.place(_:settled:)`) so its page lands where
-/// the layout puts it, and transparent outside the page. The canvases sit in the scroll content, so
-/// scrolling moves their rendered ink with the paper instead of rendering it again; a page only renders
-/// when its window moves or the zoom changes. Pages just outside the view get their canvas early, so
-/// their ink is ready before they scroll in. A page scrolled away loses its canvas and its bitmap, so
-/// memory is bounded by what's on screen (at most `maxLiveCanvases` pages), not by the length of the note.
+/// the layout puts it, and transparent outside the page. The committed ink is page-space tiles in the
+/// shared `TileCache`, so a canvas shows whatever of its page is cached at once and fills only what isn't;
+/// the canvases sit in the scroll content, so scrolling moves them, ink and all, with the paper.
+///
+/// Canvases are pooled (NOT-107): a page leaving view leaves its tiles with its document and hands its
+/// canvas, with its layers, gestures and interactions, to the next page entering view
+/// (`CanvasView.leavePage()`, `show(_:)`), so scrolling makes no views. Pages get their canvas ahead of
+/// the view (`ContinuousPageLayout.prefetchRect`), further ahead the faster it scrolls; one not on screen
+/// yet fills its tiles behind the pages on screen (`CanvasView.isAhead`). Memory is bounded by the pages
+/// near the view (at most `maxLiveCanvases`), not by the length of the note.
 ///
 /// The page nearest the middle of the view is the notebook's current page; writing on another page in
 /// view makes that one current. The tools, undo and selection act on the current page.
@@ -39,14 +44,26 @@ final class ContinuousCanvasView: UIView {
     /// bar, the sidebar) can be told apart and scrolled to.
     private var trackedPageID: CanvasDocument.ID?
     private var canvases: [CanvasDocument.ID: CanvasView] = [:]
+    /// The pages that have a canvas now (in or near the view).
+    var liveCanvases: [CanvasView] {
+        Array(canvases.values)
+    }
+
+    /// Canvases whose page left view, hidden, waiting for the next page to enter it.
+    private(set) var spareCanvases: [CanvasView] = []
+    /// How many canvases this view has made: once the pool is warm, scrolling makes none.
+    private(set) var canvasesMade = 0
+
+    /// How fast the column is scrolling, in layout points (zoom 1) per second, positive downwards; zero
+    /// once it stops. Pages further ahead of a faster scroll get their canvas (`prefetchRect`).
+    private(set) var scrollVelocity: CGFloat = 0
+    private var lastScrollSample: (y: CGFloat, time: CFTimeInterval)?
+
     private var notebookObservation: AnyCancellable?
 
     /// The most pages that have a live canvas at once. Pages fitted to the width rarely show more than
     /// three; this only matters for very short pages.
     static let maxLiveCanvases = 6
-    /// How far above and below the view, as a fraction of its height, pages get a canvas before they're
-    /// in view.
-    static let prefetchFraction: CGFloat = 0.5
 
     init(notebook: InkNotebook, controller: CanvasController, telemetry: PencilTelemetry) {
         self.notebook = notebook
@@ -88,7 +105,7 @@ final class ContinuousCanvasView: UIView {
     func apply(_ theme: InkTheme) {
         self.theme = theme
         backgroundColor = theme.desk
-        for canvas in canvases.values {
+        for canvas in canvases.values + spareCanvases {
             canvas.apply(theme)
         }
         let paper = theme.paper.resolvedColor(with: InkTheme.onPaper).cgColor
@@ -206,7 +223,42 @@ final class ContinuousCanvasView: UIView {
     private var isAnimatingScroll = false
 
     private var isMoving: Bool {
-        isAnimatingScroll || scrollView.isDragging || scrollView.isDecelerating || scrollView.isZooming || scrollView.isZoomBouncing
+        isAnimatingScroll || isScrollingForTesting || scrollView.isDragging || scrollView.isDecelerating
+            || scrollView.isZooming || scrollView.isZoomBouncing
+    }
+
+    // MARK: Scrolling from tests
+
+    /// True between `scrollForTesting(toY:)` and `endScrollingForTesting()`: the column moves as a drag or a
+    /// fling would move it.
+    private var isScrollingForTesting = false
+
+    /// Scrolls the column so its top `y` content points (at the current zoom) is at the top of the view, as
+    /// one frame of a drag or fling: pages are placed moving, at the scroll's speed.
+    func scrollForTesting(toY y: CGFloat) {
+        isScrollingForTesting = true
+        setContentOffsetY(y)
+    }
+
+    /// The scroll `scrollForTesting(toY:)` drove stopped: the pages in view settle where they are.
+    func endScrollingForTesting() {
+        isScrollingForTesting = false
+        settle()
+    }
+
+    /// How far the column is scrolled: the content offset's y, at the current zoom.
+    var contentOffsetForTesting: CGFloat {
+        scrollView.contentOffset.y
+    }
+
+    /// The pages in view (`layout` indices).
+    var pagesInView: Range<Int> {
+        layout.visiblePages(in: viewportInLayout)
+    }
+
+    /// The canvas showing `page`, if it has one.
+    func canvas(showing page: CanvasDocument.ID) -> CanvasView? {
+        canvases[page]
     }
 
     /// Where page `index` is drawn in a view whose top-left is at `origin` in the content (at the current zoom).
@@ -230,10 +282,16 @@ final class ContinuousCanvasView: UIView {
         guard layout.frames.count == pages.count else { return }
         let viewport = viewportInLayout
         let visible = layout.visiblePages(in: viewport)
-        let nearby = layout.visiblePages(in: viewport.insetBy(dx: 0, dy: -viewport.height * Self.prefetchFraction))
-        // Nearest the middle first, when there are more than the canvases allowed.
-        let live = nearby.sorted { abs(layout.frames[$0].midY - viewport.midY) < abs(layout.frames[$1].midY - viewport.midY) }
-            .prefix(Self.maxLiveCanvases)
+        let nearby = layout.visiblePages(in: ContinuousPageLayout.prefetchRect(around: viewport, velocity: scrollVelocity))
+        // The pages in view first, then those ahead nearest first, when there are more than the canvases allowed.
+        let live = nearby.sorted { a, b in
+            let inA = visible.contains(a), inB = visible.contains(b)
+            if inA != inB {
+                return inA
+            }
+            return abs(layout.frames[a].midY - viewport.midY) < abs(layout.frames[b].midY - viewport.midY)
+        }
+        .prefix(Self.maxLiveCanvases)
         var liveIDs = Set(live.map { pages[$0].id })
         // A page taking ink, or the one a stroke across pages began on (its touch still arrives there),
         // keeps its canvas until the stroke ends.
@@ -242,10 +300,7 @@ final class ContinuousCanvasView: UIView {
         }
 
         for (id, canvas) in canvases where !liveIDs.contains(id) {
-            if controller?.canvas === canvas {
-                controller?.canvas = nil
-            }
-            canvas.removeFromSuperview()
+            release(canvas)
             canvases[id] = nil
         }
         let contentViewport = CGRect(origin: scrollView.contentOffset, size: bounds.size)
@@ -257,27 +312,66 @@ final class ContinuousCanvasView: UIView {
             let window = existing.flatMap { $0.isInking ? $0.frame : nil }
                 ?? ContinuousPageLayout.renderWindow(forPage: contentFrame(ofPage: i), viewport: contentViewport,
                                                      current: existing?.frame, keepingSize: pinching)
-            let canvas = existing ?? makeCanvas(for: page, frame: window)
+            let canvas = existing ?? canvas(for: page, frame: window)
             if canvas.frame != window {
                 canvas.frame = window
             }
+            // The column at zoom 1 is what zooming back out returns to: its tiles are kept while zoomed.
+            canvas.restingScaleOverride = layout.scale
+            canvas.isAhead = !visible.contains(i)
             canvas.place(transform(forPage: i, from: window.origin), settled: settled)
-            // A new or resized canvas makes its bitmap now, at the placement it was just given, so its
-            // first render already shows the page.
+            // A canvas new to its page or resized lays out now, at the placement it was just given, so its
+            // first layout of tiles already shows the page.
             canvas.layoutIfNeeded()
         }
         updatePaperLayers(for: visible.filter { !liveIDs.contains(pages[$0].id) })
         updateCurrentPage(in: viewport)
     }
 
-    private func makeCanvas(for page: CanvasDocument, frame: CGRect) -> CanvasView {
-        let canvas = CanvasView(frame: frame, document: page, embedded: true)
-        canvas.controller = controller
-        canvas.telemetry = telemetry
-        canvas.apply(theme)
-        pageContainer.addSubview(canvas)
+    /// A canvas for `page`: a spare one handed the page, or a new one while the pool isn't full yet.
+    private func canvas(for page: CanvasDocument, frame: CGRect) -> CanvasView {
+        let canvas: CanvasView
+        if let spare = spareCanvases.popLast() {
+            canvas = spare
+            canvas.frame = frame
+            canvas.show(page)
+        } else {
+            canvas = CanvasView(frame: frame, document: page, embedded: true)
+            canvasesMade += 1
+            canvas.controller = controller
+            canvas.telemetry = telemetry
+            canvas.apply(theme)
+            pageContainer.addSubview(canvas)
+        }
         canvases[page.id] = canvas
         return canvas
+    }
+
+    /// `canvas`'s page left view: it leaves its tiles with the page and waits, hidden, for the next page.
+    private func release(_ canvas: CanvasView) {
+        if controller?.canvas === canvas {
+            controller?.canvas = nil
+        }
+        canvas.leavePage()
+        if spareCanvases.count < Self.maxLiveCanvases {
+            spareCanvases.append(canvas)
+        } else {
+            canvas.removeFromSuperview()
+        }
+    }
+
+    /// Follows the scroll's speed while it moves; a jump (`scroll(toPage:animated: false)`, a relayout)
+    /// or a stop resets it.
+    private func trackScrollVelocity() {
+        let now = CACurrentMediaTime(), y = viewportInLayout.minY
+        defer { lastScrollSample = (y, now) }
+        guard isMoving, !scrollView.isZooming, let last = lastScrollSample, now > last.time, now - last.time < 0.1
+        else {
+            scrollVelocity = 0
+            return
+        }
+        let measured = (y - last.y) / CGFloat(now - last.time)
+        scrollVelocity = scrollVelocity * 0.5 + measured * 0.5
     }
 
     private func updatePaperLayers(for indices: [Int]) {
@@ -451,7 +545,7 @@ final class ContinuousCanvasView: UIView {
         let fingerDraws = (controller?.pencilSettings.fingerDrawing ?? .system)
             .fingerDraws(pencilOnlySystemSetting: UIPencilInteraction.prefersPencilOnlyDrawing)
         scrollView.panGestureRecognizer.minimumNumberOfTouches = fingerDraws ? 2 : 1 // one finger draws
-        for canvas in canvases.values {
+        for canvas in canvases.values + spareCanvases {
             canvas.pencilSettingsDidChange()
         }
     }
@@ -478,6 +572,7 @@ extension ContinuousCanvasView: UIScrollViewDelegate {
     }
 
     func scrollViewDidScroll(_: UIScrollView) {
+        trackScrollVelocity()
         setNeedsLayout()
         layoutIfNeeded()
     }
@@ -514,6 +609,7 @@ extension ContinuousCanvasView: UIScrollViewDelegate {
     /// Movement stopped: draw the pages in view sharp where they are.
     private func settle() {
         guard !isMoving else { return }
+        scrollVelocity = 0
         updateVisiblePages(settled: true)
     }
 }

@@ -4,11 +4,11 @@ import Foundation
 /// Pixel eraser splits: cutting the ink strokes a pixel-eraser stroke severs into separate strokes.
 extension CanvasView {
     /// Ink strokes that `eraser` (about to be appended on top) cuts clean through, with their pieces.
-    /// Only strokes overlapping the eraser are examined. Coverage is the union of every pixel eraser
+    /// Only strokes the page's index finds near the eraser are examined. Coverage is the union of every pixel eraser
     /// above each stroke that overlaps it, so two partial erases that together sever a line count too.
     /// `hulls` are the eraser's own, reused from its `LiveStroke` (identical to a fresh build once it ended).
     func splits(cutBy eraser: Stroke, hulls eraserOwnHulls: [Hull]) -> [CanvasDocument.Split] {
-        let eraserBounds = geometry(for: eraser).bounds
+        let eraserBounds = coordinator.bounds(of: eraser)
         guard !eraserBounds.isNull else { return [] }
         let strokes = document.strokes
         var eraserHulls: [UUID: [Hull]] = [eraser.id: eraserOwnHulls]
@@ -22,13 +22,15 @@ extension CanvasView {
         }
 
         var splits: [CanvasDocument.Split] = []
-        for (index, stroke) in strokes.enumerated() where !stroke.brush.erases {
-            let bounds = geometry(for: stroke).bounds
+        for index in document.strokeIndices(in: eraserBounds) where !strokes[index].brush.erases {
+            let stroke = strokes[index]
+            let bounds = coordinator.bounds(of: stroke)
             guard bounds.intersects(eraserBounds) else { continue }
             let region = bounds.insetBy(dx: -1, dy: -1)
             var coverage = StrokeSplitter.Coverage()
-            for other in strokes[(index + 1)...] where other.brush.erases
-                && geometry(for: other).bounds.intersects(region) {
+            for above in document.strokeIndices(in: region) where above > index && strokes[above].brush.erases {
+                let other = strokes[above]
+                guard coordinator.bounds(of: other).intersects(region) else { continue }
                 coverage.add(hulls(of: other), within: region)
             }
             coverage.add(hulls(of: eraser), within: region)
@@ -78,39 +80,42 @@ extension CanvasView {
                            width: abs(from.x - point.x), height: abs(from.y - point.y))
             .insetBy(dx: -radius, dy: -radius)
 
-        var hits = Set<UUID>()
-        var cuts: [(id: UUID, pieces: [Stroke])] = []
+        // Positions in the page, from its index: only the strokes near the sweep are looked at.
+        var hits: [Int] = []
+        var cuts: [(position: Int, pieces: [Stroke])] = []
+        let strokes = document.strokes
         // Pixel-eraser strokes are invisible; removing them would resurrect ink, so they're skipped.
-        for stroke in document.strokes where session.target.erases(stroke.brush) {
-            let bounds = geometry(for: stroke).bounds
+        for i in document.strokeIndices(in: sweep) where session.target.erases(strokes[i].brush) {
+            let stroke = strokes[i]
+            let bounds = coordinator.bounds(of: stroke)
             guard bounds.intersects(sweep) else { continue }
             if session.isStandard {
                 if let pieces = StrokeSplitter.remainder(of: stroke, erasedFrom: from, to: point, radius: radius) {
-                    cuts.append((stroke.id, pieces))
+                    cuts.append((i, pieces))
                 }
                 continue
             }
             for k in 0 ... steps {
                 let t = CGFloat(k) / CGFloat(steps)
                 if StrokeRenderer.hitTest(stroke, bounds: bounds, point: from + (point - from) * t, radius: radius) {
-                    hits.insert(stroke.id)
+                    hits.append(i)
                     break
                 }
             }
         }
+        // Removed and cut strokes keep their geometry: they don't change (the pieces are new strokes), and
+        // undoing the erase brings them back as they were.
+        let changed = Set(hits.map { strokes[$0].id } + cuts.map { strokes[$0.position].id })
         if !hits.isEmpty {
-            for id in hits {
-                forgetGeometry(id)
-            }
-            session.removals += document.remove(ids: hits)
+            session.removals += document.remove(at: hits)
         }
-        for cut in cuts {
-            forgetGeometry(cut.id)
-            document.replace(id: cut.id, with: cut.pieces)
+        // Last first, so cutting one doesn't move the others.
+        for cut in cuts.reversed() {
+            document.replace(at: cut.position, with: cut.pieces)
         }
-        if !hits.isEmpty || !cuts.isEmpty {
-            dropOrphanedPendingStrokes()
-            requestFullRender()
+        if !changed.isEmpty {
+            dropOrphanedPendingStrokes(removed: changed)
+            coordinator.invalidateAll()
         }
         session.last = point
         eraseSession = session

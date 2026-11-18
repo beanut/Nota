@@ -85,7 +85,7 @@ struct CanvasImageTests {
         canvas.beginImageCrop(.rectangle)
         let crop = try #require(canvas.imageCropView)
         #expect(controller.imageCrop == ImageCropState(mode: .rectangle, isCropped: false))
-        #expect(!canvas.objectLayer.objects.contains { $0.id == original.id }) // the crop view shows it
+        #expect(!canvas.document.objectTileHistory.objects.contains { $0.id == original.id }) // the crop view shows it
         crop.drag(ImageCropGeometry.Grip(x: 1, y: 1), by: CGVector(dx: -0.5, dy: -0.5))
         #expect(controller.imageCrop?.isCropped == true)
         controller.finishImageCrop(commit: true)

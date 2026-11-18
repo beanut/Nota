@@ -390,7 +390,7 @@ private final class PageThumbnail: ObservableObject {
 }
 
 /// Recently drawn page thumbnails, shared by every sidebar, so scrolling back up doesn't draw them again.
-/// Renders run two at a time off the main thread.
+/// Renders run off the main thread as background jobs on the render scheduler, at most two at once.
 @MainActor
 final class PageThumbnailCache {
     static let shared = PageThumbnailCache()
@@ -413,13 +413,6 @@ final class PageThumbnailCache {
     }
 
     private let images = NSCache<KeyBox, UIImage>()
-    private let queue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.name = "InkKit.pageThumbnails"
-        queue.maxConcurrentOperationCount = 2
-        queue.qualityOfService = .utility
-        return queue
-    }()
 
     init() {
         images.countLimit = 150
@@ -432,16 +425,14 @@ final class PageThumbnailCache {
     func render(_ snapshot: PageSnapshot, key: Key, palette: PaperPalette,
                 completion: @escaping @MainActor (UIImage?) -> Void) {
         let width = PageThumbnail.pixelWidth
-        queue.addOperation { [weak self] in
-            let cgImage = PageRenderer.image(of: snapshot, pixelWidth: width) { _ in palette }
-            let image = cgImage.map { UIImage(cgImage: $0) }
-            Task { @MainActor in
-                if let image {
-                    self?.images.setObject(image, forKey: KeyBox(key))
-                }
-                completion(image)
+        RenderScheduler.shared.submit(RenderJob(priority: .background, work: { _ in
+            PageRenderer.image(of: snapshot, pixelWidth: width) { _ in palette }.map { UIImage(cgImage: $0) }
+        }, publish: { [weak self] (image: UIImage?) in
+            if let image {
+                self?.images.setObject(image, forKey: KeyBox(key))
             }
-        }
+            completion(image)
+        }))
     }
 
     private final class KeyBox: NSObject {

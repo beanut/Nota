@@ -41,7 +41,7 @@ Nota/
 ├── Config/Nota-Info.plist    Info.plist keys the build settings can't express (merged with the generated one)
 └── Packages/
     ├── InkKit/               Drawing engine: input, brushes, rendering, pages, editor view
-    ├── NotaCore/             Domain: Note, Folder, library filters and sorting, DocumentStore, note package + manifest, sample data
+    ├── NotaCore/             Domain: Note, Folder, library filters and sorting, DocumentStore, note package + manifest, kept page tiles (PageTileCache), sample data
     ├── NotaDocuments/        Cover thumbnails and paper templates (PDF and import/export later)
     └── NotaUI/               Design system: tokens, icons, shared controls
 ```
@@ -134,6 +134,24 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
   isn't saved. Pages load a whole note at a time (decoded off the main thread); the 8 most recent notes stay
   in memory. Vertical scrolling draws only the pages in view, but a note's pages are still all read when it
   opens.
+- Pages' drawn ink tiles are kept between launches (NOT-106) in `Library/Caches/PageTiles/<note>/<page>.tiles`,
+  not in the package: they're derived data, never needed to open a note, so they aren't backed up, synced or
+  exported (a dense page's are about 5 MB). Each file is keyed by the hash of the page's saved `.ink` file and
+  InkKit's renderer version; anything stale, damaged or from another renderer is deleted and the page drawn
+  again. `PageTileCache` writes them on its own queue (atomic temp + rename, like `PackageFiles`), not
+  `DocumentStore`'s, so they never hold up a save. They're capped at 256 MB, dropping the least recently opened
+  notes' first, and the system may purge them. Tiles are left when a page's canvas goes away or the app goes to
+  the background, and kept only once the ink they show is saved, so a page the app was killed on (before the
+  background save landed) draws from scratch next launch. One resting level is kept per page: switching between
+  paged and continuous scrolling (different zooms) or resizing the window fills the page again. The first view
+  of a page ever is still drawn from scratch (about 2 s for 5k strokes on the simulator).
+- The canvas (M1.5's tiled render path) has only been measured on the simulator, on synthetic Pencil input; no
+  budget is confirmed on a physical iPad yet. There, on the 5k-stroke benchmark page, some things are still
+  bounded by Core Graphics drawing strokes and over budget: an undo (~45 ms against 16), a stroke-eraser sweep
+  through dense ink (~0.5 s, as it refills ~1,000 strokes' worth of tiles), ink going sharp after a pinch to a new zoom level (~0.2 s), and a
+  page shown for the very first time (~2 s; afterwards its kept tiles open it in milliseconds). A finished
+  stroke is handed from the live layer to the tiles only at the zoom it was written at; other cached levels
+  draw it again. Metal tile fills (NOT-111) were deferred.
 - A note's cover is re-rendered when its editor closes, so a note whose editor was open when the app was
   killed shows its previous cover until it's next opened and closed.
 - The library index (SwiftData) is rebuilt from packages at launch if notes are missing from it, with title,
@@ -187,5 +205,5 @@ InkKit's performance benchmarks and latency budgets (page open under 150 ms for 
 
 ## Next steps
 
-1. Real thumbnails from the committed bitmap.
+1. Verify the canvas on a physical iPad with Apple Pencil (NOT-12, and NOT-112's on-device checklist).
 2. PDF import and annotation.

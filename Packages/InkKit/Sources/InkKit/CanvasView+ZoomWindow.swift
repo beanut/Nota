@@ -8,7 +8,7 @@ import UIKit
 /// the line, and at the end of the line on to the next (`ZoomWindow`).
 ///
 /// The panel shows the box's ink the way the canvas shows the page's: a committed image, rendered off the
-/// main thread whenever the page's committed bitmap changes, under a live layer for the stroke being written.
+/// main thread whenever the page's committed tiles change, under a live layer for the stroke being written.
 extension CanvasView {
     /// Space between the panel and the page above it, and the panel's inset from the sides.
     static let zoomPanelGap: CGFloat = 16
@@ -66,7 +66,8 @@ extension CanvasView {
             zoomTouch = nil
             zoomDrag = nil
             zoomGeneration &+= 1
-            zoomRenderQueue.async { [weak self] in self?.zoomBitmap = nil }
+            zoomShownGeneration = zoomGeneration // renders of the closed panel never land
+            coordinator.releaseSnapshots()
             controller?.zoomWindowDidChange(controlsFrame: nil, canGoBack: false)
         }
         pageMarginsDidChange()
@@ -177,14 +178,10 @@ extension CanvasView {
         }
     }
 
-    /// Renders the box's ink into the panel soon, once per run-loop turn and one render at a time.
+    /// Renders the box's ink into the panel soon, once per run-loop turn. Renders go through the render
+    /// scheduler, where a newer one supersedes one that hasn't started.
     func scheduleZoomRender() {
-        guard zoomPanel != nil else { return }
-        if zoomRenderInFlight {
-            zoomRenderRequested = true
-            return
-        }
-        guard !zoomRenderScheduled else { return }
+        guard zoomPanel != nil, !zoomRenderScheduled else { return }
         zoomRenderScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -196,66 +193,20 @@ extension CanvasView {
     private func renderZoomPanel() {
         guard let panel = zoomPanel, zoomWindow != nil else { return }
         zoomGeneration &+= 1
-        zoomRenderInFlight = true
         let generation = zoomGeneration
         let transform = panel.inkTransform
         let bounds = CGRect(origin: .zero, size: panel.inkFrame.size)
-        let scale = bitmapScale
-        let pixels = CGSize(width: (bounds.width * scale).rounded(.up), height: (bounds.height * scale).rounded(.up))
-        let visible = transform.toCanvas(bounds).insetBy(dx: -4, dy: -4)
-        // Only the strokes that reach the box. Geometry not cached yet is culled by its points.
-        let items: [CommittedRenderer.Item] = document.strokes.compactMap { stroke in
-            if let geometry = geometryCache[stroke.id] {
-                guard geometry.bounds.intersects(visible) else { return nil }
-                return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
-                                              geometry: geometry, stroke: nil)
-            }
-            guard Self.roughBounds(of: stroke).intersects(visible) else { return nil }
-            return CommittedRenderer.Item(id: stroke.id, brush: stroke.brush, color: stroke.color,
-                                          geometry: nil, stroke: stroke)
-        }
         let included = Set(zoomHeld.map { ObjectIdentifier($0) })
 
-        zoomRenderQueue.async { [weak self] in
-            guard let self else { return }
-            if zoomBitmap.map({ CGSize(width: $0.width, height: $0.height) }) != pixels {
-                zoomBitmap = CommittedRenderer.makeBitmap(pixelSize: pixels, scale: scale)
-            }
-            var image: CGImage?
-            if let ctx = zoomBitmap {
-                CommittedRenderer.render(items, into: ctx, bounds: bounds, transform: transform)
-                image = ctx.makeImage()
-            }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                zoomRenderInFlight = false
-                if generation == zoomGeneration, let panel = zoomPanel {
-                    panel.publish(image, transform: transform)
-                    if !included.isEmpty {
-                        zoomHeld.removeAll { included.contains(ObjectIdentifier($0)) }
-                        panel.liveView.invalidateAll()
-                    }
-                }
-                if zoomRenderRequested {
-                    zoomRenderRequested = false
-                    scheduleZoomRender()
-                }
+        coordinator.renderSnapshot(bounds: bounds, transform: transform) { [weak self] image, drawnAt in
+            guard let self, generation > zoomShownGeneration, let panel = zoomPanel else { return }
+            zoomShownGeneration = generation
+            panel.publish(image, transform: drawnAt)
+            if !included.isEmpty {
+                zoomHeld.removeAll { included.contains(ObjectIdentifier($0)) }
+                panel.liveView.invalidateAll()
             }
         }
-    }
-
-    /// A stroke's points' bounds grown by its widest nib: never smaller than its ink.
-    private static func roughBounds(of stroke: Stroke) -> CGRect {
-        guard let first = stroke.points.first?.location else { return .null }
-        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
-        for point in stroke.points {
-            minX = min(minX, point.location.x)
-            maxX = max(maxX, point.location.x)
-            minY = min(minY, point.location.y)
-            maxY = max(maxY, point.location.y)
-        }
-        let r = stroke.brush.maxWidth * 2
-        return CGRect(x: minX - r, y: minY - r, width: maxX - minX + 2 * r, height: maxY - minY + 2 * r)
     }
 
     // MARK: Cursor

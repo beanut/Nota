@@ -47,8 +47,29 @@ public struct InkPageFile: Equatable, Sendable {
     /// The version the file was written with (`currentVersion` for a file built in memory).
     public private(set) var version: Version
     /// The page's strokes in drawing order, including pixel-eraser strokes.
-    var strokes: [Stroke]
+    var strokes: [Stroke] {
+        didSet {
+            preparedIndex = nil
+        }
+    }
+
     var unknownRecords: [UnknownRecord]
+
+    /// The strokes' `StrokeIndex`, once `prepareIndex()` has built it (nil again if the strokes change).
+    private(set) var preparedIndex: StrokeIndex?
+
+    /// Builds the page's spatial index now, so `CanvasDocument(file:pageSize:)` takes it rather than
+    /// building it on the main actor. Call it where the file was decoded, off the main actor.
+    public mutating func prepareIndex() {
+        if preparedIndex == nil {
+            preparedIndex = StrokeIndex(strokes: strokes)
+        }
+    }
+
+    public static func == (a: InkPageFile, b: InkPageFile) -> Bool {
+        a.pageID == b.pageID && a.version == b.version && a.strokes == b.strokes
+            && a.unknownRecords == b.unknownRecords
+    }
 
     public var strokeCount: Int {
         strokes.count

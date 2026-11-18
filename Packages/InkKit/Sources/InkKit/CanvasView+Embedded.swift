@@ -22,24 +22,21 @@ extension CanvasView {
     /// has stopped, so the ink is drawn sharp at the new scale.
     func place(_ transform: ViewTransform, settled: Bool) {
         guard isEmbedded else { return }
+        placementMoving = !settled
         if transform != placement {
             placement = transform
             viewTransform = transform
-            updateCommittedLayerTransform()
             updatePageChrome()
             liveView.follow(viewTransform)
             updateLassoOverlay()
-            if !settled {
-                requestFullRender()
-            }
+        } else if settled {
+            updatePageChrome() // the template and objects, scaled while the scroll view moved, drawn sharp
         }
         if settled {
             liveView.settle(at: viewTransform)
-            // A render already on its way to this transform will show it; asking again only draws it twice.
-            if bitmapTransform != viewTransform || (!fullRenderInFlight && displayedTransform != viewTransform) {
-                requestFullRender()
-            }
         }
+        // Cached tiles are laid out at once; only missing ones are filled, and none mid-pinch.
+        coordinator.requestRender()
     }
 
     /// True while a stroke, erase or lasso is under way on the page, so the host doesn't scroll.

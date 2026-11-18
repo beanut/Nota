@@ -18,10 +18,10 @@ extension CanvasView {
         let ids = document.lastReshapedIDs
         guard !ids.isEmpty else { return }
         for id in ids {
-            forgetGeometry(id)
+            coordinator.forgetGeometry(id)
         }
-        // Moved strokes may still be waiting in `pending` with stale geometry; the full render redraws them.
-        dropPending(ids)
+        // Moved strokes may still be waiting in `pending` with stale geometry; their tiles are refilled where they moved.
+        coordinator.dropPending(ids)
         if !selection.isEmpty {
             updateSelectionBox()
         }
@@ -29,7 +29,7 @@ extension CanvasView {
 
     /// Fits a fresh box around the selection (see `SelectionGeometry.box`) and tells the controller.
     func updateSelectionBox() {
-        let strokeBounds = document.strokes.filter { selection.strokeIDs.contains($0.id) }.map { geometry(for: $0).bounds }
+        let strokeBounds = document.strokes.filter { selection.strokeIDs.contains($0.id) }.map { coordinator.bounds(of: $0) }
         let objects = document.objects.filter { selection.objectIDs.contains($0.id) }
         selectionBox = SelectionGeometry.box(strokeBounds: strokeBounds, objects: objects)
         // Only armed while there's something to drag out, so its long press never touches the ink path.
@@ -58,14 +58,14 @@ extension CanvasView {
         guard !selection.isEmpty else { return }
         let deleted = selection
         for id in deleted.strokeIDs {
-            forgetGeometry(id)
+            coordinator.forgetGeometry(id)
         }
         editDocument { document.delete(deleted) }
         select(.empty)
         dropOrphanedPendingStrokes()
         refreshObjects()
         if !deleted.strokeIDs.isEmpty {
-            requestFullRender()
+            coordinator.invalidateAll()
         }
     }
 
@@ -85,14 +85,15 @@ extension CanvasView {
         select(PageSelection(objectIDs: [object.id]))
     }
 
-    /// Every visible stroke as selection sees it, limited to those that may reach `region` (canvas space).
+    /// Every visible stroke as selection sees it, limited to those that may reach `region` (canvas space),
+    /// bottom first: the page's index finds them without looking at the rest.
     func strokeShapes(near region: CGRect) -> [SelectionGeometry.StrokeShape] {
-        document.strokes.compactMap { stroke in
+        document.strokes(in: region).compactMap { stroke in
             // Pixel-eraser strokes are invisible, so they're never selectable.
             guard !stroke.brush.erases else { return nil }
             let path = stroke.points.map(\.location)
             let radius = stroke.brush.maxWidth / 2
-            let bounds = geometryCache[stroke.id]?.bounds
+            let bounds = coordinator.geometry.cachedBounds(stroke.id)
                 ?? LassoGeometry.bounds(of: path).insetBy(dx: -radius, dy: -radius)
             guard bounds.intersects(region) else { return nil }
             return SelectionGeometry.StrokeShape(id: stroke.id, path: path, bounds: bounds, radius: radius)
@@ -104,9 +105,11 @@ extension CanvasView {
         (controller?.lassoFilter ?? .all).contains(.ink) ? strokeShapes(near: region) : []
     }
 
-    /// The objects the lasso may pick up: none when its filter leaves objects out.
-    var filteredObjects: [any PageObject] {
-        (controller?.lassoFilter ?? .all).contains(.objects) ? document.objects : []
+    /// The objects the lasso may pick up: none when its filter leaves objects out. With `region`, only
+    /// those whose bounds reach it (a lasso picks up nothing beyond its own bounds).
+    func filteredObjects(near region: CGRect? = nil) -> [any PageObject] {
+        guard (controller?.lassoFilter ?? .all).contains(.objects) else { return [] }
+        return region.map(document.objects(in:)) ?? document.objects
     }
 
     func handleLassoSample(_ p: CGPoint) {
@@ -119,8 +122,8 @@ extension CanvasView {
                 return
             }
             if let box = selectionBox, !selection.isEmpty, let handle = selectionHandle(at: p, box: box) {
-                // Dragging the selection or a handle transforms it. Pending strokes are redrawn by the full render.
-                dropPending(selection.strokeIDs)
+                // Dragging the selection or a handle transforms it. Pending strokes are refilled where they moved.
+                coordinator.dropPending(selection.strokeIDs)
                 lassoSession = .transforming(SelectionDrag(handle: handle, start: p, box: box,
                                                            session: document.beginTransform(selection)))
             } else {
@@ -158,11 +161,11 @@ extension CanvasView {
     /// Shows the drag's strokes and objects where it has put them.
     func preview(_ drag: SelectionDrag) {
         for stroke in drag.session.strokes {
-            forgetGeometry(stroke.id)
+            coordinator.forgetGeometry(stroke.id)
         }
         document.previewTransform(drag.session, by: drag.transform)
         if !drag.session.strokes.isEmpty {
-            requestFullRender()
+            coordinator.invalidateAll()
         }
         if !drag.session.objects.isEmpty {
             refreshObjects()
@@ -184,7 +187,7 @@ extension CanvasView {
                 let tolerance = Self.tapSlop / inputTransform.scale
                 let near = CGRect(origin: first, size: .zero).insetBy(dx: -tolerance, dy: -tolerance)
                 let hit = SelectionGeometry.hitTest(first, tolerance: tolerance, strokes: filteredStrokeShapes(near: near),
-                                                    objects: filteredObjects)
+                                                    objects: filteredObjects())
                 select(hit ?? .empty)
                 if hit != nil {
                     showSelectionMenu()
@@ -195,23 +198,24 @@ extension CanvasView {
             }
             guard let polygon = LassoGeometry.region(mode: controller.lassoMode, points: pts) else { return }
             // Whole strokes and objects are selected even if only part of them is inside the region.
-            select(SelectionGeometry.select(in: polygon,
-                                            strokes: filteredStrokeShapes(near: LassoGeometry.bounds(of: polygon)),
-                                            objects: filteredObjects))
+            let region = LassoGeometry.bounds(of: polygon)
+            select(SelectionGeometry.select(in: polygon, strokes: filteredStrokeShapes(near: region),
+                                            objects: filteredObjects(near: region)))
             showSelectionMenu()
         case let .transforming(drag)?:
             if commit {
                 editDocument { document.commitTransform(drag.session, by: drag.transform) }
+                refreshObjects() // the objects go back into their tiles, where they were put
                 // The box turns and stretches with what it holds.
                 selectionBox = drag.box.applying(drag.transform)
                 showSelectionMenu()
             } else {
                 document.cancelTransform(drag.session)
                 for stroke in drag.session.strokes {
-                    forgetGeometry(stroke.id)
+                    coordinator.forgetGeometry(stroke.id)
                 }
                 if !drag.session.strokes.isEmpty {
-                    requestFullRender()
+                    coordinator.invalidateAll()
                 }
                 refreshObjects()
                 selectionBox = drag.box
